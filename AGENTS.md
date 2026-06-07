@@ -5,7 +5,7 @@
 - 项目名称：媒体下载管理系统
 - 主要能力：抖音作品下载、作者订阅检查、任务管理、媒体预览、X/Twitter 下载链路
 - 后端技术栈：FastAPI、SQLAlchemy 2.x、PostgreSQL、Redis、Celery
-- 前端形态：单页静态界面，核心文件位于 `static/index.html`
+- 前端形态：Web 界面资源位于 `static/`，可包含 HTML、CSS、JavaScript 等浏览器端资源与动态渲染逻辑，不限定为单页静态页面
 
 ## Repo Layout
 
@@ -23,10 +23,11 @@
 
 - 当前本地工作区 `.venv` 可能是 Python 3.14，完整运行验证会受到 `sqlalchemy==2.0.25` 兼容性限制。
 - 本地开发与服务端部署优先使用 Python 3.11 或 3.12。
+- 当前部署环境实际使用 PostgreSQL；代码层仍保留 MySQL 配置支持，但不是当前项目的实际部署数据库。
 - 所有测试文件、测试脚本、测试工作流只允许留存在本地，并且必须加入 git ignore；不得提交到 git 记录，不得上传到服务端。
 - git 记录只保留生产运行所需程序与配置，内容应优先适配生产环境，而不是本地开发或 CI 验证环境。
 - 临时测试文件只允许用于当次验证，验证完成后必须删除，不得保留在仓库中。
-- 前端是单文件页面，`static/index.html` 的 CSS/JS 回归会直接影响首页展示与交互。
+- 当前首页入口由应用返回 `static/index.html`；涉及 `static/` 下 HTML、CSS、JS 资源的改动都可能影响页面展示与交互。
 
 ## Deployment Target Placeholders
 
