@@ -1,0 +1,179 @@
+"""
+作品管理 API 路由
+
+为什么这样设计：
+1. 提供作品级管理能力：删除（单个/批量）、图集单文件删除、重新下载、重试失败
+2. 删除统一走 app.services.work_manager，保证级联清理磁盘文件/任务/历史并防止订阅重下
+3. 重新下载/重试复用 download_single_file Celery 任务，URL 过期会在任务内自动刷新
+"""
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from typing import List
+
+from app.models.database import get_async_db
+from app.models.models import Work, DownloadTask
+from app.models.schemas import MessageResponse
+from app.services import work_manager
+from app.tasks.download_tasks import download_single_file
+from app.core import redis_client
+
+router = APIRouter(prefix="/works", tags=["作品管理"])
+
+
+class BatchDeleteWorksRequest(BaseModel):
+    work_ids: List[int] = Field(default_factory=list)
+
+
+async def _load_work_with_tasks(db: AsyncSession, work_id: int) -> Work:
+    result = await db.execute(
+        select(Work)
+        .options(selectinload(Work.download_tasks))
+        .where(Work.id == work_id)
+    )
+    work = result.scalar_one_or_none()
+    if not work:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    return work
+
+
+@router.delete("/{work_id}", response_model=MessageResponse)
+async def delete_work(work_id: int, db: AsyncSession = Depends(get_async_db)):
+    """删除单个作品：清理磁盘文件 + 任务 + 历史，并标记排除防止订阅重下。"""
+    work = await _load_work_with_tasks(db, work_id)
+    stats = await work_manager.delete_work(db, work)
+    await db.commit()
+    return MessageResponse(
+        success=True,
+        message=f"作品已删除（清理 {stats['removed_files']} 个文件、{stats['removed_tasks']} 个任务）",
+        data=stats,
+    )
+
+
+@router.post("/batch-delete", response_model=MessageResponse)
+async def batch_delete_works(
+    payload: BatchDeleteWorksRequest,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """批量删除作品（多选）。"""
+    work_ids = [int(i) for i in (payload.work_ids or [])]
+    if not work_ids:
+        raise HTTPException(status_code=400, detail="未提供要删除的作品")
+
+    result = await db.execute(
+        select(Work)
+        .options(selectinload(Work.download_tasks))
+        .where(Work.id.in_(work_ids))
+    )
+    works = result.scalars().all()
+
+    deleted = 0
+    removed_files = 0
+    removed_tasks = 0
+    for work in works:
+        stats = await work_manager.delete_work(db, work)
+        deleted += 1
+        removed_files += stats["removed_files"]
+        removed_tasks += stats["removed_tasks"]
+
+    await db.commit()
+    return MessageResponse(
+        success=True,
+        message=f"已删除 {deleted} 个作品（清理 {removed_files} 个文件、{removed_tasks} 个任务）",
+        data={"deleted": deleted, "removed_files": removed_files, "removed_tasks": removed_tasks},
+    )
+
+
+@router.delete("/{work_id}/files/{file_index}", response_model=MessageResponse)
+async def delete_work_file(
+    work_id: int,
+    file_index: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """删除图集作品中的单个文件。"""
+    work = await _load_work_with_tasks(db, work_id)
+    if work.work_type != "images":
+        raise HTTPException(status_code=400, detail="仅图集作品支持单文件删除")
+    stats = await work_manager.delete_work_file(db, work, file_index)
+    await db.commit()
+    return MessageResponse(
+        success=True,
+        message=f"已删除第 {file_index + 1} 个文件",
+        data=stats,
+    )
+
+
+@router.post("/{work_id}/redownload", response_model=MessageResponse)
+async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)):
+    """重新下载作品：清除排除标记，重建缺失任务并分发（已完成文件保留）。"""
+    work = await _load_work_with_tasks(db, work_id)
+
+    # 清除作品级与文件级排除标记
+    work.is_excluded = False
+    work.excluded_at = None
+    work.excluded_file_indices = []
+
+    existing = {(t.file_index or 0): t for t in (work.download_tasks or [])}
+
+    if work.work_type == "video":
+        needed_indices = [0]
+    else:
+        count = max(int(work.image_count or 0), len(work.image_urls or []))
+        needed_indices = list(range(count)) if count > 0 else [0]
+
+    dispatch_ids: List[int] = []
+    for idx in needed_indices:
+        task = existing.get(idx)
+        if task is None:
+            task = DownloadTask(work_id=work.id, file_index=idx, status="pending")
+            db.add(task)
+            await db.flush()
+            dispatch_ids.append(task.id)
+        elif task.status != "completed":
+            task.status = "pending"
+            task.error_message = None
+            redis_client.delete_progress(task.id)
+            dispatch_ids.append(task.id)
+
+    await db.commit()
+
+    for tid in dispatch_ids:
+        download_single_file.delay(tid)
+
+    return MessageResponse(
+        success=True,
+        message=f"已提交 {len(dispatch_ids)} 个下载任务",
+        data={"dispatched": len(dispatch_ids)},
+    )
+
+
+@router.post("/{work_id}/retry-failed", response_model=MessageResponse)
+async def retry_work_failed(work_id: int, db: AsyncSession = Depends(get_async_db)):
+    """重试该作品下所有失败/取消的任务。"""
+    work = await _load_work_with_tasks(db, work_id)
+
+    failed_tasks = [
+        t for t in (work.download_tasks or [])
+        if t.status in ("failed", "cancelled")
+    ]
+    if not failed_tasks:
+        return MessageResponse(success=True, message="该作品没有失败任务", data={"count": 0})
+
+    for task in failed_tasks:
+        task.status = "pending"
+        task.error_message = None
+        redis_client.delete_progress(task.id)
+
+    await db.commit()
+
+    for task in failed_tasks:
+        download_single_file.delay(task.id)
+
+    return MessageResponse(
+        success=True,
+        message=f"已重新提交 {len(failed_tasks)} 个失败任务",
+        data={"count": len(failed_tasks)},
+    )

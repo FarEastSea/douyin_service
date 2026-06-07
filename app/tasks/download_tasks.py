@@ -1,0 +1,1000 @@
+"""
+Celery 下载任务
+
+为什么这样设计：
+1. download_single_file: 单个文件下载任务，支持暂停/恢复
+2. download_author_works: 批量下载作者所有作品
+3. check_subscriptions: 定时检查订阅作者的新作品
+4. 任务执行时更新数据库状态,便于查询
+5. 使用日志记录详细的错误信息,便于调试
+"""
+
+from celery import shared_task
+from datetime import datetime
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+import time
+import logging
+import traceback
+
+from app.tasks.celery_app import celery_app
+from app.models.database import get_sync_db, init_db_sync
+from app.models.models import Author, Work, DownloadTask, DownloadHistory, SystemConfig
+from app.services.downloader import (
+    DouyinDownloader,
+    is_video_work_payload,
+    latest_video_url,
+    payload_image_urls,
+)
+from app.core import redis_client
+from app.core.config import settings
+from app.core.runtime_config import get_runtime_config_sync
+
+# 配置日志
+import os
+logs_dir = 'logs'
+if not os.path.exists(logs_dir):
+    os.makedirs(logs_dir)
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:  # 避免重复添加handler
+    logger.setLevel(logging.INFO)
+    # 文件handler
+    file_handler = logging.FileHandler('logs/download_tasks.log', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    # 控制台handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    # 格式化
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    # 添加handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+
+SUBSCRIPTION_CHECK_STATE_KEY = "runtime:last_subscription_check_at"
+SUBSCRIPTION_CHECK_LOCK_KEY = "douyin:subscription_check_lock"
+AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX = "__ACCOUNT_STATUS__"
+TERMINAL_AUTHOR_ACCOUNT_STATUSES = {"deleted", "banned", "restricted"}
+
+
+def build_author_account_status_marker(status_code: str, status_label: str, detail: str | None = None) -> str:
+    clean_detail = " ".join(str(detail or "").split())[:200]
+    payload = [AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX, status_code, status_label]
+    if clean_detail:
+        payload.append(clean_detail)
+    return "|".join(payload)
+
+
+def parse_author_account_status_marker(value: str | None) -> dict | None:
+    if not value or not value.startswith(f"{AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX}|"):
+        return None
+
+    parts = value.split("|", 3)
+    return {
+        "status_code": parts[1] if len(parts) > 1 else "unavailable",
+        "status_label": parts[2] if len(parts) > 2 else "状态异常",
+        "status_detail": parts[3] if len(parts) > 3 else None,
+    }
+
+
+def _parse_datetime(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _author_is_being_deleted(author_id: int, phase: str) -> bool:
+    """删除作者时，终止后续任务派生和执行。"""
+    if not redis_client.is_author_deleting(author_id):
+        return False
+
+    logger.warning(f"作者 {author_id} 正在删除，停止任务执行: phase={phase}")
+    try:
+        redis_client.append_activity_log(
+            "warning",
+            "task",
+            "作者删除进行中，已停止相关下载任务",
+            f"author_id={author_id}, phase={phase}",
+        )
+    except Exception:
+        pass
+    return True
+
+
+def _get_last_subscription_check_time(db: Session):
+    config = db.execute(
+        select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CHECK_STATE_KEY)
+    ).scalar_one_or_none()
+    return _parse_datetime(config.value) if config else None
+
+
+def _mark_subscription_check_started(db: Session):
+    now_text = datetime.now().isoformat(timespec="seconds")
+    config = db.execute(
+        select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CHECK_STATE_KEY)
+    ).scalar_one_or_none()
+    if config:
+        config.value = now_text
+    else:
+        db.add(SystemConfig(key=SUBSCRIPTION_CHECK_STATE_KEY, value=now_text))
+    db.commit()
+
+
+def get_cookie_from_db(db: Session) -> str:
+    """从数据库获取 Cookie"""
+    # 优先从 Redis 获取
+    cookie = redis_client.get_cookie()
+    if cookie:
+        return cookie
+    
+    # 从数据库获取
+    config = db.execute(
+        select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
+    ).scalar_one_or_none()
+    
+    if config:
+        # 缓存到 Redis
+        redis_client.set_cookie(config.value)
+        return config.value
+    
+    # 使用配置文件中的 Cookie
+    return settings.DOUYIN_COOKIE or ""
+
+
+def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing: bool = False) -> None:
+    work_type = "video" if is_video_work_payload(work_payload) else "images"
+    image_urls = payload_image_urls(work_payload)
+    video_url = latest_video_url(work_payload)
+
+    work.work_type = work_type
+
+    if work_type == "video":
+        work.image_count = 0
+        if video_url or not preserve_existing:
+            work.video_url = video_url
+        if not preserve_existing:
+            work.image_urls = []
+        return
+
+    if image_urls or not preserve_existing:
+        work.image_urls = image_urls
+        work.image_count = len(image_urls)
+    work.video_url = None
+
+
+def sync_author_profile(author: Author, downloader: DouyinDownloader) -> dict:
+    """同步作者基础资料，和订阅检查共用同一轮风控节奏。"""
+    profile = downloader.get_author_info(author.sec_uid)
+    old_nickname = author.nickname
+    old_avatar = author.avatar_url
+    old_share_url = author.share_url
+    old_last_error = author.last_error
+
+    nickname = profile.get("nickname")
+    avatar_url = profile.get("avatar_url")
+    profile_url = profile.get("profile_url") or DouyinDownloader.build_author_profile_url(author.sec_uid)
+    account_status = profile.get("account_status", "active")
+    account_status_label = profile.get("account_status_label", "正常")
+    account_status_detail = profile.get("account_status_detail")
+
+    if nickname and account_status == "active":
+        author.nickname = nickname
+    elif nickname and not author.nickname:
+        author.nickname = nickname
+
+    if avatar_url and account_status == "active":
+        author.avatar_url = avatar_url
+    if profile_url:
+        author.share_url = profile_url
+
+    if account_status in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
+        author.last_error = build_author_account_status_marker(
+            account_status,
+            account_status_label,
+            account_status_detail,
+        )
+    elif account_status == "active":
+        author.last_error = None
+
+    changed = (
+        (old_nickname != author.nickname)
+        or (old_avatar != author.avatar_url)
+        or (old_share_url != author.share_url)
+        or (old_last_error != author.last_error)
+    )
+    return {
+        "changed": changed,
+        "nickname": author.nickname,
+        "avatar_url": author.avatar_url,
+        "account_status": account_status,
+        "account_status_label": account_status_label,
+        "account_status_detail": account_status_detail,
+    }
+
+
+@celery_app.task(bind=True, name="app.tasks.download_tasks.download_single_file",
+                 max_retries=2, default_retry_delay=10)
+def download_single_file(self, task_id: int):
+    """
+    下载单个文件的 Celery 任务
+    
+    Args:
+        task_id: 数据库中的 DownloadTask ID
+    """
+    # ---- 顶层安全防护：任何异常都不能让 Worker 进程崩溃 ----
+    try:
+        _download_single_file_impl(self, task_id)
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {str(e)[:300]}"
+        logger.error(f"任务 {task_id} 顶层异常: {error_msg}\n{traceback.format_exc()}")
+        try:
+            redis_client.append_activity_log("error", "task",
+                f"❌ 任务异常: task_id={task_id}", error_msg)
+        except Exception:
+            pass
+        # 尝试标记数据库中任务为 failed
+        try:
+            db = get_sync_db()
+            task_obj = db.execute(
+                select(DownloadTask).where(DownloadTask.id == task_id)
+            ).scalar_one_or_none()
+            if task_obj and task_obj.status not in ("completed", "failed"):
+                task_obj.status = "failed"
+                task_obj.error_message = error_msg
+                db.commit()
+            db.close()
+        except Exception:
+            pass
+
+
+def _download_single_file_impl(self_task, task_id: int):
+    """download_single_file 的实际实现"""
+    redis_client.append_activity_log("info", "task",
+        f"⭐ download_single_file 启动", f"task_id={task_id}")
+    # 确保数据库表存在
+    init_db_sync()
+    
+    db = get_sync_db()
+    try:
+        # 获取任务信息
+        task = db.execute(
+            select(DownloadTask).where(DownloadTask.id == task_id)
+        ).scalar_one_or_none()
+
+        if not task:
+            logger.error(f"任务 {task_id} 不存在")
+            redis_client.append_activity_log("error", "task", f"任务不存在: task_id={task_id}")
+            return {"success": False, "error": "任务不存在"}
+
+        logger.info(f"开始下载任务 {task_id}")
+        redis_client.append_activity_log("info", "task", f"开始下载任务 {task_id}", f"work_id={task.work_id}, file_index={task.file_index}, status={task.status}")
+        
+        # 获取作品信息
+        work = db.execute(
+            select(Work).where(Work.id == task.work_id)
+        ).scalar_one_or_none()
+
+        if not work:
+            logger.error(f"任务 {task_id} 关联的作品 {task.work_id} 不存在")
+            return {"success": False, "error": "作品不存在"}
+        
+        # 获取作者信息
+        author = db.execute(
+            select(Author).where(Author.id == work.author_id)
+        ).scalar_one_or_none()
+
+        if not author:
+            logger.error(f"任务 {task_id} 关联的作者 {work.author_id} 不存在")
+            return {"success": False, "error": "作者不存在"}
+
+        if _author_is_being_deleted(author.id, "download_single_file"):
+            return {"success": False, "deleted": True, "error": "作者正在删除"}
+        
+        # 更新任务状态
+        task.status = "downloading"
+        task.celery_task_id = self_task.request.id
+        task.started_at = datetime.now()
+        db.commit()
+        
+        runtime_config = get_runtime_config_sync(db)
+
+        # 获取 Cookie 并创建下载器
+        cookie = get_cookie_from_db(db)
+        downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        
+        # 确定下载 URL 和文件路径
+        if work.work_type == "video":
+            url = work.video_url
+            file_path = downloader.build_file_path(
+                author.nickname or "未知作者",
+                work.title or "untitled",
+                work.aweme_id,
+                is_video=True
+            )
+        else:
+            # 图集
+            image_urls = work.image_urls
+            if task.file_index >= len(image_urls):
+                task.status = "failed"
+                task.error_message = "图片索引超出范围"
+                db.commit()
+                return {"success": False, "error": "图片索引超出范围"}
+            
+            url = image_urls[task.file_index]
+            file_path = downloader.build_file_path(
+                author.nickname or "未知作者",
+                work.title or "untitled",
+                work.aweme_id,
+                index=task.file_index + 1,
+                is_video=False
+            )
+        
+        # URL 有效性检测：抖音 URL 会过期，重试任务必须刷新
+        try:
+            head_res = downloader.session.head(url, timeout=10, allow_redirects=True)
+            if head_res.status_code in (403, 404, 410):
+                logger.info(f"任务 {task_id} - URL 已过期(HTTP {head_res.status_code})，刷新中...")
+                fresh = downloader.refresh_work_urls(work.aweme_id)
+                if work.work_type == "video":
+                    refreshed_video_url = latest_video_url(fresh)
+                    if refreshed_video_url:
+                        url = refreshed_video_url
+                        work.video_url = refreshed_video_url
+                else:
+                    image_urls = payload_image_urls(fresh)
+                    if image_urls and task.file_index < len(image_urls):
+                        url = image_urls[task.file_index]
+                        work.image_urls = image_urls
+                        work.image_count = len(image_urls)
+                db.commit()
+                logger.info(f"任务 {task_id} - URL 已刷新")
+        except Exception as e:
+            logger.warning(f"任务 {task_id} - URL 有效性检测失败: {e}，使用原 URL 继续")
+
+        task.file_path = file_path
+        task.file_name = file_path.split("/")[-1].split("\\")[-1]
+        db.commit()
+
+        logger.info(f"任务 {task_id} - 下载文件: {task.file_name}, URL: {url[:100]}...")
+        
+        # 定义进度回调（节流：每 5 秒才写一次数据库，减少数据库压力）
+        _last_db_commit = [time.time()]
+        def progress_callback(downloaded, total, speed):
+            task.downloaded_bytes = downloaded
+            task.total_bytes = total
+            task.download_speed = speed
+            now = time.time()
+            if now - _last_db_commit[0] >= 5:
+                try:
+                    db.commit()
+                except Exception as commit_err:
+                    logger.warning(f"任务 {task_id} 进度写入数据库失败: {commit_err}")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                _last_db_commit[0] = now
+        
+        # 定义暂停检查
+        def check_pause():
+            return redis_client.is_task_paused(task_id)
+        
+        # 执行下载
+        result = downloader.download_file_with_resume(
+            url=url,
+            file_path=file_path,
+            task_id=task_id,
+            progress_callback=progress_callback,
+            check_pause=check_pause
+        )
+        
+        if result.get("paused"):
+            task.status = "paused"
+            task.temp_file_path = result.get("temp_path")
+            db.commit()
+            logger.info(f"任务 {task_id} 已暂停, 已下载: {task.downloaded_bytes}/{task.total_bytes}")
+            return {"success": False, "paused": True}
+
+        if result.get("success"):
+            task.status = "completed"
+            task.completed_at = datetime.now()
+            task.downloaded_bytes = result["downloaded_bytes"]
+            task.total_bytes = result["total_bytes"]
+
+            # 创建历史记录
+            history = DownloadHistory(
+                task_id=task.id,
+                work_id=work.id,
+                author_nickname=author.nickname,
+                work_title=work.title,
+                file_path=file_path,
+                file_size=result["total_bytes"],
+                download_duration=result.get("duration", 0)
+            )
+            db.add(history)
+
+            # 更新作品下载状态
+            work.is_downloaded = True
+
+            # 更新作者统计
+            author.downloaded_works = (author.downloaded_works or 0) + 1
+
+            db.commit()
+
+            # 清理 Redis 进度
+            redis_client.delete_progress(task_id)
+
+            logger.info(f"任务 {task_id} 下载成功: {task.file_name}, 大小: {result['total_bytes']} bytes")
+            redis_client.append_activity_log("info", "task",
+                f"下载成功: {task.file_name}",
+                f"task_id={task_id}, size={result['total_bytes']} bytes")
+            return {"success": True, "file_path": file_path}
+        else:
+            error_msg = result.get("error", "未知错误")
+            task.status = "failed"
+            task.error_message = error_msg
+            task.retry_count = (task.retry_count or 0) + 1
+            db.commit()
+            logger.error(f"任务 {task_id} 下载失败: {error_msg}, 重试次数: {task.retry_count}")
+            redis_client.append_activity_log("error", "task",
+                f"下载失败: task_id={task_id}",
+                f"error={error_msg}, retry={task.retry_count}")
+            return {"success": False, "error": error_msg}
+    
+    except Exception as e:
+        # 记录详细的错误信息和堆栈跟踪
+        error_trace = traceback.format_exc()
+        logger.error(f"任务 {task_id} 发生异常:\n{error_trace}")
+        redis_client.append_activity_log("error", "task",
+            f"❌ 任务异常: task_id={task_id}",
+            f"{type(e).__name__}: {str(e)[:200]}")
+
+        # 更新任务状态为失败
+        try:
+            db.rollback()  # 先回滚可能存在的脏事务
+            task = db.execute(
+                select(DownloadTask).where(DownloadTask.id == task_id)
+            ).scalar_one_or_none()
+            if task:
+                task.status = "failed"
+                task.error_message = f"{type(e).__name__}: {str(e)[:200]}"
+                task.retry_count = (task.retry_count or 0) + 1
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"更新任务 {task_id} 失败状态时出错: {db_error}")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@celery_app.task(bind=True, name="app.tasks.download_tasks.download_author_works")
+def download_author_works(self, author_id: int, start_index: int = 1, download_new_only: bool = False):
+    """
+    下载作者所有作品
+    
+    Args:
+        author_id: 作者ID
+        start_index: 起始作品序号
+        download_new_only: 是否只下载新作品
+    """
+    init_db_sync()
+    db = get_sync_db()
+    
+    try:
+        # 获取作者信息
+        author = db.execute(
+            select(Author).where(Author.id == author_id)
+        ).scalar_one_or_none()
+        
+        if not author:
+            logger.error(f"下载作者作品失败: 作者ID {author_id} 不存在")
+            redis_client.append_activity_log("error", "task", f"作者不存在: author_id={author_id}")
+            return {"success": False, "error": "作者不存在"}
+
+        if _author_is_being_deleted(author_id, "download_author_works:start"):
+            return {"success": False, "deleted": True, "error": "作者正在删除"}
+        
+        logger.info(f"开始获取作者 {author.nickname}(ID:{author_id}) 的作品列表")
+        redis_client.append_activity_log("info", "task",
+            f"⭐ download_author_works 启动: {author.nickname}",
+            f"author_id={author_id}, sec_uid={author.sec_uid}, start_index={start_index}, download_new_only={download_new_only}")
+        
+        runtime_config = get_runtime_config_sync(db)
+
+        # 获取 Cookie 并创建下载器
+        cookie = get_cookie_from_db(db)
+        redis_client.append_activity_log("debug", "task",
+            f"Cookie 状态: {'\u5df2配置(' + str(len(cookie)) + '字符)' if cookie else '\u672a配置'}")
+        downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+
+        try:
+            profile_result = sync_author_profile(author, downloader)
+            if profile_result.get("changed"):
+                redis_client.append_activity_log(
+                    "info",
+                    "task",
+                    f"作者资料已同步: {author.nickname}",
+                    f"author_id={author_id}",
+                )
+
+            if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
+                author.last_check_time = datetime.now()
+                db.commit()
+                redis_client.append_activity_log(
+                    "warning",
+                    "task",
+                    f"跳过作者拉取: {author.nickname or f'作者{author_id}'}",
+                    f"author_id={author_id}, status={profile_result.get('account_status_label')}, detail={profile_result.get('account_status_detail') or ''}",
+                )
+                return {
+                    "success": True,
+                    "skipped": True,
+                    "reason": profile_result.get("account_status"),
+                    "status_label": profile_result.get("account_status_label"),
+                }
+        except Exception as profile_error:
+            logger.warning(f"作者 {author_id} 资料同步失败，继续作品拉取: {profile_error}")
+        
+        # 获取作品列表（直接传入 sec_uid，避免冗余请求触发限流）
+        redis_client.append_activity_log("info", "task",
+            f"正在调用抖音 API 获取作品列表...",
+            f"sec_uid={author.sec_uid}")
+        work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
+        redis_client.append_activity_log("info", "task",
+            f"获取到 {len(work_list)} 个作品: {author.nickname}",
+            f"author_id={author_id}")
+
+        if _author_is_being_deleted(author_id, "download_author_works:before_create"):
+            db.rollback()
+            return {"success": False, "deleted": True, "error": "作者正在删除"}
+        
+        if not work_list:
+            logger.warning(f"作者 {author.nickname}(ID:{author_id}) 获取到的作品列表为空，可能是 Cookie 过期或被限流")
+            redis_client.append_activity_log("warning", "task",
+                f"作品列表为空: {author.nickname}",
+                "可能原因: Cookie过期、被限流、或作者无作品")
+        
+        # 更新作者信息
+        if work_list:
+            author.total_works = len(work_list)
+            author.last_check_time = datetime.now()
+            if work_list[0]:
+                author.last_aweme_id = work_list[0].get("aweme_id")
+        
+        # 清除之前的错误信息（终止态标记已在资料同步阶段处理）
+        if not parse_author_account_status_marker(author.last_error):
+            author.last_error = None
+        
+        created_tasks = []
+        reused_tasks = []
+        
+        # 处理每个作品
+        for idx, item in enumerate(work_list[start_index - 1:], start=start_index):
+            if _author_is_being_deleted(author_id, "download_author_works:building_tasks"):
+                db.rollback()
+                return {"success": False, "deleted": True, "error": "作者正在删除"}
+
+            aweme_id = item["aweme_id"]
+            
+            # 检查作品是否已存在
+            existing_work = db.execute(
+                select(Work).where(Work.aweme_id == aweme_id)
+            ).scalar_one_or_none()
+            
+            if existing_work:
+                if download_new_only:
+                    continue
+                # 已被用户删除（排除）的作品：跳过，避免重新下载
+                if getattr(existing_work, "is_excluded", False):
+                    continue
+                work = existing_work
+                # 更新 URL（抖音 URL 会过期）
+                _apply_work_media_payload(work, item, preserve_existing=True)
+                work.title = item.get("desc", "") or work.title
+            else:
+                # 创建新作品记录
+                work = Work(
+                    aweme_id=aweme_id,
+                    author_id=author_id,
+                    title=item.get("desc", ""),
+                    work_type="video",
+                )
+                _apply_work_media_payload(work, item)
+                
+                db.add(work)
+                db.flush()
+            
+            # 创建或重用下载任务
+            if work.work_type == "video":
+                existing_task = db.execute(
+                    select(DownloadTask).where(
+                        DownloadTask.work_id == work.id,
+                        DownloadTask.file_index == 0
+                    )
+                ).scalar_one_or_none()
+                
+                if existing_task:
+                    if existing_task.status in ("failed", "cancelled"):
+                        # 重用失败/取消的任务
+                        existing_task.status = "pending"
+                        existing_task.error_message = None
+                        reused_tasks.append(existing_task.id)
+                    # completed/downloading/pending/paused 状态的任务跳过
+                else:
+                    task = DownloadTask(
+                        work_id=work.id,
+                        file_index=0,
+                        status="pending"
+                    )
+                    db.add(task)
+                    db.flush()
+                    created_tasks.append(task.id)
+            else:
+                # 图集：每张图片一个任务
+                excluded_indices = set(work.excluded_file_indices)
+                for img_idx in range(work.image_count):
+                    # 跳过用户单独删除的图集文件，避免重新下载
+                    if img_idx in excluded_indices:
+                        continue
+                    existing_task = db.execute(
+                        select(DownloadTask).where(
+                            DownloadTask.work_id == work.id,
+                            DownloadTask.file_index == img_idx
+                        )
+                    ).scalar_one_or_none()
+                    
+                    if existing_task:
+                        if existing_task.status in ("failed", "cancelled"):
+                            existing_task.status = "pending"
+                            existing_task.error_message = None
+                            reused_tasks.append(existing_task.id)
+                    else:
+                        task = DownloadTask(
+                            work_id=work.id,
+                            file_index=img_idx,
+                            status="pending"
+                        )
+                        db.add(task)
+                        db.flush()
+                        created_tasks.append(task.id)
+            
+            # 本地建任务轻微节流，避免一次性写入过猛；不使用反限流请求间隔。
+            time.sleep(min(float(runtime_config.get("douyin_request_delay", settings.REQUEST_DELAY)), 1.0))
+
+        if _author_is_being_deleted(author_id, "download_author_works:before_commit"):
+            db.rollback()
+            return {"success": False, "deleted": True, "error": "作者正在删除"}
+
+        db.commit()
+        
+        # 触发所有下载任务（新建的 + 重用的）
+        all_task_ids = created_tasks + reused_tasks
+        redis_client.append_activity_log("info", "task",
+            f"准备分发 {len(all_task_ids)} 个文件下载任务: {author.nickname}",
+            f"task_ids={all_task_ids[:20]}{'...' if len(all_task_ids) > 20 else ''}")
+
+        if _author_is_being_deleted(author_id, "download_author_works:before_dispatch"):
+            return {"success": False, "deleted": True, "error": "作者正在删除"}
+
+        for tid in all_task_ids:
+            download_single_file.delay(tid)
+        
+        logger.info(f"作者 {author.nickname}(ID:{author_id}) 作品处理完成: "
+                     f"总作品 {len(work_list)}, 新建任务 {len(created_tasks)}, 重用任务 {len(reused_tasks)}")
+        redis_client.append_activity_log("info", "task",
+            f"✅ 作品处理完成: {author.nickname}",
+            f"总作品={len(work_list)}, 新建={len(created_tasks)}, 重用={len(reused_tasks)}, 下载分发={len(all_task_ids)}")
+        
+        return {
+            "success": True,
+            "total_works": len(work_list),
+            "created_tasks": len(created_tasks),
+            "reused_tasks": len(reused_tasks),
+            "task_ids": all_task_ids
+        }
+    
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {str(e)[:200]}"
+        logger.error(f"下载作者 {author_id} 作品时出错: {error_msg}\n{traceback.format_exc()}")
+        redis_client.append_activity_log("error", "task",
+            f"下载作者作品失败: author_id={author_id}",
+            error_msg)
+        # 将错误记录到 Author，以便前端展示
+        try:
+            author = db.execute(
+                select(Author).where(Author.id == author_id)
+            ).scalar_one_or_none()
+            if author:
+                author.last_error = error_msg
+                db.commit()
+            else:
+                db.rollback()
+        except Exception:
+            db.rollback()
+        return {"success": False, "error": error_msg}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.download_tasks.check_subscriptions")
+def check_subscriptions(force: bool = False):
+    """
+    检查所有订阅的作者是否有新作品
+    
+    定时任务，由 Celery Beat 调度执行
+    """
+    init_db_sync()
+    db = get_sync_db()
+    
+    try:
+        runtime_config = get_runtime_config_sync(db)
+        if not runtime_config.get("auto_check_enabled", True):
+            redis_client.append_activity_log(
+                "info",
+                "task",
+                "订阅自动检查已跳过",
+                "设置页已关闭自动检查",
+            )
+            return {"success": True, "skipped": True, "reason": "auto_check_disabled"}
+
+        global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
+        author_delay = float(runtime_config.get("author_check_delay", settings.AUTHOR_CHECK_DELAY))
+
+        if not force:
+            last_check_time = _get_last_subscription_check_time(db)
+            if last_check_time:
+                elapsed = (datetime.now() - last_check_time).total_seconds()
+                if elapsed < global_interval:
+                    return {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "global_interval",
+                        "next_check_seconds": int(global_interval - elapsed),
+                    }
+
+            try:
+                acquired = redis_client.redis_client.set(
+                    SUBSCRIPTION_CHECK_LOCK_KEY,
+                    datetime.now().isoformat(timespec="seconds"),
+                    nx=True,
+                    ex=max(global_interval, settings.MIN_CHECK_INTERVAL),
+                )
+                if not acquired:
+                    return {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "global_lock",
+                    }
+            except Exception:
+                pass
+
+            # 在真正请求抖音前就标记本轮已开始，失败也进入全局冷却。
+            _mark_subscription_check_started(db)
+
+        # 获取所有订阅的作者
+        authors = db.execute(
+            select(Author).where(Author.is_subscribed == True)
+        ).scalars().all()
+        
+        results = []
+        skipped_count = 0
+        checked_count = 0
+        
+        for author in authors:
+            # 检查是否到达检查时间
+            if author.last_check_time:
+                elapsed = (datetime.now() - author.last_check_time).total_seconds()
+                effective_interval = max(int(author.check_interval or 0), global_interval, settings.MIN_CHECK_INTERVAL)
+                if elapsed < effective_interval:
+                    skipped_count += 1
+                    continue
+            
+            checked_count += 1
+            try:
+                # 获取 Cookie 并创建下载器
+                cookie = get_cookie_from_db(db)
+                downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+
+                profile_result = sync_author_profile(author, downloader)
+
+                if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
+                    author.last_check_time = datetime.now()
+                    db.commit()
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "account_status": profile_result.get("account_status"),
+                        "status_label": profile_result.get("account_status_label"),
+                        "skipped": True,
+                    })
+                    if author_delay > 0:
+                        time.sleep(author_delay)
+                    continue
+                
+                # 获取最新作品（传入 sec_uid 避免冗余请求）
+                work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
+                
+                if not work_list:
+                    author.last_check_time = datetime.now()
+                    author.last_error = "作品列表为空，可能是 Cookie 过期、被限流或作者暂无作品"
+                    db.commit()
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "warning": author.last_error,
+                    })
+                    if author_delay > 0:
+                        time.sleep(author_delay)
+                    continue
+                
+                # 检查是否有新作品
+                new_works = []
+                for item in work_list:
+                    if item["aweme_id"] == author.last_aweme_id:
+                        break
+                    new_works.append(item)
+                
+                if new_works:
+                    # 触发下载新作品
+                    result = download_author_works.delay(
+                        author.id,
+                        start_index=1,
+                        download_new_only=True
+                    )
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "new_works": len(new_works),
+                        "task_id": result.id
+                    })
+                elif profile_result.get("changed"):
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "avatar_synced": True,
+                    })
+                
+                # 更新检查时间
+                author.last_check_time = datetime.now()
+                author.total_works = len(work_list)
+                if work_list:
+                    author.last_aweme_id = work_list[0]["aweme_id"]
+                author.last_error = None
+                db.commit()
+                
+            except Exception as e:
+                error_msg = str(e)
+                author.last_check_time = datetime.now()
+                author.last_error = error_msg[:1000]
+                db.commit()
+                logger.warning(
+                    f"订阅检查失败: author_id={author.id}, nickname={author.nickname}, error={error_msg}"
+                )
+                redis_client.append_activity_log(
+                    "warning",
+                    "task",
+                    f"订阅检查失败: {author.nickname or author.id}",
+                    error_msg[:500],
+                )
+                results.append({
+                    "author_id": author.id,
+                    "nickname": author.nickname,
+                    "error": error_msg
+                })
+
+                # 疑似限流时停止本轮批量检查，避免连续请求扩大限制。
+                if any(token in error_msg for token in ("限流", "非 JSON", "空响应", "服务异常")):
+                    redis_client.append_activity_log(
+                        "warning",
+                        "task",
+                        "疑似触发抖音限流，本轮订阅检查提前停止",
+                        f"author_id={author.id}, error={error_msg[:300]}",
+                    )
+                    break
+            
+            # 请求间隔
+            if author_delay > 0:
+                time.sleep(author_delay)
+        
+        return {
+            "success": True,
+            "checked": checked_count,
+            "skipped": skipped_count,
+            "results": results,
+        }
+    
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.download_tasks.detect_stuck_tasks")
+def detect_stuck_tasks():
+    """
+    检测卡住的下载任务：状态为 downloading 但长时间无进度更新。
+    由 Celery Beat 每 5 分钟调度一次。
+    """
+    init_db_sync()
+    db = get_sync_db()
+    try:
+        tasks = db.execute(
+            select(DownloadTask).where(DownloadTask.status == "downloading")
+        ).scalars().all()
+
+        if not tasks:
+            return {"checked": 0, "stuck": 0}
+
+        runtime_config = get_runtime_config_sync(db)
+        now = time.time()
+        timeout = int(runtime_config.get("stuck_task_timeout", settings.STUCK_TASK_TIMEOUT))
+        retry_limit = int(runtime_config.get("download_retry_count", settings.DOWNLOAD_RETRY_COUNT))
+        retry_delay = int(runtime_config.get("download_retry_delay", settings.DOWNLOAD_RETRY_DELAY))
+        stuck_count = 0
+
+        for task in tasks:
+            progress = redis_client.get_progress(task.id)
+            last_updated = progress.get("last_updated", 0) if progress else 0
+
+            if last_updated == 0 and task.started_at:
+                last_updated = task.started_at.timestamp()
+
+            if now - last_updated > timeout:
+                elapsed_min = int((now - last_updated) / 60)
+                task.retry_count = (task.retry_count or 0) + 1
+                redis_client.delete_progress(task.id)
+                redis_client.resume_task(task.id)  # 清除暂停标记
+                stuck_count += 1
+                
+                # 如果未超过最大重试次数，自动重试
+                if task.retry_count <= retry_limit:
+                    task.status = "pending"
+                    task.error_message = None
+                    logger.warning(
+                        f"任务 {task.id} 卡住 {elapsed_min} 分钟，自动重试 ({task.retry_count}/{retry_limit})"
+                    )
+                    db.commit()
+                    if retry_delay > 0:
+                        download_single_file.apply_async(args=[task.id], countdown=retry_delay)
+                    else:
+                        download_single_file.delay(task.id)
+                else:
+                    task.status = "failed"
+                    task.error_message = f"下载超时：任务卡住超过 {elapsed_min} 分钟无进度变化，已达最大重试次数"
+                    logger.warning(
+                        f"任务 {task.id} 卡住 {elapsed_min} 分钟，已达最大重试次数，标记为失败"
+                    )
+
+        db.commit()
+        logger.info(f"卡住任务检测完成: 检查 {len(tasks)} 个, 处理 {stuck_count} 个")
+        return {"checked": len(tasks), "stuck": stuck_count}
+    except Exception as e:
+        logger.error(f"检测卡住任务时出错: {e}")
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.download_tasks.resume_task")
+def resume_task(task_id: int):
+    """
+    恢复暂停的任务
+    
+    Args:
+        task_id: 任务ID
+    """
+    # 从暂停集合中移除
+    redis_client.resume_task(task_id)
+    
+    # 重新启动下载任务
+    return download_single_file.delay(task_id)
+

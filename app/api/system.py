@@ -1,0 +1,697 @@
+"""
+系统配置和历史记录 API
+
+为什么这样设计：
+1. 系统配置 API：管理 Cookie 等全局配置
+2. 历史记录 API：查看已完成的下载
+3. 状态检查 API：检查服务健康状态
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from sqlalchemy import select, func, text, create_engine
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List, Optional
+from pydantic import BaseModel
+from pathlib import Path
+
+from app.models.database import get_async_db
+from app.models.models import Author, Work, DownloadTask, DownloadHistory, SystemConfig
+from app.models.schemas import (
+    DownloadHistoryResponse, CookieUpdate, SystemStatus, MessageResponse
+)
+from app.core import redis_client
+from app.core.config import settings
+from app.core.runtime_config import (
+    RUNTIME_CONFIG_SCHEMA,
+    get_runtime_config,
+    save_runtime_config as persist_runtime_config,
+)
+
+router = APIRouter(tags=["系统管理"])
+
+
+class RuntimeConfigUpdate(BaseModel):
+    auto_check_enabled: Optional[bool] = None
+    subscription_check_interval: Optional[int] = None
+    douyin_request_delay: Optional[float] = None
+    author_check_delay: Optional[float] = None
+    download_timeout: Optional[int] = None
+    download_retry_count: Optional[int] = None
+    download_retry_delay: Optional[int] = None
+    stuck_task_timeout: Optional[int] = None
+
+
+# ============ Cookie 配置 ============
+
+@router.post("/config/cookie", response_model=MessageResponse)
+async def update_cookie(
+    request: CookieUpdate,
+    db: AsyncSession = Depends(get_async_db)
+):
+    """更新抖音 Cookie"""
+    # 存储到 Redis（用于快速访问）
+    redis_client.set_cookie(request.cookie)
+    
+    # 存储到数据库（持久化）
+    result = await db.execute(
+        select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
+    )
+    config = result.scalar_one_or_none()
+    
+    if config:
+        config.value = request.cookie
+    else:
+        config = SystemConfig(key="douyin_cookie", value=request.cookie)
+        db.add(config)
+    
+    await db.commit()
+    
+    return MessageResponse(success=True, message="Cookie 已更新")
+
+
+@router.get("/config/cookie", response_model=MessageResponse)
+async def get_cookie_status(db: AsyncSession = Depends(get_async_db)):
+    """检查 Cookie 是否已配置"""
+    cookie = redis_client.get_cookie()
+    
+    if not cookie:
+        result = await db.execute(
+            select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
+        )
+        config = result.scalar_one_or_none()
+        cookie = config.value if config else None
+    
+    return MessageResponse(
+        success=bool(cookie),
+        message="Cookie 已配置" if cookie else "Cookie 未配置",
+        data={"configured": bool(cookie)}
+    )
+
+
+# ============ 运行期配置 ============
+
+@router.get("/config/runtime")
+async def get_runtime_settings(db: AsyncSession = Depends(get_async_db)):
+    """获取可在设置页调整的运行期配置"""
+    config = await get_runtime_config(db)
+    limits = {
+        key: {
+            "label": spec.get("label", key),
+            "type": spec.get("type"),
+            "min": spec.get("min"),
+            "max": spec.get("max"),
+            "unit": spec.get("unit"),
+            "default": spec.get("default"),
+        }
+        for key, spec in RUNTIME_CONFIG_SCHEMA.items()
+    }
+    return {
+        "success": True,
+        "config": config,
+        "limits": limits,
+        "service": process_manager.get_status(),
+    }
+
+
+@router.post("/config/runtime", response_model=MessageResponse)
+async def update_runtime_settings(
+    request: RuntimeConfigUpdate,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """更新运行期配置，保存到 system_config 并同步缓存"""
+    try:
+        config = await persist_runtime_config(db, request.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    redis_client.append_activity_log(
+        "info",
+        "system",
+        "运行配置已更新",
+        ", ".join(sorted(request.model_dump(exclude_unset=True).keys())) or "无变化",
+    )
+    return MessageResponse(success=True, message="运行配置已保存", data={"config": config})
+
+
+# ============ 下载历史 ============
+
+@router.get("/history", response_model=List[DownloadHistoryResponse])
+async def list_download_history(
+    author_id: Optional[int] = Query(None, description="按作者筛选"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_async_db)
+):
+    """获取下载历史列表"""
+    query = select(DownloadHistory)
+    
+    if author_id:
+        query = query.join(Work).where(Work.author_id == author_id)
+    
+    query = query.order_by(DownloadHistory.completed_at.desc())
+    query = query.offset((page - 1) * page_size).limit(page_size)
+    
+    result = await db.execute(query)
+    history = result.scalars().all()
+    
+    return history
+
+
+@router.get("/history/stats")
+async def get_download_stats(db: AsyncSession = Depends(get_async_db)):
+    """获取下载统计信息"""
+    # 总下载数
+    total_result = await db.execute(
+        select(func.count(DownloadHistory.id))
+    )
+    total_downloads = total_result.scalar() or 0
+    
+    # 总文件大小
+    size_result = await db.execute(
+        select(func.sum(DownloadHistory.file_size))
+    )
+    total_size = size_result.scalar() or 0
+    
+    # 今日下载数
+    from datetime import datetime, timedelta
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_result = await db.execute(
+        select(func.count(DownloadHistory.id)).where(
+            DownloadHistory.completed_at >= today
+        )
+    )
+    today_downloads = today_result.scalar() or 0
+    
+    return {
+        "total_downloads": total_downloads,
+        "total_size_bytes": total_size,
+        "total_size_human": format_size(total_size),
+        "today_downloads": today_downloads
+    }
+
+
+# ============ 系统状态 ============
+
+@router.get("/status", response_model=SystemStatus)
+async def get_system_status(db: AsyncSession = Depends(get_async_db)):
+    """获取系统状态（带缓存）"""
+    # Redis 连接状态
+    redis_connected = redis_client.check_connection()
+
+    # 尝试从缓存获取统计数据
+    cached_stats = redis_client.get_stats_cached()
+    if cached_stats:
+        return SystemStatus(**cached_stats)
+
+    # 缓存未命中，查询数据库
+    # 统计数据
+    author_result = await db.execute(select(func.count(Author.id)))
+    total_authors = author_result.scalar() or 0
+
+    subscribed_result = await db.execute(
+        select(func.count(Author.id)).where(Author.is_subscribed == True)
+    )
+    subscribed_authors = subscribed_result.scalar() or 0
+
+    pending_result = await db.execute(
+        select(func.count(DownloadTask.id)).where(DownloadTask.status == "pending")
+    )
+    pending_tasks = pending_result.scalar() or 0
+
+    downloading_result = await db.execute(
+        select(func.count(DownloadTask.id)).where(DownloadTask.status == "downloading")
+    )
+    downloading_tasks = downloading_result.scalar() or 0
+
+    history_result = await db.execute(select(func.count(DownloadHistory.id)))
+    total_downloads = history_result.scalar() or 0
+
+    # Celery workers (通过 broker ping，带超时)
+    celery_workers = 0
+    try:
+        import asyncio
+        def _inspect():
+            from app.tasks.celery_app import celery_app
+            insp = celery_app.control.inspect(timeout=2.0)
+            return insp.ping()
+        ping_result = await asyncio.to_thread(_inspect)
+        if ping_result:
+            celery_workers = len(ping_result)
+    except Exception:
+        pass
+
+    status = SystemStatus(
+        redis_connected=redis_connected,
+        celery_workers=celery_workers,
+        pending_tasks=pending_tasks,
+        downloading_tasks=downloading_tasks,
+        total_authors=total_authors,
+        subscribed_authors=subscribed_authors,
+        total_downloads=total_downloads
+    )
+
+    # 缓存结果
+    redis_client.set_stats_cached(status.model_dump())
+
+    return status
+
+
+@router.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return {"status": "healthy"}
+
+
+@router.get("/celery-status")
+async def get_celery_status():
+    """
+    专用 Celery Worker 状态检查
+    
+    通过 broker (Redis) 发送 ping，检测 Worker 是否在线。
+    timeout=2s - Worker 在线时通常 <100ms 响应，2s 足以判定离线。
+    """
+    import asyncio
+
+    def _ping():
+        from app.tasks.celery_app import celery_app
+        inspector = celery_app.control.inspect(timeout=2.0)
+        return inspector.ping()
+
+    try:
+        ping = await asyncio.to_thread(_ping)
+        if ping:
+            workers = list(ping.keys())
+            return {"online": True, "workers": workers, "count": len(workers)}
+        return {"online": False, "workers": [], "count": 0}
+    except Exception as e:
+        return {"online": False, "workers": [], "count": 0, "error": str(e)[:200]}
+
+
+@router.get("/celery-debug")
+async def celery_debug():
+    """
+    Celery 深度诊断 — 检查队列、Worker 状态、注册任务、已有队列内容
+    用于排查 "任务已提交但没有执行" 的问题
+    """
+    import asyncio
+
+    def _diagnose():
+        import redis as redis_lib
+        from app.tasks.celery_app import celery_app
+        diag = {}
+
+        # 1. Broker URL（脱敏）
+        broker = str(celery_app.conf.broker_url or "")
+        if '@' in broker:
+            at_idx = broker.index('@')
+            colon_idx = broker.rfind(':', 0, at_idx)
+            diag["broker_url"] = broker[:colon_idx+1] + '***' + broker[at_idx:]
+        else:
+            diag["broker_url"] = broker
+
+        # 2. Redis 队列长度 — 关键！看任务是否积压在某个队列
+        r = redis_lib.Redis.from_url(settings.redis_url_with_auth, decode_responses=True)
+        diag["queue_lengths"] = {}
+        for q in ["celery", "download", "scheduler", "default"]:
+            try:
+                qlen = r.llen(q)
+                diag["queue_lengths"][q] = qlen
+            except Exception:
+                diag["queue_lengths"][q] = -1
+
+        # 2b. 如果 celery 队列有任务，peek 第一条看格式
+        try:
+            first_msg = r.lindex("celery", 0)
+            if first_msg:
+                import json
+                msg = json.loads(first_msg)
+                diag["celery_queue_peek"] = {
+                    "headers_task": msg.get("headers", {}).get("task", "?"),
+                    "headers_id": msg.get("headers", {}).get("id", "?"),
+                }
+            else:
+                diag["celery_queue_peek"] = None
+        except Exception as e:
+            diag["celery_queue_peek"] = f"error: {e}"
+
+        # 3. Worker inspect（带超时）
+        insp = celery_app.control.inspect(timeout=3.0)
+        diag["ping"] = insp.ping() or {}
+
+        reg = insp.registered() or {}
+        # 只返回每个 Worker 的任务名列表
+        diag["registered"] = {w: [t for t in tasks if not t.startswith("celery.")]
+                              for w, tasks in reg.items()}
+
+        aq = insp.active_queues() or {}
+        diag["active_queues"] = {w: [q["name"] for q in queues] for w, queues in aq.items()}
+
+        diag["active_tasks"] = insp.active() or {}
+        diag["reserved_tasks"] = insp.reserved() or {}
+
+        # 4. 配置信息
+        diag["config"] = {
+            "task_routes": dict(celery_app.conf.task_routes or {}),
+            "task_default_queue": celery_app.conf.task_default_queue,
+            "task_default_exchange": str(celery_app.conf.task_default_exchange),
+            "worker_concurrency": celery_app.conf.worker_concurrency,
+            "worker_prefetch_multiplier": celery_app.conf.worker_prefetch_multiplier,
+            "task_serializer": celery_app.conf.task_serializer,
+        }
+
+        return diag
+
+    try:
+        result = await asyncio.to_thread(_diagnose)
+        return result
+    except Exception as e:
+        import traceback as tb
+        return {"error": str(e), "traceback": tb.format_exc()[:1000]}
+
+
+@router.post("/celery-test")
+async def run_celery_test():
+    """
+    提交一个极简测试任务到 Celery 队列，并等待最多 15 秒看是否执行。
+    如果成功，说明 Worker 能正常消费队列；如果超时，说明任务链断裂。
+    """
+    import asyncio
+
+    try:
+        from app.tasks.celery_app import echo_test
+
+        async_result = echo_test.delay()
+        task_id = async_result.id
+
+        def _wait():
+            try:
+                return async_result.get(timeout=15)
+            except Exception as e:
+                return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+        task_result = await asyncio.to_thread(_wait)
+        ok = isinstance(task_result, dict) and task_result.get("ok") is True
+
+        return {
+            "success": ok,
+            "task_id": task_id,
+            "result": task_result,
+            "message": "✅ Worker 正常工作！任务已成功执行。" if ok
+                       else "❌ Worker 未在 15 秒内执行任务。请检查 Worker 进程是否正常。"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"提交测试任务失败: {str(e)[:200]}"
+        }
+
+
+@router.post("/celery-purge-old")
+async def purge_old_queues():
+    """清除旧的 download/scheduler 队列中的积压任务"""
+    import asyncio
+    import redis as redis_lib
+
+    def _purge():
+        r = redis_lib.Redis.from_url(settings.redis_url_with_auth, decode_responses=True)
+        purged = {}
+        for q in ["download", "scheduler"]:
+            length = r.llen(q)
+            if length > 0:
+                r.delete(q)
+                purged[q] = length
+            else:
+                purged[q] = 0
+        return purged
+
+    try:
+        result = await asyncio.to_thread(_purge)
+        redis_client.append_activity_log("info", "system",
+            "🗑️ 已清除旧队列",
+            f"download={result.get('download', 0)}, scheduler={result.get('scheduler', 0)}")
+        return {"success": True, "purged": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)[:200]}
+
+
+@router.get("/worker-log")
+async def get_worker_log(lines: int = Query(100, ge=1, le=1000)):
+    """读取 Worker 日志文件的最后 N 行"""
+    import os
+    log_path = "logs/download_tasks.log"
+    if not os.path.exists(log_path):
+        return {"lines": [], "message": "日志文件不存在"}
+
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:]
+        return {"lines": [l.rstrip() for l in tail], "total_lines": len(all_lines)}
+    except Exception as e:
+        return {"lines": [], "error": str(e)[:200]}
+
+
+# ============ 进度查询 ============
+
+@router.get("/progress/active")
+async def get_active_progress():
+    """获取所有活跃任务的进度"""
+    progress = redis_client.get_all_progress()
+    return {"tasks": progress}
+
+
+# ============ 数据库配置 ============
+
+class DatabaseConfig(BaseModel):
+    db_type: str = "postgresql"
+    db_host: str = ""
+    db_port: int = 0
+    db_user: str = ""
+    db_password: str = ""
+    db_name: str = ""
+
+
+@router.get("/config/database")
+async def get_database_config():
+    """获取当前数据库配置（密码脱敏）"""
+    return {
+        "db_type": settings.DB_TYPE,
+        "db_host": settings.DB_HOST,
+        "db_port": settings.DB_PORT,
+        "db_user": settings.DB_USER,
+        "db_name": settings.DB_NAME,
+        "db_password_set": bool(settings.DB_PASSWORD),
+    }
+
+
+@router.post("/config/database/test")
+async def test_database_connection(cfg: DatabaseConfig):
+    """测试数据库连接"""
+    try:
+        if cfg.db_type == "postgresql":
+            user_part = cfg.db_user
+            if cfg.db_password:
+                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            url = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
+        elif cfg.db_type == "mysql":
+            user_part = cfg.db_user
+            if cfg.db_password:
+                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            url = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
+        else:
+            return {"success": False, "message": f"不支持的数据库类型: {cfg.db_type}"}
+
+        engine = create_engine(url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        engine.dispose()
+        return {"success": True, "message": "连接成功"}
+    except Exception as e:
+        return {"success": False, "message": f"连接失败: {str(e)[:300]}"}
+
+
+@router.post("/config/database")
+async def save_database_config(cfg: DatabaseConfig):
+    """保存数据库配置到 .env 文件"""
+    try:
+        env_path = Path(".env")
+        env_lines = []
+        if env_path.exists():
+            env_lines = env_path.read_text(encoding="utf-8").splitlines()
+
+        updates = {
+            "DB_TYPE": cfg.db_type,
+            "DB_HOST": cfg.db_host,
+            "DB_PORT": str(cfg.db_port or ""),
+            "DB_USER": cfg.db_user,
+            "DB_PASSWORD": cfg.db_password,
+            "DB_NAME": cfg.db_name,
+        }
+
+        if cfg.db_type == "postgresql":
+            user_part = cfg.db_user
+            if cfg.db_password:
+                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            updates["DATABASE_URL"] = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
+        elif cfg.db_type == "mysql":
+            user_part = cfg.db_user
+            if cfg.db_password:
+                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            updates["DATABASE_URL"] = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
+        else:
+            return MessageResponse(success=False, message=f"不支持的数据库类型: {cfg.db_type}")
+
+        existing_keys = set()
+        new_lines = []
+        for line in env_lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in updates:
+                    new_lines.append(f"{key}={updates[key]}")
+                    existing_keys.add(key)
+                    continue
+            new_lines.append(line)
+
+        for key, val in updates.items():
+            if key not in existing_keys:
+                new_lines.append(f"{key}={val}")
+
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        return MessageResponse(success=True, message="数据库配置已保存，请重启服务生效")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}")
+
+
+# ============ 工具函数 ============
+
+def format_size(size_bytes: int) -> str:
+    """格式化文件大小"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / 1024 / 1024:.2f} MB"
+    else:
+        return f"{size_bytes / 1024 / 1024 / 1024:.2f} GB"
+
+
+# ============ 活动日志 ============
+
+@router.get("/logs")
+async def get_logs(
+    start: int = Query(0, ge=0),
+    count: int = Query(100, ge=1, le=500),
+):
+    """获取活动日志"""
+    logs = redis_client.get_activity_logs(start, count)
+    return {"logs": logs, "start": start, "count": len(logs)}
+
+
+@router.delete("/logs")
+async def clear_logs():
+    """清空活动日志"""
+    redis_client.clear_activity_logs()
+    return MessageResponse(success=True, message="日志已清空")
+
+
+# ============ Celery 进程管理 ============
+
+from app.core.process_manager import process_manager
+
+
+@router.get("/process/status")
+async def get_process_status():
+    """获取 Worker 和 Beat 进程状态"""
+    return process_manager.get_status()
+
+
+@router.post("/process/worker/start")
+async def start_worker(concurrency: Optional[int] = Body(None, embed=True)):
+    """启动 Celery Worker"""
+    result = process_manager.start_worker(concurrency)
+    if result.get("success"):
+        redis_client.append_activity_log("info", "system",
+            "▶️ Worker 已启动",
+            f"PID={result.get('pid')}, concurrency={result.get('concurrency')}")
+    return result
+
+
+@router.post("/process/worker/stop")
+async def stop_worker():
+    """停止 Celery Worker"""
+    result = process_manager.stop_worker()
+    if result.get("success"):
+        redis_client.append_activity_log("info", "system", "⏹️ Worker 已停止", result["message"])
+    return result
+
+
+@router.post("/process/beat/start")
+async def start_beat():
+    """启动 Celery Beat 定时调度器"""
+    result = process_manager.start_beat()
+    if result.get("success"):
+        redis_client.append_activity_log("info", "system", "▶️ Beat 已启动", result["message"])
+    return result
+
+
+@router.post("/process/beat/stop")
+async def stop_beat():
+    """停止 Celery Beat"""
+    result = process_manager.stop_beat()
+    if result.get("success"):
+        redis_client.append_activity_log("info", "system", "⏹️ Beat 已停止", result["message"])
+    return result
+
+
+class ConcurrencyUpdate(BaseModel):
+    concurrency: int
+
+
+@router.get("/process/concurrency")
+async def get_concurrency():
+    """获取当前最大并发下载数"""
+    return {"concurrency": process_manager.worker_concurrency}
+
+
+@router.post("/process/concurrency")
+async def set_concurrency(body: ConcurrencyUpdate):
+    """修改最大并发下载数（会重启 Worker 生效）"""
+    new_val = max(1, min(body.concurrency, 20))
+
+    # 更新 .env 持久化
+    _update_env_key("MAX_CONCURRENT_DOWNLOADS", str(new_val))
+
+    # 重启 Worker 使新并发数生效
+    result = process_manager.restart_worker(new_val)
+    redis_client.append_activity_log("info", "system",
+        f"🔄 并发数已调整为 {new_val}",
+        result["message"])
+    return {"success": True, "concurrency": new_val, "message": result["message"]}
+
+
+def _update_env_key(key: str, value: str):
+    """更新 .env 文件中的键值"""
+    env_path = Path(".env")
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    found = False
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k == key:
+                new_lines.append(f"{key}={value}")
+                found = True
+                continue
+        new_lines.append(line)
+
+    if not found:
+        new_lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
