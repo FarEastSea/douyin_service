@@ -7,6 +7,8 @@
 3. 支持手动触发订阅检查
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -193,14 +195,14 @@ async def add_author(
         runtime_config = await get_runtime_config(db)
         downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
         
-        # 获取用户信息
-        sec_uid = downloader.get_sec_uid(request.share_url)
+        # 抖音请求是同步 I/O，放到线程池避免阻塞 FastAPI 事件循环导致网关超时。
+        sec_uid = await asyncio.to_thread(downloader.get_sec_uid, request.share_url)
         result = await db.execute(
             select(Author).where(Author.sec_uid == sec_uid)
         )
         existing = result.scalar_one_or_none()
 
-        author_info = downloader.get_author_info(sec_uid)
+        author_info = await asyncio.to_thread(downloader.get_author_info, sec_uid)
         stable_share_url = author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or request.share_url
         
         if existing:
@@ -240,7 +242,7 @@ async def add_author(
 
         if not author_profile_has_identity(author_info):
             detail = author_info.get("account_status_detail") or author_info.get("account_status_label") or "抖音未返回可用的作者资料"
-            raise HTTPException(status_code=502, detail=f"无法获取作者资料，未创建作者记录：{detail}")
+            raise HTTPException(status_code=503, detail=f"无法获取作者资料，未创建作者记录：{detail}")
         
         # 创建作者
         author = Author(

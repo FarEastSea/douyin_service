@@ -35,12 +35,48 @@
             }
         }
 
+        function normalizeApiErrorMessage(message, fallback = '请求失败') {
+            const rawMessage = typeof message === 'string' ? message.trim() : '';
+            if (!rawMessage) {
+                return fallback;
+            }
+
+            const plainText = rawMessage
+                .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/&nbsp;/gi, ' ')
+                .replace(/&lt;/gi, '<')
+                .replace(/&gt;/gi, '>')
+                .replace(/&amp;/gi, '&')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            if (/502\s+Bad Gateway/i.test(plainText) || /Bad Gateway/i.test(plainText)) {
+                return '服务网关返回 502，后端可能正在重启或请求抖音超时，请稍后重试';
+            }
+
+            return plainText || fallback;
+        }
+
+        let toastTimer = null;
+
         // 显示提示
         function showToast(message, type = 'success') {
             const toast = document.getElementById('toast');
-            toast.textContent = typeof message === 'string' ? message : JSON.stringify(message);
+            const text = typeof message === 'string' ? message : JSON.stringify(message);
+            const displayText = type === 'error'
+                ? normalizeApiErrorMessage(text)
+                : text;
+            toast.textContent = displayText;
             toast.className = `toast ${type} show`;
-            setTimeout(() => toast.classList.remove('show'), 3000);
+            if (toastTimer) {
+                clearTimeout(toastTimer);
+            }
+            toastTimer = setTimeout(() => {
+                toast.classList.remove('show');
+                toastTimer = null;
+            }, type === 'error' ? 12000 : 3000);
         }
 
         // 格式化文件大小
@@ -119,13 +155,13 @@
         }
 
         function getApiMessage(payload, fallback = '请求失败') {
+            let message = fallback;
             if (payload && typeof payload === 'object') {
-                return payload.detail || payload.message || fallback;
+                message = payload.detail || payload.message || fallback;
+            } else if (typeof payload === 'string' && payload.trim()) {
+                message = payload.trim();
             }
-            if (typeof payload === 'string' && payload.trim()) {
-                return payload.trim();
-            }
-            return fallback;
+            return normalizeApiErrorMessage(message, fallback);
         }
 
         async function apiRequest(url, options = {}, fallback = '请求失败') {
