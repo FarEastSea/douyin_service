@@ -89,6 +89,47 @@ def _parse_datetime(value: str):
         return None
 
 
+def _work_create_time(item: dict) -> int:
+    """取作品发布时间戳，缺失时返回 0。"""
+    try:
+        return int(item.get("create_time") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _select_latest_work(work_list: list) -> dict | None:
+    """
+    选出"真正最新"的作品作为增量游标。
+
+    抖音主页接口会把置顶(is_top)作品排在最前，单纯取 work_list[0] 会把游标
+    永久卡在一个旧的置顶作品上，导致后续新作品永远检测不到。这里优先按发布
+    时间 create_time 取最大；当接口未返回时间时退回到列表首个作品。
+    """
+    if not work_list:
+        return None
+    if any(_work_create_time(item) > 0 for item in work_list):
+        return max(work_list, key=_work_create_time)
+    return work_list[0]
+
+
+def _detect_new_works(db: Session, author_id: int, work_list: list) -> list:
+    """
+    基于数据库已存在的作品判断哪些是新作品。
+
+    不再依赖 last_aweme_id 的位置匹配（会被置顶作品破坏），而是直接对比
+    数据库里该作者已记录的 aweme_id 集合，凡是没入库的都算新作品。
+    """
+    if not work_list:
+        return []
+
+    existing_ids = set(
+        db.execute(
+            select(Work.aweme_id).where(Work.author_id == author_id)
+        ).scalars().all()
+    )
+    return [item for item in work_list if str(item["aweme_id"]) not in existing_ids]
+
+
 def _author_is_being_deleted(author_id: int, phase: str) -> bool:
     """删除作者时，终止后续任务派生和执行。"""
     if not redis_client.is_author_deleting(author_id):
@@ -566,8 +607,9 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
         if work_list:
             author.total_works = len(work_list)
             author.last_check_time = datetime.now()
-            if work_list[0]:
-                author.last_aweme_id = work_list[0].get("aweme_id")
+            latest_work = _select_latest_work(work_list)
+            if latest_work:
+                author.last_aweme_id = latest_work.get("aweme_id")
         
         # 清除之前的错误信息（终止态标记已在资料同步阶段处理）
         if not parse_author_account_status_marker(author.last_error):
@@ -835,13 +877,9 @@ def check_subscriptions(force: bool = False):
                         time.sleep(author_delay)
                     continue
                 
-                # 检查是否有新作品
-                new_works = []
-                for item in work_list:
-                    if item["aweme_id"] == author.last_aweme_id:
-                        break
-                    new_works.append(item)
-                
+                # 检查是否有新作品：以数据库已入库作品为基准，避免置顶作品卡死增量游标
+                new_works = _detect_new_works(db, author.id, work_list)
+
                 if new_works:
                     # 触发下载新作品
                     result = download_author_works.delay(
@@ -865,8 +903,9 @@ def check_subscriptions(force: bool = False):
                 # 更新检查时间
                 author.last_check_time = datetime.now()
                 author.total_works = len(work_list)
-                if work_list:
-                    author.last_aweme_id = work_list[0]["aweme_id"]
+                latest_work = _select_latest_work(work_list)
+                if latest_work:
+                    author.last_aweme_id = latest_work["aweme_id"]
                 author.last_error = None
                 db.commit()
                 

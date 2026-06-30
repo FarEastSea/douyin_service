@@ -258,6 +258,11 @@ class DouyinDownloader:
         image_urls = payload_image_urls({'images': image_entries})
         video_urls = _extract_play_urls(item.get('video'))
 
+        try:
+            create_time = int(item.get('create_time') or 0)
+        except (TypeError, ValueError):
+            create_time = 0
+
         return {
             'aweme_id': item['aweme_id'],
             'desc': item.get('desc', ''),
@@ -267,6 +272,9 @@ class DouyinDownloader:
             'work_type': 'images' if raw_images is not None else 'video',
             'author_name': author_identity.get('nickname') or '未知作者',
             'author_sec_uid': author_identity.get('sec_uid') or fallback_sec_uid,
+            # 置顶标记与发布时间：用于订阅增量检测，避免置顶作品卡死游标
+            'is_top': 1 if item.get('is_top') else 0,
+            'create_time': create_time,
         }
     
     def detect_url_type(self, url: str) -> dict:
