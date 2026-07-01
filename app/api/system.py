@@ -21,6 +21,7 @@ from app.models.schemas import (
 )
 from app.core import redis_client
 from app.core.config import settings
+from app.core import updater
 from app.core.runtime_config import (
     RUNTIME_CONFIG_SCHEMA,
     get_runtime_config,
@@ -694,4 +695,70 @@ def _update_env_key(key: str, value: str):
         new_lines.append(f"{key}={value}")
 
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+# ============ 版本更新（Git） ============
+
+@router.get("/update/info")
+async def get_update_info():
+    """读取当前版本信息（不联网，仅基于本地仓库状态）"""
+    import asyncio
+    try:
+        return await asyncio.to_thread(updater.check_update, False)
+    except updater.GitUpdateError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取版本信息出错：{str(e)[:300]}")
+
+
+@router.get("/update/check")
+async def check_update():
+    """检查远程仓库是否有可用更新（会执行 git fetch 联网比较）"""
+    import asyncio
+    try:
+        return await asyncio.to_thread(updater.check_update, True)
+    except updater.GitUpdateError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"检查更新出错：{str(e)[:300]}")
+
+
+@router.post("/update/apply")
+async def apply_update():
+    """拉取远程仓库最新代码（git pull --ff-only），成功后重启 Worker/Beat 以加载新代码"""
+    import asyncio
+    try:
+        result = await asyncio.to_thread(updater.apply_update)
+    except updater.GitUpdateError as e:
+        redis_client.append_activity_log("error", "system", "❌ 版本更新失败", str(e)[:300])
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新出错：{str(e)[:300]}")
+
+    restart_msgs = []
+    if result.get("updated"):
+        before_short = (result.get("before") or {}).get("short", "")
+        after_short = (result.get("after") or {}).get("short", "")
+        redis_client.append_activity_log(
+            "info", "system",
+            "✅ 已拉取远程更新",
+            f"{before_short} → {after_short}",
+        )
+        # 重启后台进程以加载新代码
+        try:
+            restart_msgs.append(process_manager.restart_worker().get("message", ""))
+        except Exception as e:
+            restart_msgs.append(f"Worker 重启失败: {str(e)[:150]}")
+        try:
+            process_manager.stop_beat()
+            restart_msgs.append(process_manager.start_beat().get("message", ""))
+        except Exception as e:
+            restart_msgs.append(f"Beat 重启失败: {str(e)[:150]}")
+
+    result["restart"] = [m for m in restart_msgs if m]
+    result["restart_note"] = (
+        "后台 Worker/Beat 已重启。前端页面刷新即可生效；若更新涉及 Web/接口代码，"
+        "请在宝塔面板重启本 Python 项目以完全生效。"
+    )
+    return result
 

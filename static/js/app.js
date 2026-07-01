@@ -2421,6 +2421,138 @@
             localStorage.setItem(`settings-${platform}-tab`, activeTab);
         }
 
+        // ============ 版本检查与更新 ============
+
+        let _aboutInfoLoaded = false;
+
+        function openAboutTab() {
+            switchSettingsTab('douyin', 'about');
+            if (!_aboutInfoLoaded) {
+                _aboutInfoLoaded = true;
+                loadUpdateInfo();
+            }
+        }
+
+        function _recalcSettingsHeight() {
+            const bodyEl = document.getElementById('dySettingsBody');
+            if (bodyEl && !bodyEl.classList.contains('collapsed')) {
+                bodyEl.style.maxHeight = bodyEl.scrollHeight + 200 + 'px';
+            }
+        }
+
+        function _formatCommit(c) {
+            if (!c) return '—';
+            let dateText = '';
+            if (c.date) {
+                const d = new Date(c.date);
+                if (!isNaN(d.getTime())) dateText = d.toLocaleString('zh-CN');
+            }
+            const short = escapeHtml(c.short || '');
+            const subject = escapeHtml(c.subject || '');
+            return `<code>${short}</code> ${subject}${dateText ? ' · ' + escapeHtml(dateText) : ''}`;
+        }
+
+        function renderUpdateInfo(data) {
+            const infoEl = document.getElementById('updateVersionInfo');
+            if (!infoEl) return;
+            const rows = [];
+            rows.push(`<div class="update-row"><span class="update-label">当前分支</span><span>${escapeHtml(data.branch || '—')}</span></div>`);
+            rows.push(`<div class="update-row"><span class="update-label">当前版本</span><span>${_formatCommit(data.current)}</span></div>`);
+            if (data.remote) {
+                rows.push(`<div class="update-row"><span class="update-label">远程最新</span><span>${_formatCommit(data.remote)}</span></div>`);
+            }
+            if (data.remote_url) {
+                rows.push(`<div class="update-row"><span class="update-label">仓库地址</span><span style="word-break:break-all;">${escapeHtml(data.remote_url)}</span></div>`);
+            }
+            let statusHtml;
+            if (data.has_update) {
+                statusHtml = `<span class="update-badge update-badge-new">落后 ${data.behind} 个提交，可更新</span>`;
+            } else if (data.remote) {
+                statusHtml = `<span class="update-badge update-badge-latest">已是最新版本</span>`;
+            } else {
+                statusHtml = `<span class="update-badge">${escapeHtml(data.message || '无法比较')}</span>`;
+            }
+            rows.push(`<div class="update-row"><span class="update-label">状态</span><span>${statusHtml}</span></div>`);
+            if (data.has_local_changes) {
+                rows.push(`<div class="update-row"><span class="update-label" style="color:var(--warning);">提示</span><span style="color:var(--warning);">检测到本地有未提交改动，更新（快进合并）可能失败</span></div>`);
+            }
+            infoEl.innerHTML = rows.join('');
+        }
+
+        function _toggleApplyBtn(show) {
+            const applyBtn = document.getElementById('applyUpdateBtn');
+            if (applyBtn) applyBtn.style.display = show ? '' : 'none';
+        }
+
+        async function loadUpdateInfo() {
+            const infoEl = document.getElementById('updateVersionInfo');
+            try {
+                const data = await apiRequest(`${API_BASE}/update/info`, {}, '读取版本失败');
+                renderUpdateInfo(data);
+                _toggleApplyBtn(!!data.has_update);
+            } catch (e) {
+                if (infoEl) infoEl.innerHTML = `<p style="color:var(--error);margin:0;">${escapeHtml(e.message || '读取版本失败')}</p>`;
+                _toggleApplyBtn(false);
+            } finally {
+                _recalcSettingsHeight();
+            }
+        }
+
+        async function checkForUpdate() {
+            const btn = document.getElementById('checkUpdateBtn');
+            const resultEl = document.getElementById('updateResult');
+            const orig = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '检查中...'; }
+            if (resultEl) resultEl.style.display = 'none';
+            try {
+                const data = await apiRequest(`${API_BASE}/update/check`, {}, '检查更新失败');
+                renderUpdateInfo(data);
+                _toggleApplyBtn(!!data.has_update);
+                showToast(data.has_update ? `发现新版本：落后 ${data.behind} 个提交` : '已是最新版本');
+            } catch (e) {
+                showToast(e.message || '检查更新失败', 'error');
+                const infoEl = document.getElementById('updateVersionInfo');
+                if (infoEl) infoEl.innerHTML = `<p style="color:var(--error);margin:0;">${escapeHtml(e.message || '检查更新失败')}</p>`;
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = orig; }
+                _recalcSettingsHeight();
+            }
+        }
+
+        async function applyUpdate() {
+            if (!confirm('确定拉取远程仓库的最新代码并更新吗？\n更新会执行 git pull（--ff-only）并重启后台 Worker/Beat。')) return;
+            const btn = document.getElementById('applyUpdateBtn');
+            const resultEl = document.getElementById('updateResult');
+            const orig = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '更新中...'; }
+            try {
+                const data = await apiRequest(`${API_BASE}/update/apply`, { method: 'POST' }, '更新失败');
+                if (resultEl) {
+                    resultEl.style.display = '';
+                    const lines = [`<strong>${escapeHtml(data.message || '更新完成')}</strong>`];
+                    if (data.updated && data.before && data.after) {
+                        lines.push(`版本：<code>${escapeHtml(data.before.short || '')}</code> → <code>${escapeHtml(data.after.short || '')}</code>`);
+                    }
+                    if (Array.isArray(data.restart) && data.restart.length) {
+                        lines.push(escapeHtml(data.restart.join('；')));
+                    }
+                    if (data.restart_note) lines.push(`<span style="color:var(--text-secondary);">${escapeHtml(data.restart_note)}</span>`);
+                    resultEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+                }
+                showToast(data.updated ? '更新成功' : '已是最新版本');
+                await loadUpdateInfo();
+            } catch (e) {
+                showToast(e.message || '更新失败', 'error');
+                if (resultEl) {
+                    resultEl.style.display = '';
+                    resultEl.innerHTML = `<div style="color:var(--error);">${escapeHtml(e.message || '更新失败')}</div>`;
+                }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = orig; }
+                _recalcSettingsHeight();
+            }
+        }
+
         function initSettingsCollapse() {
             ['douyin', 'x'].forEach(platform => {
                 const expanded = localStorage.getItem(`settings-${platform}-expanded`) === '1';

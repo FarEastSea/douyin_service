@@ -1671,7 +1671,7 @@
         }
 
         /* 深色模式：按钮渐变 + 发光 + 炫光 */
-        [data-theme="dark"] button:not(.tab):not(.sub-tab):not(.platform-tab):not(.settings-toggle):not(.subscribe-toggle):not(.secondary):not(.mobile-tab) {
+        [data-theme="dark"] button:not(.tab):not(.sub-tab):not(.platform-tab):not(.settings-toggle):not(.subscribe-toggle):not(.secondary):not(.mobile-tab):not(.settings-sub-tab):not(.pagination-btn):not(.theme-toggle) {
             background: linear-gradient(135deg, #fe2c55, #c91740);
             color: #fff;
             border: none;
@@ -1681,7 +1681,7 @@
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
-        [data-theme="dark"] button:not(.tab):not(.sub-tab):not(.platform-tab):not(.settings-toggle):not(.subscribe-toggle):not(.secondary):not(.mobile-tab)::after {
+        [data-theme="dark"] button:not(.tab):not(.sub-tab):not(.platform-tab):not(.settings-toggle):not(.subscribe-toggle):not(.secondary):not(.mobile-tab):not(.settings-sub-tab):not(.pagination-btn):not(.theme-toggle)::after {
             content: '';
             position: absolute;
             top: 0;
@@ -1693,7 +1693,7 @@
             pointer-events: none;
         }
 
-        [data-theme="dark"] button:not(.tab):not(.sub-tab):not(.platform-tab):not(.settings-toggle):not(.subscribe-toggle):not(.secondary):not(.mobile-tab):hover {
+        [data-theme="dark"] button:not(.tab):not(.sub-tab):not(.platform-tab):not(.settings-toggle):not(.subscribe-toggle):not(.secondary):not(.mobile-tab):not(.settings-sub-tab):not(.pagination-btn):not(.theme-toggle):hover {
             box-shadow: 0 0 28px rgba(254, 44, 85, 0.55), 0 6px 20px rgba(0,0,0,0.5);
             transform: translateY(-1px);
         }
@@ -4136,7 +4136,27 @@
             box-shadow: 0 0 0 3px var(--accent-glow);
         }
 
-        button:not(.mobile-tab):not(.tab):not(.sub-tab):not(.platform-tab):not(.secondary):not(.settings-toggle):not(.subscribe-toggle) {
+        /* 下拉选项：原生 <select> 展开列表需显式配色，否则暗色主题下会白底白字不可见 */
+        select option,
+        select optgroup {
+            background-color: #1a1a24;
+            color: #ffffff;
+        }
+
+        [data-theme="light"] select option,
+        [data-theme="light"] select optgroup {
+            background-color: #ffffff;
+            color: #1a1a2e;
+        }
+
+        /* 原生勾选框/单选/滑块统一跟随主题主色，避免默认蓝色控件在玻璃背景上突兀 */
+        input[type="checkbox"],
+        input[type="radio"],
+        input[type="range"] {
+            accent-color: var(--accent);
+        }
+
+        button:not(.mobile-tab):not(.tab):not(.sub-tab):not(.platform-tab):not(.secondary):not(.settings-toggle):not(.subscribe-toggle):not(.settings-sub-tab):not(.pagination-btn):not(.theme-toggle) {
             border: none;
             border-radius: var(--g-radius-sm);
             background: var(--accent-gradient);
@@ -4145,7 +4165,7 @@
             transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
         }
 
-        button:not(.mobile-tab):not(.tab):not(.sub-tab):not(.platform-tab):not(.secondary):not(.settings-toggle):not(.subscribe-toggle):hover {
+        button:not(.mobile-tab):not(.tab):not(.sub-tab):not(.platform-tab):not(.secondary):not(.settings-toggle):not(.subscribe-toggle):not(.settings-sub-tab):not(.pagination-btn):not(.theme-toggle):hover {
             filter: brightness(1.06);
             box-shadow: 0 16px 32px var(--accent-glow);
         }
@@ -4503,4 +4523,147 @@
                 width: 100%;
                 justify-content: flex-start;
             }
+        }
+
+        /* ============================================================
+           控件配色修正（权威覆盖，置于文件末尾）
+           历史多层 button 规则（含若干 [data-theme=dark] 高优先级规则）
+           未把下列控件排除，导致设置子标签 / 分页按钮 / 主题切换按钮被
+           误染成主操作按钮的红色渐变，无法区分激活态。这里统一显式修正：
+           非激活态为柔和/透明底，激活态保留品牌强调色。使用 !important
+           以稳定覆盖被层叠污染的样式。
+           ============================================================ */
+        .settings-sub-tab::after,
+        .pagination-btn::after,
+        .theme-toggle::after {
+            display: none !important;
+        }
+
+        .settings-sub-tab:not(.active) {
+            background: transparent !important;
+            color: var(--text-secondary) !important;
+            border: 1px solid transparent !important;
+            box-shadow: none !important;
+        }
+
+        .settings-sub-tab:not(.active):hover {
+            background: var(--g-fill-soft) !important;
+            color: var(--text-primary) !important;
+            border-color: var(--border) !important;
+        }
+
+        .settings-sub-tab.active {
+            background: var(--accent-gradient) !important;
+            color: #fff !important;
+            border-color: transparent !important;
+            box-shadow: 0 8px 20px var(--accent-glow) !important;
+        }
+
+        .pagination-btn {
+            background: var(--g-fill-soft) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border) !important;
+            box-shadow: none !important;
+        }
+
+        .pagination-btn:hover:not(:disabled):not(.active) {
+            border-color: color-mix(in srgb, var(--accent), transparent 50%) !important;
+            background: var(--g-fill) !important;
+        }
+
+        .pagination-btn:disabled {
+            opacity: 0.45 !important;
+            box-shadow: none !important;
+        }
+
+        .pagination-btn.active {
+            background: var(--accent-gradient) !important;
+            color: #fff !important;
+            border-color: transparent !important;
+            box-shadow: 0 8px 20px var(--accent-glow) !important;
+        }
+
+        .theme-toggle {
+            background: var(--g-fill-soft) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border) !important;
+            box-shadow: none !important;
+        }
+
+        .theme-toggle:hover {
+            background: var(--g-fill) !important;
+            border-color: color-mix(in srgb, var(--accent), transparent 50%) !important;
+        }
+
+        /* ============ 关于 / 版本更新 ============ */
+        .update-info-box {
+            border: 1px solid var(--border);
+            border-radius: var(--g-radius, 10px);
+            background: var(--g-fill-soft, var(--bg-secondary));
+            padding: 4px 14px;
+            margin-bottom: 14px;
+        }
+
+        .update-row {
+            display: flex;
+            gap: 12px;
+            padding: 8px 0;
+            font-size: 13px;
+            line-height: 1.6;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .update-row:last-child {
+            border-bottom: none;
+        }
+
+        .update-label {
+            color: var(--text-secondary);
+            min-width: 72px;
+            flex-shrink: 0;
+        }
+
+        .update-row code {
+            background: var(--bg-primary);
+            padding: 1px 6px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        .update-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+        }
+
+        .update-badge-new {
+            background: color-mix(in srgb, var(--warning), transparent 84%);
+            color: var(--warning);
+            border-color: color-mix(in srgb, var(--warning), transparent 55%);
+        }
+
+        .update-badge-latest {
+            background: color-mix(in srgb, var(--success), transparent 84%);
+            color: var(--success);
+            border-color: color-mix(in srgb, var(--success), transparent 55%);
+        }
+
+        .update-result {
+            margin-top: 12px;
+            padding: 12px 14px;
+            border-radius: var(--g-radius, 10px);
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            font-size: 13px;
+            line-height: 1.8;
+        }
+
+        .update-result code {
+            background: var(--bg-secondary);
+            padding: 1px 6px;
+            border-radius: 5px;
+            font-size: 12px;
         }
