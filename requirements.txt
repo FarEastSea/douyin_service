@@ -29,6 +29,9 @@ pydantic-settings==2.1.0
 # 工具
 python-dotenv==1.0.0
 
+# 版本更新（纯 Python git，规避受限环境无法执行 shell 的问题）
+dulwich>=1.0,<2.0
+
 # WebSocket (可选，用于实时进度推送)
 websockets==12.0
 
