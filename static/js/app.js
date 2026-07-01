@@ -2553,6 +2553,27 @@
             }
         }
 
+        async function restartWebService() {
+            if (!confirm('确定重启 Web 服务吗？\ngunicorn 将热重载工作进程以加载最新代码，期间可能短暂中断。')) return;
+            const btn = document.getElementById('restartServiceBtn');
+            const orig = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '重启中...'; }
+            try {
+                const data = await apiRequest(`${API_BASE}/service/restart`, { method: 'POST' }, '重启失败');
+                if (data.success) {
+                    showToast(data.message || '已触发热重载，页面即将刷新');
+                    // 等待 gunicorn 完成 worker 替换后刷新页面
+                    setTimeout(() => { location.reload(); }, 5000);
+                } else {
+                    showToast(data.message || '未能自动重启', 'error');
+                }
+            } catch (e) {
+                showToast(e.message || '重启失败', 'error');
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = orig; }
+            }
+        }
+
         function initSettingsCollapse() {
             ['douyin', 'x'].forEach(platform => {
                 const expanded = localStorage.getItem(`settings-${platform}-expanded`) === '1';

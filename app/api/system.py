@@ -758,7 +758,62 @@ async def apply_update():
     result["restart"] = [m for m in restart_msgs if m]
     result["restart_note"] = (
         "后台 Worker/Beat 已重启。前端页面刷新即可生效；若更新涉及 Web/接口代码，"
-        "请在宝塔面板重启本 Python 项目以完全生效。"
+        "请点击「重启 Web 服务」或在宝塔面板重启本项目以完全生效。"
     )
     return result
+
+
+def _read_proc_cmdline(pid: int) -> str:
+    """读取 /proc/<pid>/cmdline（仅 Linux），失败返回空串。"""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
+@router.post("/service/restart")
+async def restart_web_service():
+    """
+    热重启 Web 服务（gunicorn）。
+
+    通过向 gunicorn 主进程（当前进程的父进程）发送 SIGHUP 触发优雅重载：
+    gunicorn 会以最新代码启动新 worker 并平滑替换旧 worker。
+    仅在确认父进程确为 gunicorn 时才发送信号，避免误伤其它托管方式。
+    """
+    import os
+    import signal
+
+    ppid = os.getppid()
+    cmdline = _read_proc_cmdline(ppid)
+
+    if "gunicorn" not in cmdline.lower():
+        return {
+            "success": False,
+            "reload_supported": False,
+            "message": (
+                "未检测到 gunicorn 主进程，无法自动热重载。"
+                f"（父进程: {cmdline[:120] or ppid}）请在宝塔面板手动重启本项目。"
+            ),
+        }
+
+    try:
+        os.kill(ppid, signal.SIGHUP)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"发送热重载信号失败：{str(e)[:200]}")
+
+    redis_client.append_activity_log(
+        "info", "system",
+        "🔄 已向 gunicorn 发送热重载信号 (SIGHUP)",
+        f"master_pid={ppid}",
+    )
+    return {
+        "success": True,
+        "reload_supported": True,
+        "master_pid": ppid,
+        "message": (
+            "已向 gunicorn 主进程发送热重载 (SIGHUP)，数秒内将以最新代码重启工作进程。"
+            "若配置了 --preload 则热重载不生效，需在宝塔面板重启本项目。"
+        ),
+    }
 

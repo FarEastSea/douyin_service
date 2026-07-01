@@ -11,6 +11,7 @@ Git 版本更新服务
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -20,9 +21,26 @@ REPO_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
 GIT_TIMEOUT = 90
 
+_GIT_BIN: Optional[str] = None
+
 
 class GitUpdateError(Exception):
     """git 操作失败时抛出，API 层据此返回可读错误。"""
+
+
+def _git_bin() -> str:
+    """定位 git 可执行文件。gunicorn 等托管进程的 PATH 可能较精简，需兜底常见路径。"""
+    global _GIT_BIN
+    if _GIT_BIN:
+        return _GIT_BIN
+    found = shutil.which("git")
+    if not found:
+        for cand in ("/usr/bin/git", "/usr/local/bin/git", "/bin/git", "/opt/git/bin/git"):
+            if os.path.exists(cand):
+                found = cand
+                break
+    _GIT_BIN = found or "git"
+    return _GIT_BIN
 
 
 def _git_env() -> dict:
@@ -35,9 +53,12 @@ def _git_env() -> dict:
 
 def _run_git(args: list, timeout: int = GIT_TIMEOUT):
     """执行 git 命令，返回 (returncode, stdout, stderr)。"""
+    # -c safe.directory=REPO_DIR：规避 gunicorn 运行用户(如 www)与仓库属主(如 root)
+    # 不一致时 git 抛出的 "detected dubious ownership in repository" 报错。
+    full = [_git_bin(), "-c", f"safe.directory={REPO_DIR}", *args]
     try:
         proc = subprocess.run(
-            ["git", *args],
+            full,
             cwd=REPO_DIR,
             capture_output=True,
             text=True,
@@ -47,9 +68,13 @@ def _run_git(args: list, timeout: int = GIT_TIMEOUT):
             env=_git_env(),
         )
     except FileNotFoundError:
-        raise GitUpdateError("服务器未安装 git，无法检查或执行更新")
+        raise GitUpdateError("未找到 git 可执行文件，请确认服务器已安装 git 且在 PATH 中")
     except subprocess.TimeoutExpired:
         raise GitUpdateError(f"git {args[0] if args else ''} 执行超时（{timeout}s），可能是网络问题")
+    except PermissionError as e:
+        raise GitUpdateError(f"执行 git 失败（权限不足）：{e}")
+    except OSError as e:
+        raise GitUpdateError(f"执行 git 失败：{e}")
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
 
 
@@ -66,9 +91,13 @@ def _redact(text: str) -> str:
 
 
 def _ensure_repo():
-    code, out, _ = _run_git(["rev-parse", "--is-inside-work-tree"], timeout=10)
+    code, out, err = _run_git(["rev-parse", "--is-inside-work-tree"], timeout=10)
     if code != 0 or out != "true":
-        raise GitUpdateError(f"部署目录不是 git 仓库：{REPO_DIR}")
+        detail = _redact(err or out).strip()
+        raise GitUpdateError(
+            f"部署目录不是有效的 git 仓库或无法访问（{REPO_DIR}）"
+            + (f"：{detail}" if detail else "")
+        )
 
 
 def _commit_info(ref: str) -> Optional[dict]:
