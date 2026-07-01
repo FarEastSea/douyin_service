@@ -10,7 +10,7 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
@@ -24,12 +24,39 @@ from app.models.schemas import (
 )
 from app.services.downloader import DouyinDownloader, author_profile_has_identity
 from app.tasks.download_tasks import (
+    AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX,
     TERMINAL_AUTHOR_ACCOUNT_STATUSES,
     build_author_account_status_marker,
     check_subscriptions,
     download_author_works,
     sync_author_profile,
 )
+
+# 账号状态筛选支持的取值：abnormal=仅异常, normal=仅正常, 或具体状态码
+_ACCOUNT_STATUS_MARKER_LIKE_PREFIX = f"{AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX}|"
+_ACCOUNT_STATUS_FILTER_CODES = {"deleted", "banned", "restricted", "unavailable"}
+
+
+def _apply_account_status_filter(query, account_status: Optional[str]):
+    """按账号状态筛选作者。账号状态以结构化标记存储在 last_error 中。"""
+    if not account_status or account_status == "all":
+        return query
+
+    marker_cond = Author.last_error.startswith(
+        _ACCOUNT_STATUS_MARKER_LIKE_PREFIX, autoescape=True
+    )
+
+    if account_status == "abnormal":
+        return query.where(marker_cond)
+    if account_status == "normal":
+        return query.where(or_(Author.last_error.is_(None), ~marker_cond))
+    if account_status in _ACCOUNT_STATUS_FILTER_CODES:
+        return query.where(
+            Author.last_error.startswith(
+                f"{_ACCOUNT_STATUS_MARKER_LIKE_PREFIX}{account_status}", autoescape=True
+            )
+        )
+    return query
 from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
@@ -315,11 +342,15 @@ async def search_authors(
 @router.get("/", response_model=PaginatedAuthorsResponse)
 async def list_authors(
     is_subscribed: Optional[bool] = Query(None, description="按订阅状态筛选"),
+    account_status: Optional[str] = Query(
+        None,
+        description="按账号状态筛选：all/abnormal/normal 或具体状态码(deleted/banned/restricted/unavailable)",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db)
 ):
-    """获取作者列表（带分页）"""
+    """获取作者列表（带分页），支持订阅状态与账号状态组合筛选"""
     # 构建基础查询条件
     base_query = select(Author)
     count_query = select(func.count(Author.id))
@@ -327,6 +358,10 @@ async def list_authors(
     if is_subscribed is not None:
         base_query = base_query.where(Author.is_subscribed == is_subscribed)
         count_query = count_query.where(Author.is_subscribed == is_subscribed)
+
+    # 账号状态筛选（异常/正常/具体状态码），与订阅筛选组合生效
+    base_query = _apply_account_status_filter(base_query, account_status)
+    count_query = _apply_account_status_filter(count_query, account_status)
     
     # 获取总数
     total_result = await db.execute(count_query)

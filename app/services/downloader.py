@@ -166,10 +166,14 @@ def _classify_author_account_status(detail_text: str, status_code: Optional[int]
     text = detail_text or ""
     lower_text = text.lower()
 
-    if status_code == 404 or any(token in text for token in ("注销", "不存在", "未找到", "用户不存在", "账号不存在", "已删除")) or "not found" in lower_text:
+    if status_code == 404 or any(token in text for token in ("注销", "已注销", "不存在", "未找到", "用户不存在", "账号不存在", "已删除")) or "not found" in lower_text:
         return "deleted", "已销号"
 
-    if any(token in text for token in ("封禁", "封号", "封停", "禁用", "处罚")) or "banned" in lower_text:
+    # 禁言：账号仍在但被禁言，单独给出更准确的标签
+    if "禁言" in text:
+        return "banned", "已禁言"
+
+    if any(token in text for token in ("封禁", "封号", "封停", "禁用", "处罚", "违规", "冻结")) or "banned" in lower_text:
         return "banned", "已封号"
 
     if any(token in text for token in ("私密", "不可见", "无法查看", "不可访问", "受限", "无权限")) or any(token in lower_text for token in ("private", "restricted")):

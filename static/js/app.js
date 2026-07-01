@@ -12,6 +12,7 @@
         let currentTaskAuthorName = '';
         let tasksPage = 1, tasksPageSize = 10, tasksTotalPages = 1, tasksTotal = 0;
         let authorsPage = 1, authorsPageSize = 10, authorsTotalPages = 1, authorsTotal = 0;
+        let authorsSubscribeFilter = '', authorsStatusFilter = 'all';
         let pollTimer = null, pollInterval = 5000;
         let runtimeConfig = null;
         let currentMediaPreviewType = null;
@@ -1004,7 +1005,17 @@
         // 获取作者列表
         async function fetchAuthors() {
             try {
-                const data = await apiRequest(`${API_BASE}/authors/?page=${authorsPage}&page_size=${authorsPageSize}`, {}, '获取作者失败');
+                const params = new URLSearchParams({
+                    page: authorsPage,
+                    page_size: authorsPageSize,
+                });
+                if (authorsSubscribeFilter === 'true' || authorsSubscribeFilter === 'false') {
+                    params.set('is_subscribed', authorsSubscribeFilter);
+                }
+                if (authorsStatusFilter && authorsStatusFilter !== 'all') {
+                    params.set('account_status', authorsStatusFilter);
+                }
+                const data = await apiRequest(`${API_BASE}/authors/?${params.toString()}`, {}, '获取作者失败');
 
                 // 处理分页响应
                 authorsTotal = data.total;
@@ -1016,6 +1027,16 @@
                 console.error('获取作者失败', e);
                 showToast(e.message || '获取作者失败', 'error');
             }
+        }
+
+        // 作者筛选条件变更：读取下拉框、重置到第一页并刷新
+        function onAuthorFilterChange() {
+            const subEl = document.getElementById('authorSubscribeFilter');
+            const statusEl = document.getElementById('authorStatusFilter');
+            authorsSubscribeFilter = subEl ? subEl.value : '';
+            authorsStatusFilter = statusEl ? statusEl.value : 'all';
+            authorsPage = 1;
+            fetchAuthors();
         }
 
         // 渲染作者列表

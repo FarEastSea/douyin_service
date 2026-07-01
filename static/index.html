@@ -112,6 +112,23 @@
                         <button onclick="handleAuthorAction()">添加/搜索</button>
                         <div class="search-results" id="authorSearchResults" style="display:none;"></div>
                     </div>
+                    <div class="author-filter-bar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+                        <span style="color:var(--text-secondary);font-size:12px;">筛选</span>
+                        <select id="authorSubscribeFilter" class="page-size-select" onchange="onAuthorFilterChange()">
+                            <option value="">全部订阅状态</option>
+                            <option value="true">已订阅</option>
+                            <option value="false">未订阅</option>
+                        </select>
+                        <select id="authorStatusFilter" class="page-size-select" onchange="onAuthorFilterChange()">
+                            <option value="all">全部账号状态</option>
+                            <option value="abnormal">仅异常账号</option>
+                            <option value="normal">仅正常账号</option>
+                            <option value="banned">已封号/禁言</option>
+                            <option value="deleted">已销号</option>
+                            <option value="restricted">不可访问</option>
+                            <option value="unavailable">状态异常</option>
+                        </select>
+                    </div>
                     <div class="author-list" id="authorList">
                         <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无作者</p></div>
                     </div>

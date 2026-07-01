@@ -10,6 +10,7 @@ Celery 下载任务
 """
 
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from datetime import datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -25,6 +26,7 @@ from app.services.downloader import (
     is_video_work_payload,
     latest_video_url,
     payload_image_urls,
+    _classify_author_account_status,
 )
 from app.core import redis_client
 from app.core.config import settings
@@ -130,6 +132,26 @@ def _detect_new_works(db: Session, author_id: int, work_list: list) -> list:
     return [item for item in work_list if str(item["aweme_id"]) not in existing_ids]
 
 
+def _mark_author_account_anomaly(
+    author: Author,
+    status_code: str,
+    status_label: str,
+    detail: str | None = None,
+) -> None:
+    """
+    标注"作者账号异常"（禁言/封号/注销/不可访问等）：
+
+    - 用结构化标记写入 last_error，前端据此显示状态徽章，方便人工在作者管理里筛查
+    - 仅标注，不自动取消订阅：账号状态可能存在误判，若因此退订正常作者会很麻烦，
+      是否退订交由用户手动决定
+    - 头像、昵称、作品等历史数据一律保留
+
+    注意：这类情况是"作者账号本身有问题"，不是我方被抖音限流，调用方不应
+    将其计入限流中断逻辑。
+    """
+    author.last_error = build_author_account_status_marker(status_code, status_label, detail)
+
+
 def _author_is_being_deleted(author_id: int, phase: str) -> bool:
     """删除作者时，终止后续任务派生和执行。"""
     if not redis_client.is_author_deleting(author_id):
@@ -165,6 +187,32 @@ def _mark_subscription_check_started(db: Session):
     else:
         db.add(SystemConfig(key=SUBSCRIPTION_CHECK_STATE_KEY, value=now_text))
     db.commit()
+
+
+def _reset_subscription_check_cooldown(db: Session):
+    """
+    清除订阅检查的全局冷却标记与分布式锁。
+
+    当一轮检查因接近 Celery 超时被迫提前结束（作者太多、单轮跑不完）时调用，
+    这样下一次 Beat 触发能立即继续检查"尚未轮到"的作者，而不是被全局间隔
+    (默认 6 小时) 挡在门外，导致靠后的订阅作者长期得不到检查。
+    """
+    try:
+        config = db.execute(
+            select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CHECK_STATE_KEY)
+        ).scalar_one_or_none()
+        if config:
+            config.value = datetime.fromtimestamp(0).isoformat(timespec="seconds")
+            db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    try:
+        redis_client.redis_client.delete(SUBSCRIPTION_CHECK_LOCK_KEY)
+    except Exception:
+        pass
 
 
 def get_cookie_from_db(db: Session) -> str:
@@ -567,12 +615,14 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
                 )
 
             if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
+                # 账号异常：仅标注(marker 已由 sync_author_profile 写入)，保留订阅状态与
+                # 头像/昵称/作品等历史数据，是否退订由用户手动决定。
                 author.last_check_time = datetime.now()
                 db.commit()
                 redis_client.append_activity_log(
                     "warning",
                     "task",
-                    f"跳过作者拉取: {author.nickname or f'作者{author_id}'}",
+                    f"作者账号状态异常，已跳过拉取（仅标注、未退订）: {author.nickname or f'作者{author_id}'}",
                     f"author_id={author_id}, status={profile_result.get('account_status_label')}, detail={profile_result.get('account_status_detail') or ''}",
                 )
                 return {
@@ -821,14 +871,25 @@ def check_subscriptions(force: bool = False):
             # 在真正请求抖音前就标记本轮已开始，失败也进入全局冷却。
             _mark_subscription_check_started(db)
 
-        # 获取所有订阅的作者
+        # 获取所有订阅的作者：按"最久未检查优先"排序（从未检查过的排最前）。
+        # 这样即使本轮因超时/限流提前结束，靠后的作者也会在下一轮优先被检查，
+        # 避免固定顺序导致列表末尾的作者长期被漏检。
         authors = db.execute(
-            select(Author).where(Author.is_subscribed == True)
+            select(Author)
+            .where(Author.is_subscribed == True)
+            .order_by(
+                Author.last_check_time.is_(None).desc(),
+                Author.last_check_time.asc(),
+                Author.id.asc(),
+            )
         ).scalars().all()
         
         results = []
         skipped_count = 0
         checked_count = 0
+        consecutive_rate_limited = 0
+        stopped_for_timeout = False
+        RATE_LIMIT_STOP_THRESHOLD = 3
         
         for author in authors:
             # 检查是否到达检查时间
@@ -848,8 +909,19 @@ def check_subscriptions(force: bool = False):
                 profile_result = sync_author_profile(author, downloader)
 
                 if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
+                    # 成功拿到账号状态，说明与抖音通信正常，不是我方被限流
+                    consecutive_rate_limited = 0
+                    # 账号异常：sync_author_profile 已写入结构化标记（前端可据此筛选）。
+                    # 仅标注、保留订阅状态与历史数据，是否退订由用户手动决定。
                     author.last_check_time = datetime.now()
                     db.commit()
+                    redis_client.append_activity_log(
+                        "warning",
+                        "task",
+                        f"作者账号状态异常，已标注（未退订）: {author.nickname or author.id}",
+                        f"状态={profile_result.get('account_status_label')}, "
+                        f"detail={profile_result.get('account_status_detail') or ''}",
+                    )
                     results.append({
                         "author_id": author.id,
                         "nickname": author.nickname,
@@ -900,6 +972,9 @@ def check_subscriptions(force: bool = False):
                         "avatar_synced": True,
                     })
                 
+                # 本作者检查成功，重置连续限流计数
+                consecutive_rate_limited = 0
+
                 # 更新检查时间
                 author.last_check_time = datetime.now()
                 author.total_works = len(work_list)
@@ -909,8 +984,51 @@ def check_subscriptions(force: bool = False):
                 author.last_error = None
                 db.commit()
                 
+            except SoftTimeLimitExceeded:
+                # 接近 Celery 软超时：优雅退出。已检查作者的进度都已逐个提交，
+                # 未检查的作者会在下一轮（最久未检查优先）继续处理。
+                stopped_for_timeout = True
+                logger.warning("订阅检查接近执行超时，本轮提前结束")
+                redis_client.append_activity_log(
+                    "warning",
+                    "task",
+                    "订阅检查接近执行超时，本轮提前结束",
+                    f"已检查={checked_count}，剩余作者将在下一轮优先继续",
+                )
+                break
             except Exception as e:
                 error_msg = str(e)
+
+                # 优先判断是否为"作者账号异常"（禁言/封号/注销/不可访问等）。
+                # 这类是作者账号自身的问题，不是我方被限流：应打标记并自动取消订阅，
+                # 保留历史数据，且不计入限流中断、不停止本轮其余作者的检查。
+                anomaly_code, anomaly_label = _classify_author_account_status(error_msg)
+                if anomaly_code in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
+                    # 仅标注（前端可据此筛选），保留订阅状态与历史数据，由用户手动决定是否退订
+                    _mark_author_account_anomaly(author, anomaly_code, anomaly_label, error_msg)
+                    author.last_check_time = datetime.now()
+                    db.commit()
+                    consecutive_rate_limited = 0  # 账号异常不是限流，重置计数
+                    logger.warning(
+                        f"作者账号状态异常，已标注（未退订）: author_id={author.id}, "
+                        f"nickname={author.nickname}, status={anomaly_label}"
+                    )
+                    redis_client.append_activity_log(
+                        "warning",
+                        "task",
+                        f"作者账号状态异常，已标注（未退订）: {author.nickname or author.id}",
+                        f"状态={anomaly_label}, detail={error_msg[:300]}",
+                    )
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "account_status": anomaly_code,
+                        "status_label": anomaly_label,
+                    })
+                    if author_delay > 0:
+                        time.sleep(author_delay)
+                    continue
+
                 author.last_check_time = datetime.now()
                 author.last_error = error_msg[:1000]
                 db.commit()
@@ -929,24 +1047,42 @@ def check_subscriptions(force: bool = False):
                     "error": error_msg
                 })
 
-                # 疑似限流时停止本轮批量检查，避免连续请求扩大限制。
+                # 疑似限流：不再因单个作者的偶发失败中断整轮检查。
+                # 只有连续多次疑似限流才提前停止本轮，避免持续请求扩大限制；
+                # 失败作者的 last_check_time 已更新，下一轮会自动排到后面重试。
                 if any(token in error_msg for token in ("限流", "非 JSON", "空响应", "服务异常")):
+                    consecutive_rate_limited += 1
+                    if consecutive_rate_limited >= RATE_LIMIT_STOP_THRESHOLD:
+                        redis_client.append_activity_log(
+                            "warning",
+                            "task",
+                            "连续多次疑似触发抖音限流，本轮订阅检查提前停止",
+                            f"连续失败={consecutive_rate_limited}, 最近 author_id={author.id}, error={error_msg[:200]}",
+                        )
+                        break
                     redis_client.append_activity_log(
-                        "warning",
+                        "info",
                         "task",
-                        "疑似触发抖音限流，本轮订阅检查提前停止",
-                        f"author_id={author.id}, error={error_msg[:300]}",
+                        "疑似限流，跳过当前作者继续检查其余作者",
+                        f"连续失败={consecutive_rate_limited}/{RATE_LIMIT_STOP_THRESHOLD}, author_id={author.id}",
                     )
-                    break
+                else:
+                    # 非限流类错误不累计限流计数
+                    consecutive_rate_limited = 0
             
             # 请求间隔
             if author_delay > 0:
                 time.sleep(author_delay)
         
+        # 若因接近超时被迫提前结束，清除全局冷却，让下一次 Beat 立即继续。
+        if stopped_for_timeout and not force:
+            _reset_subscription_check_cooldown(db)
+        
         return {
             "success": True,
             "checked": checked_count,
             "skipped": skipped_count,
+            "stopped_for_timeout": stopped_for_timeout,
             "results": results,
         }
     
