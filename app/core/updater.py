@@ -11,8 +11,10 @@ Git 版本更新服务
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -51,11 +53,64 @@ def _git_env() -> dict:
     return env
 
 
-def _run_git(args: list, timeout: int = GIT_TIMEOUT):
-    """执行 git 命令，返回 (returncode, stdout, stderr)。"""
+def _git_cmd(args: list) -> list:
     # -c safe.directory=REPO_DIR：规避 gunicorn 运行用户(如 www)与仓库属主(如 root)
     # 不一致时 git 抛出的 "detected dubious ownership in repository" 报错。
-    full = [_git_bin(), "-c", f"safe.directory={REPO_DIR}", *args]
+    return [_git_bin(), "-c", f"safe.directory={REPO_DIR}", *args]
+
+
+def _run_git_via_system(args: list, timeout: int = GIT_TIMEOUT):
+    """
+    回退执行方式：通过 os.system(libc system()) 运行 git。
+
+    某些托管环境（如宝塔 gunicorn，服务运行在 asyncio.to_thread 子线程且叠加
+    事件循环/gevent 对子进程的接管）下，标准 subprocess 在子线程中监视子进程会
+    失败并抛出空的 SubprocessError。os.system 走 libc，不依赖 Python 的子进程
+    监视机制，可稳定执行。用临时文件收集输出，timeout 命令提供硬超时。
+    """
+    if os.name != "posix":
+        raise GitUpdateError("git 子进程执行失败，且当前系统不支持回退执行方式")
+
+    full = _git_cmd(args)
+    out_fd, out_path = tempfile.mkstemp(prefix="dy_git_out_")
+    err_fd, err_path = tempfile.mkstemp(prefix="dy_git_err_")
+    os.close(out_fd)
+    os.close(err_fd)
+    try:
+        inner = " ".join(shlex.quote(a) for a in full)
+        timeout_prefix = f"timeout {int(timeout)} " if shutil.which("timeout") else ""
+        cmd = (
+            f"cd {shlex.quote(REPO_DIR)} && "
+            f"GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never "
+            f"{timeout_prefix}{inner} "
+            f"> {shlex.quote(out_path)} 2> {shlex.quote(err_path)}"
+        )
+        raw = os.system(cmd)
+        if hasattr(os, "waitstatus_to_exitcode"):
+            try:
+                code = os.waitstatus_to_exitcode(raw)
+            except ValueError:
+                code = raw
+        elif os.WIFEXITED(raw):
+            code = os.WEXITSTATUS(raw)
+        else:
+            code = raw or 1
+        with open(out_path, encoding="utf-8", errors="replace") as f:
+            out = f.read().strip()
+        with open(err_path, encoding="utf-8", errors="replace") as f:
+            err = f.read().strip()
+        return code, out, err
+    finally:
+        for p in (out_path, err_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def _run_git(args: list, timeout: int = GIT_TIMEOUT):
+    """执行 git 命令，返回 (returncode, stdout, stderr)。"""
+    full = _git_cmd(args)
     try:
         proc = subprocess.run(
             full,
@@ -67,15 +122,15 @@ def _run_git(args: list, timeout: int = GIT_TIMEOUT):
             timeout=timeout,
             env=_git_env(),
         )
+        return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
     except FileNotFoundError:
         raise GitUpdateError("未找到 git 可执行文件，请确认服务器已安装 git 且在 PATH 中")
     except subprocess.TimeoutExpired:
         raise GitUpdateError(f"git {args[0] if args else ''} 执行超时（{timeout}s），可能是网络问题")
-    except PermissionError as e:
-        raise GitUpdateError(f"执行 git 失败（权限不足）：{e}")
-    except OSError as e:
-        raise GitUpdateError(f"执行 git 失败：{e}")
-    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+    except (subprocess.SubprocessError, OSError):
+        # 标准 subprocess 在该环境的子线程中无法创建/监视子进程（典型为空的
+        # SubprocessError）。回退到 os.system 执行，规避子进程监视问题。
+        return _run_git_via_system(args, timeout)
 
 
 def _git_ok(args: list, timeout: int = GIT_TIMEOUT) -> str:
