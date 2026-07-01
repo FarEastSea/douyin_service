@@ -708,7 +708,7 @@ async def get_update_info():
     except updater.GitUpdateError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取版本信息出错：{str(e)[:300]}")
+        raise HTTPException(status_code=500, detail=f"读取版本信息出错：{type(e).__name__}: {str(e)[:300]}")
 
 
 @router.get("/update/check")
@@ -720,7 +720,17 @@ async def check_update():
     except updater.GitUpdateError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"检查更新出错：{str(e)[:300]}")
+        raise HTTPException(status_code=500, detail=f"检查更新出错：{type(e).__name__}: {str(e)[:300]}")
+
+
+@router.get("/update/diagnose")
+async def diagnose_update():
+    """返回版本更新的诊断信息（检测到的项目目录、git 环境、运行用户、原始命令输出）"""
+    import asyncio
+    try:
+        return await asyncio.to_thread(updater.diagnose)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"诊断出错：{type(e).__name__}: {str(e)[:300]}")
 
 
 @router.post("/update/apply")

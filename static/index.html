@@ -7,7 +7,7 @@
     <title>媒体下载管理系统</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23fe2c55'/><path d='M50 20v40m0 0l-16-16m16 16l16-16M30 72h40' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/app.css?v=20260703">
+    <link rel="stylesheet" href="/static/css/app.css?v=20260704">
 </head>
 
 <body>
@@ -376,6 +376,7 @@
                                 <button class="secondary" id="checkUpdateBtn" onclick="checkForUpdate()">检查更新</button>
                                 <button id="applyUpdateBtn" onclick="applyUpdate()" style="display:none;">⬇ 更新到最新</button>
                                 <button class="secondary" id="restartServiceBtn" onclick="restartWebService()">🔄 重启 Web 服务</button>
+                                <button class="secondary" id="diagnoseUpdateBtn" onclick="diagnoseUpdate()">🩺 诊断</button>
                             </div>
                             <div id="updateResult" class="update-result" style="display:none;"></div>
                             <p class="form-hint">「检查更新」会连接远程仓库比较版本；「更新」会执行 <code>git pull --ff-only</code> 拉取最新代码并自动重启后台 Worker/Beat。前端改动刷新页面即可生效；涉及 Web/接口代码的更新，点击「重启 Web 服务」触发 gunicorn 热重载即可完全生效（如配置了 --preload 则需在宝塔面板重启本项目）。</p>
@@ -508,7 +509,7 @@
         </button>
     </nav>
 
-    <script src="/static/js/app.js?v=20260703"></script>
+    <script src="/static/js/app.js?v=20260704"></script>
 </body>
 
 </html>

@@ -165,6 +165,7 @@ def check_update(do_fetch: bool = True) -> dict:
         return {
             "success": True,
             "is_repo": True,
+            "repo_dir": REPO_DIR,
             "branch": branch,
             "remote_url": remote_url,
             "current": current,
@@ -190,6 +191,7 @@ def check_update(do_fetch: bool = True) -> dict:
     return {
         "success": True,
         "is_repo": True,
+        "repo_dir": REPO_DIR,
         "branch": branch,
         "upstream": upstream,
         "remote_url": remote_url,
@@ -201,6 +203,49 @@ def check_update(do_fetch: bool = True) -> dict:
         "has_local_changes": _has_local_changes(),
         "message": f"有 {behind} 个新提交可更新" if behind > 0 else "已是最新版本",
     }
+
+
+def diagnose() -> dict:
+    """
+    诊断信息：暴露检测到的项目目录、git 环境、运行用户与关键 git 命令的原始输出，
+    用于排查"检查更新出错"到底发生在哪一步、检测的是哪个目录。
+    本函数保证不抛异常，任何一步失败都以字段形式返回。
+    """
+    result = {
+        "repo_dir": REPO_DIR,
+        "repo_dir_exists": os.path.isdir(REPO_DIR),
+        "dot_git_exists": os.path.exists(os.path.join(REPO_DIR, ".git")),
+        "git_bin": _git_bin(),
+    }
+
+    try:
+        import getpass
+        result["process_user"] = getpass.getuser()
+    except Exception:
+        result["process_user"] = ""
+    try:
+        result["process_uid"] = os.getuid()  # type: ignore[attr-defined]
+    except Exception:
+        result["process_uid"] = None
+
+    def _step(label: str, args: list, timeout: int = 15):
+        try:
+            code, out, err = _run_git(args, timeout=timeout)
+            result[label] = {
+                "code": code,
+                "out": _redact(out)[:600],
+                "err": _redact(err)[:600],
+            }
+        except GitUpdateError as e:
+            result[label] = {"error": str(e)[:400]}
+        except Exception as e:
+            result[label] = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
+
+    _step("git_version", ["--version"], timeout=10)
+    _step("is_work_tree", ["rev-parse", "--is-inside-work-tree"], timeout=10)
+    _step("remote", ["remote", "-v"], timeout=10)
+    _step("status", ["status", "-sb"], timeout=15)
+    return result
 
 
 def apply_update() -> dict:

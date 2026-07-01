@@ -2464,6 +2464,9 @@
             if (data.remote_url) {
                 rows.push(`<div class="update-row"><span class="update-label">仓库地址</span><span style="word-break:break-all;">${escapeHtml(data.remote_url)}</span></div>`);
             }
+            if (data.repo_dir) {
+                rows.push(`<div class="update-row"><span class="update-label">项目目录</span><span style="word-break:break-all;">${escapeHtml(data.repo_dir)}</span></div>`);
+            }
             let statusHtml;
             if (data.has_update) {
                 statusHtml = `<span class="update-badge update-badge-new">落后 ${data.behind} 个提交，可更新</span>`;
@@ -2547,6 +2550,26 @@
                     resultEl.style.display = '';
                     resultEl.innerHTML = `<div style="color:var(--error);">${escapeHtml(e.message || '更新失败')}</div>`;
                 }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = orig; }
+                _recalcSettingsHeight();
+            }
+        }
+
+        async function diagnoseUpdate() {
+            const btn = document.getElementById('diagnoseUpdateBtn');
+            const resultEl = document.getElementById('updateResult');
+            const orig = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '诊断中...'; }
+            try {
+                const data = await apiRequest(`${API_BASE}/update/diagnose`, {}, '诊断失败');
+                if (resultEl) {
+                    resultEl.style.display = '';
+                    resultEl.innerHTML = `<div><strong>更新诊断</strong></div><pre style="white-space:pre-wrap;word-break:break-all;margin:8px 0 0;font-size:12px;">${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+                }
+            } catch (e) {
+                showToast(e.message || '诊断失败', 'error');
+                if (resultEl) { resultEl.style.display = ''; resultEl.innerHTML = `<div style="color:var(--error);">${escapeHtml(e.message || '诊断失败')}</div>`; }
             } finally {
                 if (btn) { btn.disabled = false; btn.textContent = orig; }
                 _recalcSettingsHeight();
