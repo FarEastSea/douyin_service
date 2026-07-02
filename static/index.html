@@ -7,7 +7,7 @@
     <title>媒体下载管理系统</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23fe2c55'/><path d='M50 20v40m0 0l-16-16m16 16l16-16M30 72h40' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/app.css?v=20260706">
+    <link rel="stylesheet" href="/static/css/app.css?v=20260707">
 </head>
 
 <body>
@@ -114,20 +114,36 @@
                     </div>
                     <div class="author-filter-bar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
                         <span style="color:var(--text-secondary);font-size:12px;">筛选</span>
-                        <select id="authorSubscribeFilter" class="page-size-select" onchange="onAuthorFilterChange()">
-                            <option value="">全部订阅状态</option>
-                            <option value="true">已订阅</option>
-                            <option value="false">未订阅</option>
-                        </select>
-                        <select id="authorStatusFilter" class="page-size-select" onchange="onAuthorFilterChange()">
-                            <option value="all">全部账号状态</option>
-                            <option value="abnormal">仅异常账号</option>
-                            <option value="normal">仅正常账号</option>
-                            <option value="banned">已封号/禁言</option>
-                            <option value="deleted">已销号</option>
-                            <option value="restricted">不可访问</option>
-                            <option value="unavailable">状态异常</option>
-                        </select>
+
+                        <div class="filter-select" data-filter-select data-filter-onchange="onAuthorFilterChange">
+                            <button type="button" class="filter-select-trigger" data-filter-trigger aria-haspopup="listbox" aria-expanded="false">
+                                <span data-filter-label>全部订阅状态</span>
+                                <span class="filter-select-caret">⌄</span>
+                            </button>
+                            <div class="filter-select-menu" data-filter-menu role="listbox">
+                                <button type="button" class="filter-select-option active" data-value="" data-label="全部订阅状态">全部订阅状态</button>
+                                <button type="button" class="filter-select-option" data-value="true" data-label="已订阅">已订阅</button>
+                                <button type="button" class="filter-select-option" data-value="false" data-label="未订阅">未订阅</button>
+                            </div>
+                            <input type="hidden" id="authorSubscribeFilter" value="">
+                        </div>
+
+                        <div class="filter-select" data-filter-select data-filter-onchange="onAuthorFilterChange">
+                            <button type="button" class="filter-select-trigger" data-filter-trigger aria-haspopup="listbox" aria-expanded="false">
+                                <span data-filter-label>全部账号状态</span>
+                                <span class="filter-select-caret">⌄</span>
+                            </button>
+                            <div class="filter-select-menu" data-filter-menu role="listbox">
+                                <button type="button" class="filter-select-option active" data-value="all" data-label="全部账号状态">全部账号状态</button>
+                                <button type="button" class="filter-select-option" data-value="abnormal" data-label="仅异常账号">仅异常账号</button>
+                                <button type="button" class="filter-select-option" data-value="normal" data-label="仅正常账号">仅正常账号</button>
+                                <button type="button" class="filter-select-option" data-value="banned" data-label="已封号/禁言">已封号/禁言</button>
+                                <button type="button" class="filter-select-option" data-value="deleted" data-label="已销号">已销号</button>
+                                <button type="button" class="filter-select-option" data-value="restricted" data-label="不可访问">不可访问</button>
+                                <button type="button" class="filter-select-option" data-value="unavailable" data-label="状态异常">状态异常</button>
+                            </div>
+                            <input type="hidden" id="authorStatusFilter" value="all">
+                        </div>
                     </div>
                     <div class="author-list" id="authorList">
                         <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无作者</p></div>
@@ -175,7 +191,12 @@
                                         <label>自动检查订阅作者</label>
                                         <div class="inline-switch">
                                             <span style="color:var(--text-secondary);font-size:13px;">关闭后 Beat 仍运行，但不会自动拉取抖音作者作品。</span>
-                                            <input type="checkbox" id="autoCheckEnabled" autocomplete="off">
+                                            <label class="toggle-switch" for="autoCheckEnabled" title="切换自动检查订阅作者">
+                                                <input type="checkbox" id="autoCheckEnabled" autocomplete="off">
+                                                <span class="toggle-track" aria-hidden="true">
+                                                    <span class="toggle-thumb"></span>
+                                                </span>
+                                            </label>
                                         </div>
                                     </div>
                                     <div class="form-item">
@@ -237,10 +258,17 @@
                             <div class="db-form-grid">
                                 <div class="form-item full-width">
                                     <label>数据库类型</label>
-                                    <select id="dbType" onchange="onDbTypeChange()" autocomplete="off">
-                                        <option value="postgresql" selected>PostgreSQL</option>
-                                        <option value="mysql">MySQL / MariaDB</option>
-                                    </select>
+                                    <div class="filter-select filter-select--full" data-filter-select data-filter-onchange="onDbTypeChange">
+                                        <button type="button" class="filter-select-trigger" data-filter-trigger aria-haspopup="listbox" aria-expanded="false">
+                                            <span data-filter-label>PostgreSQL</span>
+                                            <span class="filter-select-caret">⌄</span>
+                                        </button>
+                                        <div class="filter-select-menu" data-filter-menu role="listbox">
+                                            <button type="button" class="filter-select-option active" data-value="postgresql" data-label="PostgreSQL">PostgreSQL</button>
+                                            <button type="button" class="filter-select-option" data-value="mysql" data-label="MySQL / MariaDB">MySQL / MariaDB</button>
+                                        </div>
+                                        <input type="hidden" id="dbType" value="postgresql">
+                                    </div>
                                 </div>
                                 <div class="form-item" id="dbHostWrap">
                                     <label>主机地址</label>
@@ -509,7 +537,7 @@
         </button>
     </nav>
 
-    <script src="/static/js/app.js?v=20260706"></script>
+    <script src="/static/js/app.js?v=20260707"></script>
 </body>
 
 </html>

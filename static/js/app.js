@@ -20,6 +20,7 @@
         let currentPreviewImageIndex = 0;
         let currentAuthorPreview = null;
         let selectedWorkIds = new Set();
+        const customSelectRegistry = new Map();
 
         // X 状态
         let currentXStatusFilter = '';
@@ -1029,6 +1030,95 @@
             }
         }
 
+        function closeFilterSelects(exceptEl = null) {
+            document.querySelectorAll('.filter-select.open').forEach(el => {
+                if (exceptEl && el === exceptEl) return;
+                el.classList.remove('open');
+                const trigger = el.querySelector('[data-filter-trigger]');
+                if (trigger) trigger.setAttribute('aria-expanded', 'false');
+            });
+        }
+
+        function triggerFilterSelectOnChange(root) {
+            const handlerName = (root?.dataset?.filterOnchange || '').trim();
+            if (!handlerName) return;
+            const fn = window[handlerName];
+            if (typeof fn === 'function') fn();
+        }
+
+        function setFilterSelectValue(inputId, value, emitChange = false) {
+            const hidden = document.getElementById(inputId);
+            if (!hidden) return;
+            if (value !== undefined && value !== null) {
+                hidden.value = String(value);
+            }
+            const state = customSelectRegistry.get(inputId);
+            if (state?.syncFromInput) {
+                state.syncFromInput();
+                if (emitChange) triggerFilterSelectOnChange(state.root);
+            }
+        }
+
+        function initFilterSelects() {
+            document.querySelectorAll('[data-filter-select]').forEach(root => {
+                const trigger = root.querySelector('[data-filter-trigger]');
+                const labelEl = root.querySelector('[data-filter-label]');
+                const menu = root.querySelector('[data-filter-menu]');
+                const hidden = root.querySelector('input[type="hidden"]');
+                const options = Array.from(root.querySelectorAll('[data-value]'));
+                if (!trigger || !labelEl || !menu || !hidden || !options.length) return;
+
+                const applyValue = (value) => {
+                    hidden.value = value ?? '';
+                    let matched = options.find(btn => (btn.dataset.value ?? '') === value);
+                    if (!matched) matched = options[0];
+                    options.forEach(btn => btn.classList.toggle('active', btn === matched));
+                    labelEl.textContent = matched?.dataset.label || matched?.textContent?.trim() || '';
+                };
+
+                const syncFromInput = () => {
+                    const fallback = options.find(btn => btn.classList.contains('active'))?.dataset.value
+                        || options[0].dataset.value
+                        || '';
+                    const currentValue = hidden.value || fallback;
+                    applyValue(currentValue);
+                };
+
+                if (hidden.id) {
+                    customSelectRegistry.set(hidden.id, { root, syncFromInput });
+                }
+
+                if (root.dataset.bound === '1') {
+                    syncFromInput();
+                    return;
+                }
+
+                trigger.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const shouldOpen = !root.classList.contains('open');
+                    closeFilterSelects(shouldOpen ? root : null);
+                    root.classList.toggle('open', shouldOpen);
+                    trigger.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+                });
+
+                options.forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        const next = btn.dataset.value ?? '';
+                        const changed = hidden.value !== next;
+                        applyValue(next);
+                        root.classList.remove('open');
+                        trigger.setAttribute('aria-expanded', 'false');
+                        if (changed) triggerFilterSelectOnChange(root);
+                    });
+                });
+
+                root.dataset.bound = '1';
+                syncFromInput();
+            });
+        }
+
         // 作者筛选条件变更：读取下拉框、重置到第一页并刷新
         function onAuthorFilterChange() {
             const subEl = document.getElementById('authorSubscribeFilter');
@@ -1394,6 +1484,9 @@
             if (!inputGroup && searchResults) {
                 searchResults.style.display = 'none';
             }
+            if (!e.target.closest('.filter-select')) {
+                closeFilterSelects();
+            }
         });
 
         document.addEventListener('keydown', (e) => {
@@ -1403,6 +1496,7 @@
                 } else if (document.getElementById('authorWorksModal')?.classList.contains('show')) {
                     closeAuthorWorksPreview();
                 }
+                closeFilterSelects();
             }
         });
 
@@ -3141,7 +3235,7 @@
                     throw new Error(getApiMessage(data, '加载数据库配置失败'));
                 }
                 if (data.db_type) {
-                    document.getElementById('dbType').value = data.db_type;
+                    setFilterSelectValue('dbType', data.db_type);
                     onDbTypeChange();
                     document.getElementById('dbHost').value = data.db_host || '';
                     document.getElementById('dbPort').value = data.db_port || '';
@@ -3157,6 +3251,7 @@
 
         function init() {
             initTheme();
+            initFilterSelects();
             initSettingsCollapse();
             fetchStatus();
             switchPlatform('douyin');
