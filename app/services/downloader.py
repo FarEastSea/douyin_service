@@ -80,6 +80,28 @@ def _extract_image_entries(images_payload: Any) -> List[Dict[str, Any]]:
     return normalized_entries
 
 
+def _extract_live_photo_url(image_payload: Any) -> Optional[str]:
+    """提取单张图片关联的实况视频地址。"""
+    if not isinstance(image_payload, dict):
+        return None
+
+    video_payload = image_payload.get('video')
+    play_urls = _extract_play_urls(video_payload)
+    if play_urls:
+        return play_urls[-1]
+
+    if not isinstance(video_payload, dict):
+        return None
+    play_addr = video_payload.get('play_addr')
+    if not isinstance(play_addr, dict):
+        return None
+
+    uri = _normalize_optional_text(play_addr.get('uri'))
+    if not uri:
+        return None
+    return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={quote(uri, safe='')}&ratio=1080p&line=0"
+
+
 def _normalize_optional_text(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -141,6 +163,26 @@ def payload_image_urls(work_payload: Dict[str, Any]) -> List[str]:
             normalized_urls.append(best_url)
 
     return normalized_urls
+
+
+def payload_live_photo_urls(work_payload: Dict[str, Any]) -> List[Optional[str]]:
+    """
+    返回与 image_urls 等长、按索引对齐的实况视频地址。
+
+    普通图片对应 None；这样混合图集不会因过滤空值而导致图片与实况片段错位。
+    """
+    live_photo_urls = work_payload.get('live_photo_urls')
+    if isinstance(live_photo_urls, list):
+        return [_normalize_optional_text(url) for url in live_photo_urls]
+
+    images = work_payload.get('images')
+    if not isinstance(images, list):
+        return []
+
+    return [
+        _extract_live_photo_url(image) if isinstance(image, dict) else None
+        for image in images
+    ]
 
 
 def latest_video_url(work_payload: Dict[str, Any]) -> Optional[str]:
@@ -260,6 +302,7 @@ class DouyinDownloader:
         raw_images = item.get('images')
         image_entries = _extract_image_entries(raw_images)
         image_urls = payload_image_urls({'images': image_entries})
+        live_photo_urls = payload_live_photo_urls({'images': image_entries})
         video_urls = _extract_play_urls(item.get('video'))
 
         try:
@@ -272,6 +315,7 @@ class DouyinDownloader:
             'desc': item.get('desc', ''),
             'images': image_entries,
             'image_urls': image_urls,
+            'live_photo_urls': live_photo_urls,
             'video': video_urls,
             'work_type': 'images' if raw_images is not None else 'video',
             'author_name': author_identity.get('nickname') or '未知作者',
@@ -831,7 +875,8 @@ class DouyinDownloader:
         desc: str,
         aweme_id: str,
         index: int = None,
-        is_video: bool = True
+        is_video: bool = True,
+        is_live_photo: bool = False,
     ) -> str:
         """
         构建文件保存路径
@@ -842,6 +887,7 @@ class DouyinDownloader:
             aweme_id: 作品ID
             index: 图集索引（图集时使用）
             is_video: 是否为视频
+            is_live_photo: 是否为图集中的实况视频
             
         Returns:
             完整的文件路径
@@ -856,6 +902,8 @@ class DouyinDownloader:
         # 构建文件名
         if is_video:
             filename = f"{desc}_{aweme_id}.mp4"
+        elif is_live_photo:
+            filename = f"{desc}_{aweme_id}_{index}_live.mp4"
         else:
             filename = f"{desc}_{aweme_id}_{index}.jpg"
         

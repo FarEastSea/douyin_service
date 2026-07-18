@@ -14,7 +14,12 @@ from sqlalchemy.sql import func
 from app.models.database import Base
 import json
 
-from app.models.work_media import normalize_image_urls, prepare_image_urls_for_storage
+from app.models.work_media import (
+    normalize_image_urls,
+    normalize_optional_urls,
+    prepare_image_urls_for_storage,
+    prepare_optional_urls_for_storage,
+)
 
 
 class Author(Base):
@@ -64,6 +69,7 @@ class Work(Base):
     # 图集相关
     image_count = Column(Integer, default=0)
     _image_urls = Column("image_urls", Text)  # JSON 存储
+    _live_photo_urls = Column("live_photo_urls", Text)  # 与图片索引对齐的实况 MP4 URL
     
     # 状态
     is_downloaded = Column(Boolean, default=False)
@@ -95,6 +101,21 @@ class Work(Base):
             self._image_urls = json.dumps(normalized_value)
         else:
             self._image_urls = None
+
+    @property
+    def live_photo_urls(self):
+        """获取与图片索引对齐的实况视频 URL 列表。"""
+        if self._live_photo_urls:
+            return normalize_optional_urls(self._live_photo_urls)
+        return []
+
+    @live_photo_urls.setter
+    def live_photo_urls(self, value):
+        normalized_value = prepare_optional_urls_for_storage(value)
+        if normalized_value:
+            self._live_photo_urls = json.dumps(normalized_value)
+        else:
+            self._live_photo_urls = None
     
     @property
     def excluded_file_indices(self):

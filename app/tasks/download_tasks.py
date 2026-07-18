@@ -26,6 +26,7 @@ from app.services.downloader import (
     is_video_work_payload,
     latest_video_url,
     payload_image_urls,
+    payload_live_photo_urls,
     _classify_author_account_status,
 )
 from app.core import redis_client
@@ -239,6 +240,7 @@ def get_cookie_from_db(db: Session) -> str:
 def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing: bool = False) -> None:
     work_type = "video" if is_video_work_payload(work_payload) else "images"
     image_urls = payload_image_urls(work_payload)
+    live_photo_urls = payload_live_photo_urls(work_payload)
     video_url = latest_video_url(work_payload)
 
     work.work_type = work_type
@@ -249,11 +251,14 @@ def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing:
             work.video_url = video_url
         if not preserve_existing:
             work.image_urls = []
+            work.live_photo_urls = []
         return
 
     if image_urls or not preserve_existing:
         work.image_urls = image_urls
         work.image_count = len(image_urls)
+    if live_photo_urls or not preserve_existing:
+        work.live_photo_urls = live_photo_urls
     work.video_url = None
 
 
@@ -409,19 +414,45 @@ def _download_single_file_impl(self_task, task_id: int):
         else:
             # 图集
             image_urls = work.image_urls
+            live_photo_urls = work.live_photo_urls
+            # 旧数据没有保存实况元数据。首次重下时主动刷新一次，避免静态封面 URL
+            # 仍有效而跳过后面的“过期 URL 刷新”，继续误下成 JPG。
+            if len(live_photo_urls) != len(image_urls):
+                try:
+                    fresh = downloader.refresh_work_urls(work.aweme_id)
+                    refreshed_image_urls = payload_image_urls(fresh)
+                    refreshed_live_photo_urls = payload_live_photo_urls(fresh)
+                    if refreshed_image_urls:
+                        image_urls = refreshed_image_urls
+                        live_photo_urls = refreshed_live_photo_urls
+                        work.image_urls = image_urls
+                        work.image_count = len(image_urls)
+                        work.live_photo_urls = live_photo_urls
+                        db.commit()
+                except Exception as exc:
+                    logger.warning(
+                        f"任务 {task_id} - 补全实况图片元数据失败，继续使用已有图片地址: {exc}"
+                    )
+
             if task.file_index >= len(image_urls):
                 task.status = "failed"
                 task.error_message = "图片索引超出范围"
                 db.commit()
                 return {"success": False, "error": "图片索引超出范围"}
             
-            url = image_urls[task.file_index]
+            live_photo_url = (
+                live_photo_urls[task.file_index]
+                if task.file_index < len(live_photo_urls)
+                else None
+            )
+            url = live_photo_url or image_urls[task.file_index]
             file_path = downloader.build_file_path(
                 author.nickname or "未知作者",
                 work.title or "untitled",
                 work.aweme_id,
                 index=task.file_index + 1,
-                is_video=False
+                is_video=False,
+                is_live_photo=bool(live_photo_url),
             )
         
         # URL 有效性检测：抖音 URL 会过期，重试任务必须刷新
@@ -437,10 +468,25 @@ def _download_single_file_impl(self_task, task_id: int):
                         work.video_url = refreshed_video_url
                 else:
                     image_urls = payload_image_urls(fresh)
+                    live_photo_urls = payload_live_photo_urls(fresh)
                     if image_urls and task.file_index < len(image_urls):
-                        url = image_urls[task.file_index]
+                        live_photo_url = (
+                            live_photo_urls[task.file_index]
+                            if task.file_index < len(live_photo_urls)
+                            else None
+                        )
+                        url = live_photo_url or image_urls[task.file_index]
                         work.image_urls = image_urls
                         work.image_count = len(image_urls)
+                        work.live_photo_urls = live_photo_urls
+                        file_path = downloader.build_file_path(
+                            author.nickname or "未知作者",
+                            work.title or "untitled",
+                            work.aweme_id,
+                            index=task.file_index + 1,
+                            is_video=False,
+                            is_live_photo=bool(live_photo_url),
+                        )
                 db.commit()
                 logger.info(f"任务 {task_id} - URL 已刷新")
         except Exception as e:

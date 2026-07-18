@@ -1817,11 +1817,11 @@
                 return;
             }
             openMediaPreview({
-                type: 'image',
-                title: work.title || '图片预览',
-                meta: `${currentAuthorPreview?.authorName || '作者'} · 第 ${fileIndex + 1} 张`,
+                type: file.media_type === 'video' ? 'video' : 'image',
+                title: work.title || (file.media_type === 'video' ? '实况图片预览' : '图片预览'),
+                meta: `${currentAuthorPreview?.authorName || '作者'} · 第 ${fileIndex + 1} 张${file.media_type === 'video' ? '（实况）' : ''}`,
                 url: file.preview_url,
-                images: [file.preview_url]
+                images: file.media_type === 'video' ? [] : [file.preview_url]
             });
         }
 

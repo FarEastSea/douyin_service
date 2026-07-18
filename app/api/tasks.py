@@ -33,6 +33,7 @@ from app.services.downloader import (
     is_video_work_payload,
     latest_video_url,
     payload_image_urls,
+    payload_live_photo_urls,
 )
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
@@ -47,6 +48,7 @@ PREVIEWABLE_EXTENSIONS = VIDEO_PREVIEW_EXTENSIONS | IMAGE_PREVIEW_EXTENSIONS
 def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing: bool = False) -> None:
     work_type = "video" if is_video_work_payload(work_payload) else "images"
     image_urls = payload_image_urls(work_payload)
+    live_photo_urls = payload_live_photo_urls(work_payload)
     video_url = latest_video_url(work_payload)
 
     work.work_type = work_type
@@ -57,11 +59,14 @@ def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing:
             work.video_url = video_url
         if not preserve_existing:
             work.image_urls = []
+            work.live_photo_urls = []
         return
 
     if image_urls or not preserve_existing:
         work.image_urls = image_urls
         work.image_count = len(image_urls)
+    if live_photo_urls or not preserve_existing:
+        work.live_photo_urls = live_photo_urls
     work.video_url = None
 
 
@@ -88,14 +93,22 @@ def _build_task_preview_data(task: DownloadTask, work: Optional[Work]) -> dict:
         }
 
     image_urls = work.image_urls or []
+    live_photo_urls = work.live_photo_urls or []
+    live_photo_url = (
+        live_photo_urls[task.file_index]
+        if 0 <= task.file_index < len(live_photo_urls)
+        else None
+    )
     preview_url = None
     if task.status == "completed" and task.file_path:
         preview_url = f"/api/tasks/{task.id}/preview"
+    elif live_photo_url:
+        preview_url = live_photo_url
     elif 0 <= task.file_index < len(image_urls):
         preview_url = image_urls[task.file_index]
 
     return {
-        "preview_media_type": "image",
+        "preview_media_type": "video" if live_photo_url else "image",
         "preview_url": preview_url,
         "local_preview_available": task.status == "completed" and bool(task.file_path),
     }
@@ -824,9 +837,11 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
                 work.video_url = refreshed_video_url
         else:
             image_urls = payload_image_urls(fresh)
+            live_photo_urls = payload_live_photo_urls(fresh)
             if image_urls:
                 work.image_urls = image_urls
                 work.image_count = len(image_urls)
+                work.live_photo_urls = live_photo_urls
 
     except HTTPException:
         raise
@@ -887,9 +902,11 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
                     work.video_url = refreshed_video_url
             else:
                 image_urls = payload_image_urls(fresh)
+                live_photo_urls = payload_live_photo_urls(fresh)
                 if image_urls:
                     work.image_urls = image_urls
                     work.image_count = len(image_urls)
+                    work.live_photo_urls = live_photo_urls
             refreshed_works[wid] = True
         except Exception:
             refreshed_works[wid] = False

@@ -116,6 +116,7 @@ def _migrate_missing_columns(connection):
         ("works", "is_excluded", "ALTER TABLE works ADD COLUMN is_excluded BOOLEAN DEFAULT FALSE NOT NULL"),
         ("works", "excluded_at", "ALTER TABLE works ADD COLUMN excluded_at TIMESTAMP NULL"),
         ("works", "excluded_file_indices", "ALTER TABLE works ADD COLUMN excluded_file_indices TEXT"),
+        ("works", "live_photo_urls", "ALTER TABLE works ADD COLUMN live_photo_urls TEXT"),
     ]
 
     for table_name, column_name, alter_sql in migrations:
@@ -132,5 +133,7 @@ def _migrate_missing_columns(connection):
 
 def init_db_sync():
     """同步初始化数据库表（用于 Celery worker 启动时）"""
-    Base.metadata.create_all(bind=sync_engine)
+    with sync_engine.begin() as connection:
+        Base.metadata.create_all(bind=connection)
+        _migrate_missing_columns(connection)
 

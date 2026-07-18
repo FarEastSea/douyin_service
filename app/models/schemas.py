@@ -76,6 +76,7 @@ class WorkFileItem(BaseModel):
     status: str
     file_name: Optional[str] = None
     preview_url: Optional[str] = None
+    media_type: str = "image"
     local_available: bool = False
 
 

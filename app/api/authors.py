@@ -147,7 +147,7 @@ def _build_work_preview_payload(work: Work) -> tuple[Optional[str], List[str], O
     local_image_urls.sort(key=lambda item: item[0])
 
     image_urls = original_image_urls
-    if local_image_urls and (
+    if not any(work.live_photo_urls or []) and local_image_urls and (
         work.is_downloaded or len(local_image_urls) == len(original_image_urls) or not original_image_urls
     ):
         image_urls = [url for _, url in local_image_urls]
@@ -159,14 +159,21 @@ def _build_work_preview_payload(work: Work) -> tuple[Optional[str], List[str], O
 def _build_work_files(work: Work) -> List[WorkFileItem]:
     """构造作品内文件（任务）列表，供图集单文件管理使用。"""
     files: List[WorkFileItem] = []
+    live_photo_urls = work.live_photo_urls or []
     for task in sorted(work.download_tasks or [], key=lambda t: (t.file_index or 0)):
         local_available = task.status == "completed" and bool(task.file_path)
+        file_index = task.file_index or 0
         files.append(WorkFileItem(
             task_id=task.id,
-            file_index=task.file_index or 0,
+            file_index=file_index,
             status=task.status,
             file_name=task.file_name,
             preview_url=f"/api/tasks/{task.id}/preview" if local_available else None,
+            media_type=(
+                "video"
+                if file_index < len(live_photo_urls) and live_photo_urls[file_index]
+                else "image"
+            ),
             local_available=local_available,
         ))
     return files
