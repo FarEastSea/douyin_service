@@ -15,6 +15,7 @@
         let authorsSubscribeFilter = '', authorsStatusFilter = 'all';
         let pollTimer = null, pollInterval = 5000;
         let runtimeConfig = null;
+        let bootstrapMode = false;
         let currentMediaPreviewType = null;
         let currentPreviewImages = [];
         let currentPreviewImageIndex = 0;
@@ -2576,9 +2577,20 @@
             infoEl.innerHTML = rows.join('');
         }
 
-        function _toggleApplyBtn(show) {
+        function _toggleApplyBtn(show, data = null) {
             const applyBtn = document.getElementById('applyUpdateBtn');
-            if (applyBtn) applyBtn.style.display = show ? '' : 'none';
+            if (!applyBtn) return;
+            applyBtn.style.display = show ? '' : 'none';
+            const disabledReason = data && data.update_supported === false ? data.update_disabled_reason : '';
+            applyBtn.disabled = !!disabledReason;
+            applyBtn.title = disabledReason || '';
+            if (disabledReason && show) {
+                const resultEl = document.getElementById('updateResult');
+                if (resultEl) {
+                    resultEl.style.display = '';
+                    resultEl.innerHTML = `<div style="color:var(--warning);"><strong>网页端更新已禁用</strong><br>${escapeHtml(disabledReason)}</div>`;
+                }
+            }
         }
 
         async function loadUpdateInfo() {
@@ -2586,7 +2598,7 @@
             try {
                 const data = await apiRequest(`${API_BASE}/update/info`, {}, '读取版本失败');
                 renderUpdateInfo(data);
-                _toggleApplyBtn(!!data.has_update);
+                _toggleApplyBtn(!!data.has_update, data);
             } catch (e) {
                 if (infoEl) infoEl.innerHTML = `<p style="color:var(--error);margin:0;">${escapeHtml(e.message || '读取版本失败')}</p>`;
                 _toggleApplyBtn(false);
@@ -2604,7 +2616,7 @@
             try {
                 const data = await apiRequest(`${API_BASE}/update/check`, {}, '检查更新失败');
                 renderUpdateInfo(data);
-                _toggleApplyBtn(!!data.has_update);
+                _toggleApplyBtn(!!data.has_update, data);
                 showToast(data.has_update ? `发现新版本：落后 ${data.behind} 个提交` : '已是最新版本');
             } catch (e) {
                 showToast(e.message || '检查更新失败', 'error');
@@ -3247,12 +3259,73 @@
             }
         }
 
+
+        function renderBootstrapPanel(status) {
+            bootstrapMode = !status.ready;
+            let panel = document.getElementById('bootstrapPanel');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'bootstrapPanel';
+                panel.className = 'bootstrap-panel';
+                const main = document.querySelector('.app-main');
+                if (main) main.prepend(panel);
+            }
+            if (status.ready) { panel.style.display = 'none'; return; }
+            const missing = (status.missing || []).map(i => `<span class="status-tag status-failed">${escapeHtml(i.label || i.key)} (${escapeHtml(i.key)})</span>`).join('');
+            const fields = status.fields || [];
+            const values = status.values || {};
+            const groups = fields.reduce((acc, f) => { (acc[f.group] ||= []).push(f); return acc; }, {});
+            const forms = Object.entries(groups).map(([group, items]) => `
+                <div class="bootstrap-group"><h4>${escapeHtml(group)}</h4><div class="bootstrap-grid">
+                    ${items.map(f => {
+                        const current = values[f.key]?.value ?? f.default ?? '';
+                        const type = f.secret ? 'password' : 'text';
+                        return `<label class="bootstrap-field"><span>${escapeHtml(f.label)}${f.required ? ' *' : ''}</span><input data-env-key="${escapeHtml(f.key)}" type="${type}" value="${escapeHtml(current)}" placeholder="${escapeHtml(f.default || '')}" autocomplete="off"></label>`;
+                    }).join('')}
+                </div></div>`).join('');
+            panel.innerHTML = `
+                <div class="bootstrap-head"><div><h2>初始化配置</h2><p>项目缺少必要环境变量，当前仅开放配置页面。请补全配置并重启 Web 服务后再进入正式功能。</p></div><button class="secondary" onclick="restartWebService()">重启 Web 服务</button></div>
+                <div class="bootstrap-missing"><strong>缺失配置：</strong>${missing || '<span class="status-tag status-completed">无</span>'}</div>
+                ${forms}
+                <div class="settings-actions"><button onclick="saveBootstrapConfig()">保存初始化配置</button><button class="secondary" onclick="loadBootstrapStatus()">重新检测</button></div>
+                <p class="form-hint">密码类字段会脱敏显示；保留 ******** 保存时不会覆盖已有密钥。</p>`;
+            panel.style.display = '';
+            switchPlatform('douyin');
+            switchSubTab('settings');
+            switchSettingsTab('douyin', 'database');
+            _recalcSettingsHeight();
+        }
+
+        async function loadBootstrapStatus() {
+            const status = await apiRequest(`${API_BASE}/bootstrap/status`, {}, '读取初始化状态失败');
+            renderBootstrapPanel(status);
+            return status;
+        }
+
+        async function saveBootstrapConfig() {
+            const values = {};
+            document.querySelectorAll('#bootstrapPanel [data-env-key]').forEach(input => { values[input.dataset.envKey] = input.value; });
+            try {
+                const data = await apiRequest(`${API_BASE}/bootstrap/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values }) }, '保存初始化配置失败');
+                showToast(data.message || '配置已保存');
+                renderBootstrapPanel(data);
+            } catch (e) { showToast(e.message || '保存初始化配置失败', 'error'); }
+        }
+
         // ============ 初始化 ============
 
-        function init() {
+        async function init() {
             initTheme();
             initFilterSelects();
             initSettingsCollapse();
+            try {
+                const bootstrap = await loadBootstrapStatus();
+                if (!bootstrap.ready) {
+                    document.getElementById('statusDot').style.background = 'var(--warning)';
+                    document.getElementById('statusText').textContent = '等待初始化配置';
+                    return;
+                }
+            } catch (e) { console.error(e); }
             fetchStatus();
             switchPlatform('douyin');
             loadRuntimeConfig();

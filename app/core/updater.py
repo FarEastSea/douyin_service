@@ -192,6 +192,8 @@ def check_update(do_fetch: bool = True) -> dict:
         "repo_dir": REPO_DIR,
         "branch": branch,
         "remote_url": _redact(remote_url),
+        "update_supported": _apply_update_supported(),
+        "update_disabled_reason": _apply_update_disabled_reason(),
     }
 
     if not branch or not local_sha:
@@ -257,12 +259,23 @@ def check_update(do_fetch: bool = True) -> dict:
     return base
 
 
+
+def _apply_update_supported() -> bool:
+    return False
+
+
+def _apply_update_disabled_reason() -> str:
+    return (
+        "当前网页端不执行代码更新。服务器安全保护会阻止 Web 进程执行脚本或写入仓库，"
+        "为避免更新失败或仓库状态异常，已禁用“更新到最新”按钮；仍可使用“检查更新”查看最新版本。"
+    )
 def apply_update() -> dict:
     """
     通过纯 Python 的 dulwich 从远程 HTTPS 拉取并更新工作区（不 exec）。
 
     使用快进方式：若本地与远程分叉会报错而非强推，避免污染/丢失服务端提交。
     """
+    raise GitUpdateError(_apply_update_disabled_reason())
     _ensure_repo()
     try:
         from dulwich import porcelain

@@ -22,6 +22,7 @@ from app.models.schemas import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core import updater
+from app.core.env_config import validate_env, write_env_updates
 from app.core.runtime_config import (
     RUNTIME_CONFIG_SCHEMA,
     get_runtime_config,
@@ -482,8 +483,8 @@ async def get_database_config():
         "db_user": settings.DB_USER,
         "db_name": settings.DB_NAME,
         "db_password_set": bool(settings.DB_PASSWORD),
+        "env": validate_env(),
     }
-
 
 @router.post("/config/database/test")
 async def test_database_connection(cfg: DatabaseConfig):
@@ -515,54 +516,26 @@ async def test_database_connection(cfg: DatabaseConfig):
 async def save_database_config(cfg: DatabaseConfig):
     """保存数据库配置到 .env 文件"""
     try:
-        env_path = Path(".env")
-        env_lines = []
-        if env_path.exists():
-            env_lines = env_path.read_text(encoding="utf-8").splitlines()
-
         updates = {
             "DB_TYPE": cfg.db_type,
             "DB_HOST": cfg.db_host,
-            "DB_PORT": str(cfg.db_port or ""),
+            "DB_PORT": str(cfg.db_port or (5432 if cfg.db_type == "postgresql" else 3306)),
             "DB_USER": cfg.db_user,
             "DB_PASSWORD": cfg.db_password,
             "DB_NAME": cfg.db_name,
         }
-
         if cfg.db_type == "postgresql":
-            user_part = cfg.db_user
-            if cfg.db_password:
-                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            user_part = f"{cfg.db_user}:{cfg.db_password}" if cfg.db_password else cfg.db_user
             updates["DATABASE_URL"] = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
         elif cfg.db_type == "mysql":
-            user_part = cfg.db_user
-            if cfg.db_password:
-                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            user_part = f"{cfg.db_user}:{cfg.db_password}" if cfg.db_password else cfg.db_user
             updates["DATABASE_URL"] = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
         else:
             return MessageResponse(success=False, message=f"不支持的数据库类型: {cfg.db_type}")
-
-        existing_keys = set()
-        new_lines = []
-        for line in env_lines:
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped:
-                key = stripped.split("=", 1)[0].strip()
-                if key in updates:
-                    new_lines.append(f"{key}={updates[key]}")
-                    existing_keys.add(key)
-                    continue
-            new_lines.append(line)
-
-        for key, val in updates.items():
-            if key not in existing_keys:
-                new_lines.append(f"{key}={val}")
-
-        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        write_env_updates(updates)
         return MessageResponse(success=True, message="数据库配置已保存，请重启服务生效")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}")
-
 
 # ============ 工具函数 ============
 
@@ -826,4 +799,3 @@ async def restart_web_service():
             "若配置了 --preload 则热重载不生效，需在宝塔面板重启本项目。"
         ),
     }
-

@@ -4860,3 +4860,88 @@
             background-size: 6px 6px, 6px 6px;
             background-repeat: no-repeat;
         }
+
+/* ============ 初始化配置 ============ */
+.bootstrap-panel {
+    border: 1px solid color-mix(in srgb, var(--warning), transparent 45%);
+    border-radius: var(--g-radius, 10px);
+    background: var(--bg-card);
+    padding: 18px;
+    margin-bottom: 18px;
+    box-shadow: var(--g-shadow-sm, none);
+}
+
+.bootstrap-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 14px;
+}
+
+.bootstrap-head h2 {
+    font-size: 20px;
+    margin: 0 0 6px;
+}
+
+.bootstrap-head p,
+.bootstrap-missing {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.bootstrap-missing {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.bootstrap-group {
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+    margin-top: 14px;
+}
+
+.bootstrap-group h4 {
+    margin: 0 0 10px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.bootstrap-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.bootstrap-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.bootstrap-field input {
+    width: 100%;
+    min-width: 0;
+}
+
+button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+@media (max-width: 768px) {
+    .bootstrap-head {
+        flex-direction: column;
+    }
+    .bootstrap-head button {
+        width: 100%;
+    }
+}

@@ -15,15 +15,29 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from app.models.database import init_db
-from app.core.config import settings, ensure_download_dir
-from app.core.process_manager import process_manager
-from app.api import tasks, authors, system, x_tasks, works
+from app.api import bootstrap
+from app.core.env_config import validate_env
+
+
+BOOTSTRAP_STATUS = validate_env()
+BOOTSTRAP_MODE = not BOOTSTRAP_STATUS["ready"]
+
+if not BOOTSTRAP_MODE:
+    from app.models.database import init_db
+    from app.core.config import settings, ensure_download_dir
+    from app.core.process_manager import process_manager
+    from app.api import tasks, authors, system, x_tasks, works
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    if BOOTSTRAP_MODE:
+        missing = ", ".join(item["key"] for item in BOOTSTRAP_STATUS["missing"])
+        print(f"配置未完成，进入初始化模式。缺失配置: {missing}")
+        yield
+        return
+
     # 启动时执行
     print("🚀 启动媒体下载管理系统...")
     
@@ -99,12 +113,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册 API 路由
-app.include_router(tasks.router, prefix="/api")
-app.include_router(authors.router, prefix="/api")
-app.include_router(system.router, prefix="/api")
-app.include_router(x_tasks.router, prefix="/api")
-app.include_router(works.router, prefix="/api")
+app.include_router(bootstrap.router, prefix="/api")
+
+if not BOOTSTRAP_MODE:
+    # 注册 API 路由
+    app.include_router(tasks.router, prefix="/api")
+    app.include_router(authors.router, prefix="/api")
+    app.include_router(system.router, prefix="/api")
+    app.include_router(x_tasks.router, prefix="/api")
+    app.include_router(works.router, prefix="/api")
 
 
 # 静态文件服务（前端页面）
@@ -135,6 +152,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=settings.DEBUG
+        reload=False if BOOTSTRAP_MODE else settings.DEBUG
     )
-
