@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     # X/Twitter 下载配置
     X_DOWNLOAD_DIR: str = "/downloads/X"
     X_DOWNLOAD_ENGINE: str = "gallery-dl"
+    X_COOKIE: Optional[str] = None
     X_COOKIE_FILE: Optional[str] = None
     X_TASK_LOG_MAX_LINES: int = 400
     X_TASK_LOG_TTL_SECONDS: int = 7 * 24 * 3600

@@ -44,6 +44,7 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="STUCK_TASK_TIMEOUT", label="任务卡住判定时间（秒）", group="任务", default="600"),
     EnvField(key="DOUYIN_COOKIE", label="抖音 Cookie", group="账号", default="", secret=True),
     EnvField(key="X_DOWNLOAD_ENGINE", label="X 下载引擎", group="X", default="gallery-dl"),
+    EnvField(key="X_COOKIE", label="X Cookie", group="X", default="", secret=True),
     EnvField(key="X_COOKIE_FILE", label="X Cookie 文件", group="X", default=""),
     EnvField(key="X_TASK_LOG_MAX_LINES", label="X 任务日志最大行数", group="X", default="400"),
     EnvField(key="X_TASK_LOG_TTL_SECONDS", label="X 任务日志保留时间（秒）", group="X", default="604800"),

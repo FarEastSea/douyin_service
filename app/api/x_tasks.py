@@ -31,6 +31,8 @@ from app.services.x_task_service import (
     sync_x_author,
 )
 from app.core import redis_client
+from app.core.config import settings
+from app.core.env_config import write_env_updates
 
 router = APIRouter(prefix="/x", tags=["X/Twitter 下载"])
 
@@ -351,8 +353,6 @@ async def save_x_cookie(
     if not cookie:
         raise HTTPException(status_code=400, detail="Cookie 内容不能为空")
 
-    redis_client.set_x_cookie(cookie)
-
     result = await db.execute(
         select(SystemConfig).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
     )
@@ -361,9 +361,17 @@ async def save_x_cookie(
         config.value = cookie
     else:
         db.add(SystemConfig(key=X_COOKIE_CONFIG_KEY, value=cookie))
-    await db.commit()
+    try:
+        await db.flush()
+        write_env_updates({"X_COOKIE": cookie})
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
-    return MessageResponse(success=True, message="X Cookie 已保存")
+    redis_client.set_x_cookie(cookie)
+
+    return MessageResponse(success=True, message="X Cookie 已保存并同步到 .env")
 
 
 @router.get("/config/cookie")
@@ -376,6 +384,7 @@ async def check_x_cookie(db: AsyncSession = Depends(get_async_db)):
         )
         config = result.scalar_one_or_none()
         cookie = config.value if config else None
+    cookie = cookie or settings.X_COOKIE
 
     configured = bool(cookie and len(cookie.strip()) > 0)
     return {"configured": configured}

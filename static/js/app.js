@@ -348,7 +348,7 @@
                 });
                 const data = await res.json();
                 if (data.success) {
-                    showToast('Cookie 保存成功');
+                    showToast(data.message || 'Cookie 保存成功');
                     checkCookie();
                     document.getElementById('cookieInput').value = '';
                 } else {
@@ -437,7 +437,7 @@
                 const data = await res.json();
                 if (res.ok && data.success) {
                     renderRuntimeConfig(data.data?.config);
-                    showToast('运行配置已保存');
+                    showToast(data.message || '运行配置已保存');
                 } else {
                     showToast(data.detail || data.message || '保存失败', 'error');
                 }
@@ -2288,7 +2288,7 @@
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    showToast('X Cookie 已保存');
+                    showToast(data.message || 'X Cookie 已保存');
                     checkXCookie();
                     input.value = '';
                 } else {

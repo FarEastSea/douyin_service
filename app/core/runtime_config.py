@@ -11,10 +11,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.env_config import write_env_updates
 from app.models.models import SystemConfig
 
 
 CONFIG_PREFIX = "runtime:"
+
+RUNTIME_CONFIG_ENV_KEYS = {
+    "auto_check_enabled": "AUTO_CHECK_ENABLED",
+    "subscription_check_interval": "DEFAULT_CHECK_INTERVAL",
+    "douyin_request_delay": "REQUEST_DELAY",
+    "author_check_delay": "AUTHOR_CHECK_DELAY",
+    "download_timeout": "DOWNLOAD_TIMEOUT",
+    "download_retry_count": "DOWNLOAD_RETRY_COUNT",
+    "download_retry_delay": "DOWNLOAD_RETRY_DELAY",
+    "stuck_task_timeout": "STUCK_TASK_TIMEOUT",
+}
 
 
 RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
@@ -213,6 +225,18 @@ async def save_runtime_config(db: AsyncSession, updates: Dict[str, Any]) -> Dict
         else:
             db.add(SystemConfig(key=CONFIG_PREFIX + key, value=stored_value))
 
-    await db.commit()
+    # 网页设置是运行配置的权威来源：数据库供当前进程立即读取，
+    # .env 供 Web/Celery 重启后继续使用同一组值。
+    try:
+        await db.flush()
+        write_env_updates({
+            RUNTIME_CONFIG_ENV_KEYS[key]: _serialize(value, RUNTIME_CONFIG_SCHEMA[key]["type"])
+            for key, value in allowed_updates.items()
+        })
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
     config = await get_runtime_config(db)
     return config

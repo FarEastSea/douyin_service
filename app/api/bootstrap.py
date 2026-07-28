@@ -57,7 +57,8 @@ class DatabaseConfig(BaseModel):
 
 def _database_url_from_config(cfg: DatabaseConfig):
     db_type = (cfg.db_type or "postgresql").lower()
-    user_part = f"{cfg.db_user}:{cfg.db_password}" if cfg.db_password else cfg.db_user
+    db_password = cfg.db_password or read_env_file().get("DB_PASSWORD", "")
+    user_part = f"{cfg.db_user}:{db_password}" if db_password else cfg.db_user
     if db_type == "postgresql":
         return f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}", {"connect_timeout": 3}
     if db_type == "mysql":
@@ -104,7 +105,7 @@ async def save_database_config(cfg: DatabaseConfig):
             "DB_HOST": cfg.db_host,
             "DB_PORT": str(cfg.db_port or (5432 if cfg.db_type == "postgresql" else 3306)),
             "DB_USER": cfg.db_user,
-            "DB_PASSWORD": cfg.db_password,
+            "DB_PASSWORD": cfg.db_password or read_env_file().get("DB_PASSWORD", ""),
             "DB_NAME": cfg.db_name,
         }
         write_env_updates(updates)

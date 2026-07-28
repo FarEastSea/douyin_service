@@ -22,7 +22,7 @@ from app.models.schemas import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core import updater
-from app.core.env_config import validate_env, write_env_updates
+from app.core.env_config import read_env_file, validate_env, write_env_updates
 from app.core.runtime_config import (
     RUNTIME_CONFIG_SCHEMA,
     get_runtime_config,
@@ -51,9 +51,6 @@ async def update_cookie(
     db: AsyncSession = Depends(get_async_db)
 ):
     """更新抖音 Cookie"""
-    # 存储到 Redis（用于快速访问）
-    redis_client.set_cookie(request.cookie)
-    
     # 存储到数据库（持久化）
     result = await db.execute(
         select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
@@ -65,10 +62,19 @@ async def update_cookie(
     else:
         config = SystemConfig(key="douyin_cookie", value=request.cookie)
         db.add(config)
-    
-    await db.commit()
-    
-    return MessageResponse(success=True, message="Cookie 已更新")
+
+    try:
+        await db.flush()
+        write_env_updates({"DOUYIN_COOKIE": request.cookie})
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    # 网页保存值优先，并同步到快速缓存。
+    redis_client.set_cookie(request.cookie)
+
+    return MessageResponse(success=True, message="Cookie 已更新并同步到 .env")
 
 
 @router.get("/config/cookie", response_model=MessageResponse)
@@ -82,6 +88,7 @@ async def get_cookie_status(db: AsyncSession = Depends(get_async_db)):
         )
         config = result.scalar_one_or_none()
         cookie = config.value if config else None
+    cookie = cookie or settings.DOUYIN_COOKIE
     
     return MessageResponse(
         success=bool(cookie),
@@ -120,7 +127,7 @@ async def update_runtime_settings(
     request: RuntimeConfigUpdate,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """更新运行期配置，保存到 system_config 并同步缓存"""
+    """更新运行期配置，保存到 system_config、.env 并同步缓存"""
     try:
         config = await persist_runtime_config(db, request.model_dump(exclude_unset=True))
     except ValueError as e:
@@ -132,7 +139,7 @@ async def update_runtime_settings(
         "运行配置已更新",
         ", ".join(sorted(request.model_dump(exclude_unset=True).keys())) or "无变化",
     )
-    return MessageResponse(success=True, message="运行配置已保存", data={"config": config})
+    return MessageResponse(success=True, message="运行配置已保存并同步到 .env", data={"config": config})
 
 
 # ============ 下载历史 ============
@@ -490,15 +497,16 @@ async def get_database_config():
 async def test_database_connection(cfg: DatabaseConfig):
     """测试数据库连接"""
     try:
+        db_password = cfg.db_password or read_env_file().get("DB_PASSWORD", "")
         if cfg.db_type == "postgresql":
             user_part = cfg.db_user
-            if cfg.db_password:
-                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            if db_password:
+                user_part = f"{cfg.db_user}:{db_password}"
             url = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
         elif cfg.db_type == "mysql":
             user_part = cfg.db_user
-            if cfg.db_password:
-                user_part = f"{cfg.db_user}:{cfg.db_password}"
+            if db_password:
+                user_part = f"{cfg.db_user}:{db_password}"
             url = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
         else:
             return {"success": False, "message": f"不支持的数据库类型: {cfg.db_type}"}
@@ -521,14 +529,15 @@ async def save_database_config(cfg: DatabaseConfig):
             "DB_HOST": cfg.db_host,
             "DB_PORT": str(cfg.db_port or (5432 if cfg.db_type == "postgresql" else 3306)),
             "DB_USER": cfg.db_user,
-            "DB_PASSWORD": cfg.db_password,
+            "DB_PASSWORD": cfg.db_password or read_env_file().get("DB_PASSWORD", ""),
             "DB_NAME": cfg.db_name,
         }
+        db_password = updates["DB_PASSWORD"]
         if cfg.db_type == "postgresql":
-            user_part = f"{cfg.db_user}:{cfg.db_password}" if cfg.db_password else cfg.db_user
+            user_part = f"{cfg.db_user}:{db_password}" if db_password else cfg.db_user
             updates["DATABASE_URL"] = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
         elif cfg.db_type == "mysql":
-            user_part = f"{cfg.db_user}:{cfg.db_password}" if cfg.db_password else cfg.db_user
+            user_part = f"{cfg.db_user}:{db_password}" if db_password else cfg.db_user
             updates["DATABASE_URL"] = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
         else:
             return MessageResponse(success=False, message=f"不支持的数据库类型: {cfg.db_type}")

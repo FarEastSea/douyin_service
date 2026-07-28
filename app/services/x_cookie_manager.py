@@ -17,7 +17,7 @@ X_COOKIE_CONFIG_KEY = "x_cookie"
 
 
 def get_x_cookie_value(db) -> Optional[str]:
-    """读取 X Cookie，优先 Redis，其次数据库。"""
+    """读取 X Cookie，网页值优先，其次才使用环境配置。"""
     cached_cookie = redis_client.get_x_cookie()
     if cached_cookie and cached_cookie.strip():
         return cached_cookie.strip()
@@ -26,7 +26,7 @@ def get_x_cookie_value(db) -> Optional[str]:
         select(SystemConfig).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
     ).scalar_one_or_none()
     if not config or not config.value or not config.value.strip():
-        return None
+        return settings.X_COOKIE.strip() if settings.X_COOKIE and settings.X_COOKIE.strip() else None
 
     cookie = config.value.strip()
     redis_client.set_x_cookie(cookie)
@@ -35,11 +35,10 @@ def get_x_cookie_value(db) -> Optional[str]:
 
 def materialize_x_cookie_file(db, task_id: int | None = None) -> tuple[Optional[str], bool]:
     """将 X Cookie 写入临时 Netscape 文件，返回路径及是否需要清理。"""
-    if settings.X_COOKIE_FILE and os.path.isfile(settings.X_COOKIE_FILE):
-        return settings.X_COOKIE_FILE, False
-
     cookie = get_x_cookie_value(db)
     if not cookie:
+        if settings.X_COOKIE_FILE and os.path.isfile(settings.X_COOKIE_FILE):
+            return settings.X_COOKIE_FILE, False
         return None, False
 
     cookie_dir = os.path.join(settings.X_DOWNLOAD_DIR, ".tmp")
