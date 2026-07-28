@@ -4930,6 +4930,32 @@
     min-width: 0;
 }
 
+
+.bootstrap-errors {
+    display: grid;
+    gap: 8px;
+    margin: 0 0 14px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.bootstrap-error-item {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--error), transparent 58%);
+    border-radius: var(--g-radius, 10px);
+    background: color-mix(in srgb, var(--error), transparent 90%);
+}
+
+.bootstrap-error-item strong {
+    color: var(--error);
+}
+
+.bootstrap-error-item span {
+    word-break: break-word;
+}
 button:disabled {
     opacity: 0.55;
     cursor: not-allowed;

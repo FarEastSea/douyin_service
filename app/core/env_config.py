@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
@@ -52,6 +52,70 @@ ENV_FIELDS: List[EnvField] = [
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
 
+def _build_database_url(values: Dict[str, str]) -> Tuple[str, Dict[str, int]]:
+    db_type = (values.get("DB_TYPE") or "postgresql").strip().lower()
+    db_host = (values.get("DB_HOST") or "").strip()
+    db_port = values.get("DB_PORT") or ("3306" if db_type == "mysql" else "5432")
+    db_user = (values.get("DB_USER") or "").strip()
+    db_password = values.get("DB_PASSWORD") or ""
+    db_name = (values.get("DB_NAME") or "").strip()
+    user_part = f"{db_user}:{db_password}" if db_password else db_user
+
+    if db_type == "mysql":
+        return (
+            f"mysql+pymysql://{user_part}@{db_host}:{int(db_port)}/{db_name}?charset=utf8mb4",
+            {"connect_timeout": 3},
+        )
+    if db_type == "postgresql":
+        return (
+            f"postgresql://{user_part}@{db_host}:{int(db_port)}/{db_name}",
+            {"connect_timeout": 3},
+        )
+    raise ValueError(f"Unsupported database type: {db_type}")
+
+
+def _check_database(values: Dict[str, str]) -> Optional[Dict[str, str]]:
+    try:
+        from sqlalchemy import create_engine, text
+
+        url, connect_args = _build_database_url(values)
+        engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        finally:
+            engine.dispose()
+        return None
+    except Exception as e:
+        return {
+            "key": "DATABASE_CONNECTION",
+            "label": "Database connection",
+            "group": "Database",
+            "message": f"{type(e).__name__}: {str(e)[:300]}",
+        }
+
+
+def _check_redis(values: Dict[str, str]) -> Optional[Dict[str, str]]:
+    redis_url = (values.get("REDIS_URL") or "").strip()
+    if not redis_url:
+        return None
+    redis_password = (values.get("REDIS_PASSWORD") or "").strip()
+    if redis_password and redis_url.startswith("redis://") and "@" not in redis_url.split("redis://", 1)[1].split("/", 1)[0]:
+        redis_url = redis_url.replace("redis://", f"redis://:{redis_password}@", 1)
+    try:
+        import redis as redis_lib
+
+        client = redis_lib.Redis.from_url(redis_url, socket_connect_timeout=3, socket_timeout=3)
+        client.ping()
+        return None
+    except Exception as e:
+        return {
+            "key": "REDIS_CONNECTION",
+            "label": "Redis connection",
+            "group": "Redis",
+            "message": f"{type(e).__name__}: {str(e)[:300]}",
+        }
+
 
 def read_env_file() -> Dict[str, str]:
     values: Dict[str, str] = {}
@@ -85,10 +149,21 @@ def validate_env(values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     for field in ENV_FIELDS:
         if field.required and not str(values.get(field.key, "")).strip():
             missing.append({"key": field.key, "label": field.label, "group": field.group})
+
+    errors = []
+    if not missing:
+        db_error = _check_database(values)
+        if db_error:
+            errors.append(db_error)
+        redis_error = _check_redis(values)
+        if redis_error:
+            errors.append(redis_error)
+
     return {
-        "ready": not missing,
+        "ready": not missing and not errors,
         "env_exists": ENV_PATH.exists(),
         "missing": missing,
+        "errors": errors,
         "fields": [field.model_dump() for field in ENV_FIELDS],
         "values": get_env_values(mask_secret=True),
     }

@@ -3271,7 +3271,13 @@
                 if (main) main.prepend(panel);
             }
             if (status.ready) { panel.style.display = 'none'; return; }
-            const missing = (status.missing || []).map(i => `<span class="status-tag status-failed">${escapeHtml(i.label || i.key)} (${escapeHtml(i.key)})</span>`).join('');
+
+            const missing = (status.missing || [])
+                .map(i => `<span class="status-tag status-failed">${escapeHtml(i.label || i.key)} (${escapeHtml(i.key)})</span>`)
+                .join('');
+            const errors = (status.errors || [])
+                .map(i => `<div class="bootstrap-error-item"><strong>${escapeHtml(i.label || i.key)}</strong><span>${escapeHtml(i.message || '连接或配置检查失败')}</span></div>`)
+                .join('');
             const fields = status.fields || [];
             const values = status.values || {};
             const groups = fields.reduce((acc, f) => { (acc[f.group] ||= []).push(f); return acc; }, {});
@@ -3284,11 +3290,12 @@
                     }).join('')}
                 </div></div>`).join('');
             panel.innerHTML = `
-                <div class="bootstrap-head"><div><h2>初始化配置</h2><p>项目缺少必要环境变量，当前仅开放配置页面。请补全配置并重启 Web 服务后再进入正式功能。</p></div><button class="secondary" onclick="restartWebService()">重启 Web 服务</button></div>
+                <div class="bootstrap-head"><div><h2>配置维护模式</h2><p>项目配置未通过检查，当前网页端已正常启动，但下载、订阅、任务管理等业务功能暂不运行。请在此页修改配置，保存后重启 Web 服务。</p></div><button class="secondary" onclick="restartWebService()">重启 Web 服务</button></div>
                 <div class="bootstrap-missing"><strong>缺失配置：</strong>${missing || '<span class="status-tag status-completed">无</span>'}</div>
+                ${errors ? `<div class="bootstrap-errors"><strong>异常情况：</strong>${errors}</div>` : ''}
                 ${forms}
-                <div class="settings-actions"><button onclick="saveBootstrapConfig()">保存初始化配置</button><button class="secondary" onclick="loadBootstrapStatus()">重新检测</button></div>
-                <p class="form-hint">密码类字段会脱敏显示；保留 ******** 保存时不会覆盖已有密钥。</p>`;
+                <div class="settings-actions"><button onclick="saveBootstrapConfig()">保存配置</button><button class="secondary" onclick="loadBootstrapStatus()">重新检测</button></div>
+                <p class="form-hint">密码类字段会脱敏显示；保留 ******** 保存时不会覆盖已有密钥。数据库和 Redis 这类基础配置修改后，需要重启 Web 服务才会让正式功能恢复。</p>`;
             panel.style.display = '';
             switchPlatform('douyin');
             switchSubTab('settings');
@@ -3562,5 +3569,6 @@
             if (logPollingTimer) { clearInterval(logPollingTimer); logPollingTimer = null; }
         }
 
-        init();
-        initLogViewer();
+        init().then(() => {
+            if (!bootstrapMode) initLogViewer();
+        });

@@ -21,12 +21,29 @@ from app.core.env_config import validate_env
 
 BOOTSTRAP_STATUS = validate_env()
 BOOTSTRAP_MODE = not BOOTSTRAP_STATUS["ready"]
+settings = None
 
 if not BOOTSTRAP_MODE:
-    from app.models.database import init_db
-    from app.core.config import settings, ensure_download_dir
-    from app.core.process_manager import process_manager
-    from app.api import tasks, authors, system, x_tasks, works
+    try:
+        from app.models.database import init_db
+        from app.core.config import settings, ensure_download_dir
+        from app.core.process_manager import process_manager
+        from app.api import tasks, authors, system, x_tasks, works
+    except Exception as e:
+        BOOTSTRAP_MODE = True
+        BOOTSTRAP_STATUS = {
+            **BOOTSTRAP_STATUS,
+            "ready": False,
+            "errors": [
+                *BOOTSTRAP_STATUS.get("errors", []),
+                {
+                    "key": "APP_STARTUP",
+                    "label": "Application startup",
+                    "group": "Application",
+                    "message": f"{type(e).__name__}: {str(e)[:300]}",
+                },
+            ],
+        }
 
 
 @asynccontextmanager
@@ -42,8 +59,22 @@ async def lifespan(app: FastAPI):
     print("🚀 启动媒体下载管理系统...")
     
     # 初始化数据库
-    await init_db()
-    print("✅ 数据库初始化完成")
+    try:
+        await init_db()
+        print("✅ 数据库初始化完成")
+    except Exception as e:
+        BOOTSTRAP_STATUS["ready"] = False
+        BOOTSTRAP_STATUS.setdefault("errors", []).append({
+            "key": "DATABASE_INIT",
+            "label": "Database initialization",
+            "group": "Database",
+            "message": f"{type(e).__name__}: {str(e)[:300]}",
+        })
+        app.state.degraded_mode = True
+        app.state.bootstrap_status = BOOTSTRAP_STATUS
+        print(f"❌ 数据库初始化失败，进入配置维护模式: {e}")
+        yield
+        return
     
     # 确保下载目录存在
     download_dir = ensure_download_dir()
@@ -94,6 +125,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.state.bootstrap_status = BOOTSTRAP_STATUS
+app.state.degraded_mode = BOOTSTRAP_MODE
 # 禁用 API 响应缓存，避免页面显示过时数据
 @app.middleware("http")
 async def no_cache_api_responses(request: Request, call_next):
@@ -152,5 +185,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=False if BOOTSTRAP_MODE else settings.DEBUG
+        reload=False if BOOTSTRAP_MODE or settings is None else settings.DEBUG
     )
