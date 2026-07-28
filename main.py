@@ -17,6 +17,7 @@ import os
 
 from app.api import bootstrap
 from app.core.env_config import validate_env
+from app.core.error_handling import register_exception_handlers
 
 
 BOOTSTRAP_STATUS = validate_env()
@@ -38,8 +39,8 @@ if not BOOTSTRAP_MODE:
                 *BOOTSTRAP_STATUS.get("errors", []),
                 {
                     "key": "APP_STARTUP",
-                    "label": "Application startup",
-                    "group": "Application",
+                    "label": "应用启动",
+                    "group": "应用",
                     "message": f"{type(e).__name__}: {str(e)[:300]}",
                 },
             ],
@@ -66,8 +67,8 @@ async def lifespan(app: FastAPI):
         BOOTSTRAP_STATUS["ready"] = False
         BOOTSTRAP_STATUS.setdefault("errors", []).append({
             "key": "DATABASE_INIT",
-            "label": "Database initialization",
-            "group": "Database",
+            "label": "数据库初始化",
+            "group": "数据库",
             "message": f"{type(e).__name__}: {str(e)[:300]}",
         })
         app.state.degraded_mode = True
@@ -127,6 +128,7 @@ app = FastAPI(
 
 app.state.bootstrap_status = BOOTSTRAP_STATUS
 app.state.degraded_mode = BOOTSTRAP_MODE
+register_exception_handlers(app)
 # 禁用 API 响应缓存，避免页面显示过时数据
 @app.middleware("http")
 async def no_cache_api_responses(request: Request, call_next):

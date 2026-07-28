@@ -8,6 +8,7 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23fe2c55'/><path d='M50 20v40m0 0l-16-16m16 16l16-16M30 72h40' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/app.css?v=20260707">
+    <link rel="stylesheet" href="/static/css/error-notice.css?v=20260729">
 </head>
     <link rel="stylesheet" href="/static/css/ui-refresh.css?v=20260728">
 
@@ -17,7 +18,7 @@
             <div class="logo sidebar-brand">
                 <div class="logo-icon">📥</div>
                 <div class="logo-copy">
-                    <div class="logo-kicker">Media Control Deck</div>
+                    <div class="logo-kicker">媒体控制台</div>
                     <h1>媒体下载管理系统</h1>
                 </div>
             </div>
@@ -383,7 +384,7 @@
                             <label class="level-debug"><input type="checkbox" data-log-level="debug" onchange="onLogFilterChange()"> DEBUG</label>
                             <label class="level-info"><input type="checkbox" data-log-level="info" checked onchange="onLogFilterChange()"> INFO</label>
                             <label class="level-warning"><input type="checkbox" data-log-level="warning" checked onchange="onLogFilterChange()"> WARNING</label>
-                            <label class="level-error"><input type="checkbox" data-log-level="error" checked onchange="onLogFilterChange()"> ERROR</label>
+                            <label class="level-error"><input type="checkbox" data-log-level="error" checked onchange="onLogFilterChange()"> 错误</label>
                         </div>
                         <div class="log-list" id="logList">
                             <div style="color:var(--text-secondary);text-align:center;padding:24px;">点击「刷新」或开启「实时刷新」查看日志</div>
@@ -550,6 +551,7 @@
         </button>
     </nav>
 
+    <script src="/static/js/error-notice.js?v=20260729"></script>
     <script src="/static/js/app.js?v=20260707"></script>
 </body>
 

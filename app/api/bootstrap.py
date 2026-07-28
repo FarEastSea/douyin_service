@@ -20,9 +20,9 @@ def _effective_bootstrap_status(request: Request):
         elif not status["errors"]:
             status["errors"].append({
                 "key": "RESTART_REQUIRED",
-                "label": "Restart required",
-                "group": "Application",
-                "message": "Configuration has been saved. Restart the Web service before using normal functions.",
+                "label": "需要重启服务",
+                "group": "应用",
+                "message": "配置已保存，请重启 Web 服务后再使用正常功能。",
             })
     return status
 
@@ -41,7 +41,7 @@ async def save_bootstrap_config(request: Request, payload: dict = Body(...)):
     status = _effective_bootstrap_status(request)
     return {
         "success": True,
-        "message": "Configuration saved. Restart the Web service for changes to take effect.",
+        "message": "配置已保存，请重启 Web 服务使配置生效。",
         **status,
     }
 
@@ -62,7 +62,7 @@ def _database_url_from_config(cfg: DatabaseConfig):
         return f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}", {"connect_timeout": 3}
     if db_type == "mysql":
         return f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4", {"connect_timeout": 3}
-    raise ValueError(f"Unsupported database type: {cfg.db_type}")
+    raise ValueError(f"不支持的数据库类型：{cfg.db_type}")
 
 
 @router.get("/config/database")
@@ -131,7 +131,7 @@ async def restart_web_service():
         return {
             "success": False,
             "reload_supported": False,
-            "message": "Configuration has been saved. Restart the Web service before using normal functions.",
+            "message": "配置已保存，请重启 Web 服务后再使用正常功能。",
         }
     try:
         os.kill(ppid, signal.SIGHUP)

@@ -18,36 +18,36 @@ class EnvField(BaseModel):
 
 
 ENV_FIELDS: List[EnvField] = [
-    EnvField(key="DEBUG", label="Debug", group="Application", default="false"),
-    EnvField(key="DOWNLOAD_DIR", label="Download directory", group="Application", default="/downloads", required=True),
-    EnvField(key="X_DOWNLOAD_DIR", label="X download directory", group="Application", default="/downloads/X"),
-    EnvField(key="DB_TYPE", label="Database type", group="Database", default="postgresql", required=True),
-    EnvField(key="DB_HOST", label="Database host", group="Database", default="localhost", required=True),
-    EnvField(key="DB_PORT", label="Database port", group="Database", default="5432", required=True),
-    EnvField(key="DB_USER", label="Database user", group="Database", default="postgres", required=True),
-    EnvField(key="DB_PASSWORD", label="Database password", group="Database", default="", required=True, secret=True),
-    EnvField(key="DB_NAME", label="Database name", group="Database", default="douyin_service", required=True),
-    EnvField(key="REDIS_URL", label="Redis URL", group="Redis", default="redis://localhost:6379/0", required=True),
-    EnvField(key="REDIS_PASSWORD", label="Redis password", group="Redis", default="", secret=True),
-    EnvField(key="CELERY_BROKER_URL", label="Celery broker URL", group="Celery", default="redis://localhost:6379/0"),
-    EnvField(key="CELERY_RESULT_BACKEND", label="Celery result backend", group="Celery", default="redis://localhost:6379/0"),
-    EnvField(key="MAX_CONCURRENT_DOWNLOADS", label="Max concurrent downloads", group="Download", default="3"),
-    EnvField(key="DOWNLOAD_CHUNK_SIZE", label="Download chunk size", group="Download", default="1048576"),
-    EnvField(key="DOWNLOAD_TIMEOUT", label="Download timeout seconds", group="Download", default="30"),
-    EnvField(key="DOWNLOAD_RETRY_COUNT", label="Download retry count", group="Download", default="3"),
-    EnvField(key="DOWNLOAD_RETRY_DELAY", label="Download retry delay", group="Download", default="5"),
-    EnvField(key="DEFAULT_CHECK_INTERVAL", label="Default check interval", group="Subscription", default="21600"),
-    EnvField(key="MIN_CHECK_INTERVAL", label="Minimum check interval", group="Subscription", default="3600"),
-    EnvField(key="AUTO_CHECK_ENABLED", label="Auto check enabled", group="Subscription", default="true"),
-    EnvField(key="REQUEST_DELAY", label="Douyin request delay", group="Douyin", default="3.0"),
-    EnvField(key="AUTHOR_CHECK_DELAY", label="Author check delay", group="Douyin", default="30.0"),
-    EnvField(key="STUCK_TASK_TIMEOUT", label="Stuck task timeout", group="Task", default="600"),
-    EnvField(key="DOUYIN_COOKIE", label="Douyin Cookie", group="Account", default="", secret=True),
-    EnvField(key="X_DOWNLOAD_ENGINE", label="X download engine", group="X", default="gallery-dl"),
-    EnvField(key="X_COOKIE_FILE", label="X Cookie file", group="X", default=""),
-    EnvField(key="X_TASK_LOG_MAX_LINES", label="X task log max lines", group="X", default="400"),
-    EnvField(key="X_TASK_LOG_TTL_SECONDS", label="X task log TTL seconds", group="X", default="604800"),
-    EnvField(key="X_TASK_STATE_TTL_SECONDS", label="X task state TTL seconds", group="X", default="86400"),
+    EnvField(key="DEBUG", label="调试模式", group="应用", default="false", help="生产环境建议关闭"),
+    EnvField(key="DOWNLOAD_DIR", label="抖音下载目录", group="应用", default="/downloads", required=True),
+    EnvField(key="X_DOWNLOAD_DIR", label="X 下载目录", group="应用", default="/downloads/X"),
+    EnvField(key="DB_TYPE", label="数据库类型", group="数据库", default="postgresql", required=True),
+    EnvField(key="DB_HOST", label="数据库主机", group="数据库", default="localhost", required=True),
+    EnvField(key="DB_PORT", label="数据库端口", group="数据库", default="5432", required=True),
+    EnvField(key="DB_USER", label="数据库用户", group="数据库", default="postgres", required=True),
+    EnvField(key="DB_PASSWORD", label="数据库密码", group="数据库", default="", required=True, secret=True),
+    EnvField(key="DB_NAME", label="数据库名称", group="数据库", default="douyin_service", required=True),
+    EnvField(key="REDIS_URL", label="Redis 连接地址", group="Redis", default="redis://localhost:6379/0", required=True),
+    EnvField(key="REDIS_PASSWORD", label="Redis 密码", group="Redis", default="", secret=True),
+    EnvField(key="CELERY_BROKER_URL", label="Celery 消息队列地址", group="后台任务", default="redis://localhost:6379/0"),
+    EnvField(key="CELERY_RESULT_BACKEND", label="Celery 结果存储地址", group="后台任务", default="redis://localhost:6379/0"),
+    EnvField(key="MAX_CONCURRENT_DOWNLOADS", label="最大同时下载数", group="下载", default="3"),
+    EnvField(key="DOWNLOAD_CHUNK_SIZE", label="下载分块大小（字节）", group="下载", default="1048576"),
+    EnvField(key="DOWNLOAD_TIMEOUT", label="下载超时（秒）", group="下载", default="30"),
+    EnvField(key="DOWNLOAD_RETRY_COUNT", label="下载重试次数", group="下载", default="3"),
+    EnvField(key="DOWNLOAD_RETRY_DELAY", label="下载重试间隔（秒）", group="下载", default="5"),
+    EnvField(key="DEFAULT_CHECK_INTERVAL", label="默认订阅检查间隔（秒）", group="订阅", default="21600"),
+    EnvField(key="MIN_CHECK_INTERVAL", label="最小订阅检查间隔（秒）", group="订阅", default="3600"),
+    EnvField(key="AUTO_CHECK_ENABLED", label="启用自动订阅检查", group="订阅", default="true"),
+    EnvField(key="REQUEST_DELAY", label="抖音分页请求间隔（秒）", group="抖音", default="3.0"),
+    EnvField(key="AUTHOR_CHECK_DELAY", label="作者检查间隔（秒）", group="抖音", default="30.0"),
+    EnvField(key="STUCK_TASK_TIMEOUT", label="任务卡住判定时间（秒）", group="任务", default="600"),
+    EnvField(key="DOUYIN_COOKIE", label="抖音 Cookie", group="账号", default="", secret=True),
+    EnvField(key="X_DOWNLOAD_ENGINE", label="X 下载引擎", group="X", default="gallery-dl"),
+    EnvField(key="X_COOKIE_FILE", label="X Cookie 文件", group="X", default=""),
+    EnvField(key="X_TASK_LOG_MAX_LINES", label="X 任务日志最大行数", group="X", default="400"),
+    EnvField(key="X_TASK_LOG_TTL_SECONDS", label="X 任务日志保留时间（秒）", group="X", default="604800"),
+    EnvField(key="X_TASK_STATE_TTL_SECONDS", label="X 任务状态保留时间（秒）", group="X", default="86400"),
 ]
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
@@ -71,7 +71,7 @@ def _build_database_url(values: Dict[str, str]) -> Tuple[str, Dict[str, int]]:
             f"postgresql://{user_part}@{db_host}:{int(db_port)}/{db_name}",
             {"connect_timeout": 3},
         )
-    raise ValueError(f"Unsupported database type: {db_type}")
+    raise ValueError(f"不支持的数据库类型：{db_type}")
 
 
 def _check_database(values: Dict[str, str]) -> Optional[Dict[str, str]]:
@@ -89,8 +89,8 @@ def _check_database(values: Dict[str, str]) -> Optional[Dict[str, str]]:
     except Exception as e:
         return {
             "key": "DATABASE_CONNECTION",
-            "label": "Database connection",
-            "group": "Database",
+            "label": "数据库连接",
+            "group": "数据库",
             "message": f"{type(e).__name__}: {str(e)[:300]}",
         }
 
@@ -111,7 +111,7 @@ def _check_redis(values: Dict[str, str]) -> Optional[Dict[str, str]]:
     except Exception as e:
         return {
             "key": "REDIS_CONNECTION",
-            "label": "Redis connection",
+            "label": "Redis 连接",
             "group": "Redis",
             "message": f"{type(e).__name__}: {str(e)[:300]}",
         }
@@ -193,7 +193,7 @@ def write_env_updates(updates: Dict[str, Any]) -> None:
         new_lines.append(line)
 
     if not new_lines:
-        new_lines.append("# douyin_service environment")
+        new_lines.append("# 媒体下载管理系统环境配置")
     for field in ENV_FIELDS:
         if field.key in clean_updates and field.key not in seen:
             new_lines.append(f"{field.key}={clean_updates[field.key]}")
