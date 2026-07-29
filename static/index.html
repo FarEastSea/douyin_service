@@ -8,8 +8,8 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23fe2c55'/><path d='M50 20v40m0 0l-16-16m16 16l16-16M30 72h40' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/app.css?v=20260730">
-    <link rel="stylesheet" href="/static/css/error-notice.css?v=20260729">
-    <link rel="stylesheet" href="/static/css/ui-refresh.css?v=20260730-3">
+    <link rel="stylesheet" href="/static/css/error-notice.css?v=20260730">
+    <link rel="stylesheet" href="/static/css/ui-refresh.css?v=20260730-7">
 </head>
 
 <body>
@@ -124,16 +124,9 @@
                 </div>
 
                 <div class="card" data-sub="authors">
-                    <div class="card-header">
+                    <div class="card-header author-management-header">
                         <div class="card-title"><div class="card-icon">👤</div>作者管理</div>
-                        <button class="secondary" onclick="checkAllSubscriptions()">检查更新</button>
-                    </div>
-                    <div class="input-group search-input-group">
-                        <input type="text" id="authorUrl" placeholder="添加作者（链接）或搜索作者（昵称/ID）..." oninput="handleAuthorInput(this.value)" autocomplete="off">
-                        <button onclick="handleAuthorAction()">添加/搜索</button>
-                        <div class="search-results" id="authorSearchResults" style="display:none;"></div>
-                    </div>
-                    <div class="author-filter-bar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+                        <div class="author-filter-bar">
                         <span style="color:var(--text-secondary);font-size:12px;">筛选</span>
 
                         <div class="filter-select" data-filter-select data-filter-onchange="onAuthorFilterChange">
@@ -142,9 +135,9 @@
                                 <span class="filter-select-caret">⌄</span>
                             </button>
                             <div class="filter-select-menu" data-filter-menu role="listbox">
-                                <button type="button" class="filter-select-option active" data-value="" data-label="全部订阅状态">全部订阅状态</button>
-                                <button type="button" class="filter-select-option" data-value="true" data-label="已订阅">已订阅</button>
-                                <button type="button" class="filter-select-option" data-value="false" data-label="未订阅">未订阅</button>
+                                <button type="button" class="filter-select-option active" data-value="" data-label="全部订阅状态" data-compact-label="订阅">全部订阅状态</button>
+                                <button type="button" class="filter-select-option" data-value="true" data-label="已订阅" data-compact-label="已订阅">已订阅</button>
+                                <button type="button" class="filter-select-option" data-value="false" data-label="未订阅" data-compact-label="未订阅">未订阅</button>
                             </div>
                             <input type="hidden" id="authorSubscribeFilter" value="">
                         </div>
@@ -155,16 +148,23 @@
                                 <span class="filter-select-caret">⌄</span>
                             </button>
                             <div class="filter-select-menu" data-filter-menu role="listbox">
-                                <button type="button" class="filter-select-option active" data-value="all" data-label="全部账号状态">全部账号状态</button>
-                                <button type="button" class="filter-select-option" data-value="abnormal" data-label="仅异常账号">仅异常账号</button>
-                                <button type="button" class="filter-select-option" data-value="normal" data-label="仅正常账号">仅正常账号</button>
-                                <button type="button" class="filter-select-option" data-value="banned" data-label="已封号/禁言">已封号/禁言</button>
-                                <button type="button" class="filter-select-option" data-value="deleted" data-label="已销号">已销号</button>
-                                <button type="button" class="filter-select-option" data-value="restricted" data-label="不可访问">不可访问</button>
-                                <button type="button" class="filter-select-option" data-value="unavailable" data-label="状态异常">状态异常</button>
+                                <button type="button" class="filter-select-option active" data-value="all" data-label="全部账号状态" data-compact-label="账号">全部账号状态</button>
+                                <button type="button" class="filter-select-option" data-value="abnormal" data-label="仅异常账号" data-compact-label="异常">仅异常账号</button>
+                                <button type="button" class="filter-select-option" data-value="normal" data-label="仅正常账号" data-compact-label="正常">仅正常账号</button>
+                                <button type="button" class="filter-select-option" data-value="banned" data-label="已封号/禁言" data-compact-label="封禁">已封号/禁言</button>
+                                <button type="button" class="filter-select-option" data-value="deleted" data-label="已销号" data-compact-label="销号">已销号</button>
+                                <button type="button" class="filter-select-option" data-value="restricted" data-label="不可访问" data-compact-label="受限">不可访问</button>
+                                <button type="button" class="filter-select-option" data-value="unavailable" data-label="状态异常" data-compact-label="异常">状态异常</button>
                             </div>
                             <input type="hidden" id="authorStatusFilter" value="all">
                         </div>
+                        </div>
+                        <button class="secondary author-check-update" onclick="checkAllSubscriptions()">检查更新</button>
+                    </div>
+                    <div class="input-group search-input-group">
+                        <input type="text" id="authorUrl" placeholder="添加作者（链接）或搜索作者（昵称/ID）..." oninput="handleAuthorInput(this.value)" autocomplete="off">
+                        <button onclick="handleAuthorAction()">添加/搜索</button>
+                        <div class="search-results" id="authorSearchResults" style="display:none;"></div>
                     </div>
                     <div class="author-list" id="authorList">
                         <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无作者</p></div>

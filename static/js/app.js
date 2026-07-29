@@ -1247,6 +1247,7 @@
                     if (!matched) matched = options[0];
                     options.forEach(btn => btn.classList.toggle('active', btn === matched));
                     labelEl.textContent = matched?.dataset.label || matched?.textContent?.trim() || '';
+                    labelEl.dataset.compactLabel = matched?.dataset.compactLabel || labelEl.textContent;
                 };
 
                 const syncFromInput = () => {
@@ -1347,10 +1348,10 @@
                     ? `<button class="author-tracking-tag ${updateTone}" onclick="openAuthorAutoUpdate(${author.id})" title="查看该作者自动更新详情">${escapeHtml(updateText)}</button>`
                     : '';
                 return `
-                <div class="author-item" data-author-id="${author.id}" style="flex-wrap:wrap;">
+                <div class="author-item" data-author-id="${author.id}">
                     <button class="author-avatar author-avatar-button" onclick="openAuthorHistory(${author.id})" title="查看作者资料" aria-label="查看 ${escapeHtml(author.nickname || '作者')} 的资料">${avatarHtml}</button>
-                    <div class="author-name"><div class="author-name-row">${authorNameHtml}${statusBadgeHtml}</div><div class="author-tracking-tags">${updateBadges}</div></div>
-                    <span style="color: var(--text-secondary); font-size: 12px;">
+                    <div class="author-name"><div class="author-name-row">${authorNameHtml}${statusBadgeHtml}${updateBadges}</div></div>
+                    <span class="author-work-stats">
                         ${author.total_works || 0} 作品 / ${author.downloaded_works || 0} 已下载
                     </span>
                     <div class="author-actions">
@@ -2318,9 +2319,12 @@
                 : '<span>👤</span>';
             modal.classList.add('show'); modal.setAttribute('aria-hidden', 'false');
             document.getElementById('authorHistoryTitle').textContent = cachedAuthor.nickname || '作者资料';
-            document.getElementById('authorHistoryMeta').textContent = '点击头像可同步最新资料';
+            document.getElementById('authorHistoryMeta').textContent = '点击头像可放大查看';
             body.innerHTML = `<section class="author-profile-hero">
-                <button class="author-profile-avatar sync-avatar-btn" data-author-id="${authorId}" onclick="syncAuthorAvatar(${authorId})" title="同步头像与作者资料">${cachedAvatar}<span>同步资料</span></button>
+                <div class="author-profile-avatar-group">
+                    <button class="author-profile-avatar" onclick="previewAuthorAvatar(${authorId})" title="放大查看头像" aria-label="放大查看 ${escapeHtml(cachedAuthor.nickname || '作者')} 的头像">${cachedAvatar}</button>
+                    <button class="sync-avatar-btn author-profile-sync-overlay" data-author-id="${authorId}" onclick="syncAuthorAvatar(${authorId})" title="同步头像与作者资料">同步资料</button>
+                </div>
                 <div class="author-profile-summary">
                     <h3>${escapeHtml(cachedAuthor.nickname || '作者')}</h3>
                     <p>${cachedAuthor.total_works || 0} 作品 · ${cachedAuthor.downloaded_works || 0} 已下载</p>
@@ -2333,7 +2337,7 @@
             try {
                 const data = await apiRequest(`${API_BASE}/authors/${authorId}/profile-history`, {}, '获取作者资料历史失败');
                 document.getElementById('authorHistoryTitle').textContent = data.author.nickname || cachedAuthor.nickname || '作者资料';
-                document.getElementById('authorHistoryMeta').textContent = `${data.items.length} 条资料变更 · 点击头像可同步`;
+                document.getElementById('authorHistoryMeta').textContent = `${data.items.length} 条资料变更 · 点击头像可放大`;
                 const list = document.getElementById('authorProfileHistoryList');
                 const headingMeta = body.querySelector('.section-heading span');
                 if (headingMeta) headingMeta.textContent = `${data.items.length} 条记录`;
@@ -2352,6 +2356,21 @@
         function closeAuthorHistory() {
             const modal = document.getElementById('authorHistoryModal');
             if (modal) { modal.classList.remove('show'); modal.setAttribute('aria-hidden', 'true'); }
+        }
+
+        function previewAuthorAvatar(authorId) {
+            const author = window._currentAuthorMap?.[authorId] || {};
+            if (!author.avatar_url) {
+                showToast('暂无可用头像', 'error');
+                return;
+            }
+            closeAuthorHistory();
+            openMediaPreview({
+                type: 'image',
+                url: author.avatar_url,
+                title: `${author.nickname || '作者'} · 头像`,
+                meta: '作者头像'
+            });
         }
 
         async function openAuthorAutoUpdate(authorId) {

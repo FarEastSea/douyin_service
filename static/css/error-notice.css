@@ -3,14 +3,15 @@
     z-index: 10050;
     top: 18px;
     right: 18px;
-    width: min(520px, calc(100vw - 28px));
-    padding: 16px;
+    width: min(560px, calc(100vw - 28px));
+    padding: 18px 18px 16px;
     border: 1px solid color-mix(in srgb, var(--error, #ef4444), transparent 45%);
     border-left: 5px solid var(--error, #ef4444);
-    border-radius: 12px;
-    background: var(--card-bg, #fff);
+    border-radius: 18px;
+    background: var(--bg-card, #171a24);
     color: var(--text-primary, #1f2937);
-    box-shadow: 0 18px 50px rgba(15, 23, 42, .24);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .38), inset 0 1px rgba(255, 255, 255, .04);
+    backdrop-filter: blur(18px);
     opacity: 0;
     visibility: hidden;
     transform: translateY(-12px);
@@ -33,26 +34,28 @@
 
 .global-error-heading strong {
     color: var(--error, #ef4444);
-    font-size: 16px;
+    font-size: 17px;
+    letter-spacing: .02em;
 }
 
 .global-error-close,
 .global-error-actions button {
     border: 1px solid var(--border-color, #d1d5db);
-    border-radius: 7px;
-    background: transparent;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--text-primary, #fff), transparent 94%);
     color: inherit;
     cursor: pointer;
 }
 
 .global-error-close {
-    padding: 4px 9px;
+    padding: 7px 12px;
 }
 
 .global-error-message {
     margin-top: 10px;
     font-weight: 650;
     line-height: 1.5;
+    color: var(--text-primary, #f5f7ff);
 }
 
 .global-error-suggestion,
@@ -66,11 +69,13 @@
 .global-error-suggestion,
 .global-error-details {
     font-size: 14px;
+    color: var(--text-secondary, #aeb3c7);
 }
 
 .global-error-details {
     padding: 8px 10px;
-    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--error, #ef4444), transparent 82%);
+    border-radius: 10px;
     background: color-mix(in srgb, var(--error, #ef4444), transparent 92%);
 }
 
@@ -86,7 +91,15 @@
 }
 
 .global-error-actions button {
-    padding: 6px 11px;
+    padding: 8px 13px;
+    border-color: color-mix(in srgb, var(--error, #ef4444), transparent 55%);
+    color: var(--error, #ef4444);
+    font-weight: 650;
+}
+
+[data-theme="light"] .global-error-notice {
+    background: rgba(255, 255, 255, .96);
+    box-shadow: 0 24px 64px rgba(54, 45, 70, .2);
 }
 
 @media (max-width: 640px) {
