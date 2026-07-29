@@ -54,6 +54,13 @@ def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing:
 
     work.work_type = work_type
 
+    try:
+        create_time = int(work_payload.get("create_time") or 0)
+    except (TypeError, ValueError):
+        create_time = 0
+    if create_time > 0:
+        work.published_at = datetime.fromtimestamp(create_time)
+
     if work_type == "video":
         work.image_count = 0
         if video_url or not preserve_existing:
@@ -127,6 +134,7 @@ def _serialize_download_task(task: DownloadTask) -> DownloadTaskResponse:
     item.aweme_id = work.aweme_id if work else None
     item.work_title = work.title if work else None
     item.work_type = work.work_type if work else None
+    item.published_at = work.published_at if work else None
     item.image_count = work.image_count if work else 0
     item.preview_media_type = preview_data["preview_media_type"]
     item.preview_url = preview_data["preview_url"]

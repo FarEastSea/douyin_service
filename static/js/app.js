@@ -832,8 +832,16 @@
                 title: task.file_name || task.work_title || '媒体预览',
                 meta: metaParts.join(' · '),
                 url: task.preview_url,
+                publishedAt: task.published_at,
                 images: task.preview_media_type === 'image' ? [task.preview_url] : []
             });
+        }
+
+        function formatPublishedAt(value) {
+            if (!value) return '\u672a\u77e5\uff08\u5386\u53f2\u8d44\u6e90\uff09';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return '\u672a\u77e5\uff08\u5386\u53f2\u8d44\u6e90\uff09';
+            return date.toLocaleString('zh-CN', { hour12: false });
         }
 
         function openVideoPreview(taskId) {
@@ -864,7 +872,10 @@
             currentPreviewImageIndex = Math.max(0, Math.min(config?.startIndex || 0, Math.max(currentPreviewImages.length - 1, 0)));
 
             title.textContent = config?.title || '媒体预览';
-            meta.textContent = config?.meta || '';
+            const publishedText = config && Object.prototype.hasOwnProperty.call(config, 'publishedAt')
+                ? `\u53d1\u5e03\u65f6\u95f4\uff1a${formatPublishedAt(config.publishedAt)}`
+                : '';
+            meta.textContent = [config?.meta, publishedText].filter(Boolean).join(' \u00b7 ');
 
             video.pause();
             video.onloadedmetadata = null;
@@ -1950,7 +1961,8 @@
                     type: 'video',
                     title: work.title || '视频预览',
                     meta: `${currentAuthorPreview?.authorName || '作者'} · 视频作品`,
-                    url: work.video_url
+                    url: work.video_url,
+                    publishedAt: work.published_at
                 });
                 return;
             }
@@ -1965,7 +1977,8 @@
                 title: work.title || '图片预览',
                 meta: `${currentAuthorPreview?.authorName || '作者'} · 图集 ${work.image_urls.length} 张`,
                 url: work.image_urls[0],
-                images: work.image_urls
+                images: work.image_urls,
+                publishedAt: work.published_at
             });
         }
 
@@ -1982,7 +1995,8 @@
                 title: work.title || (file.media_type === 'video' ? '实况图片预览' : '图片预览'),
                 meta: `${currentAuthorPreview?.authorName || '作者'} · 第 ${fileIndex + 1} 张${file.media_type === 'video' ? '（实况）' : ''}`,
                 url: file.preview_url,
-                images: file.media_type === 'video' ? [] : [file.preview_url]
+                images: file.media_type === 'video' ? [] : [file.preview_url],
+                publishedAt: work.published_at
             });
         }
 

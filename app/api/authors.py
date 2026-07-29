@@ -196,6 +196,7 @@ def _serialize_work_response(work: Work) -> WorkResponse:
         image_count=work.image_count,
         is_downloaded=work.is_downloaded,
         discovered_at=work.discovered_at,
+        published_at=work.published_at,
         video_url=video_url,
         image_urls=image_urls,
         primary_preview_url=primary_preview_url,

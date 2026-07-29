@@ -81,6 +81,8 @@ class Work(Base):
     _excluded_file_indices = Column("excluded_file_indices", Text)
     
     discovered_at = Column(DateTime, server_default=func.now())
+    # Actual platform publication time; legacy rows remain nullable until refreshed.
+    published_at = Column(DateTime, nullable=True)
     
     # 关系
     author = relationship("Author", back_populates="works")

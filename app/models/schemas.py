@@ -90,6 +90,7 @@ class WorkResponse(BaseModel):
     image_count: int
     is_downloaded: bool
     discovered_at: datetime
+    published_at: Optional[datetime] = None
     video_url: Optional[str] = None
     image_urls: List[str] = Field(default_factory=list)
     primary_preview_url: Optional[str] = None
@@ -137,6 +138,7 @@ class DownloadTaskResponse(BaseModel):
     aweme_id: Optional[str] = None
     work_title: Optional[str] = None
     work_type: Optional[str] = None
+    published_at: Optional[datetime] = None
     image_count: int = 0
     preview_media_type: Optional[str] = None
     preview_url: Optional[str] = None

@@ -100,6 +100,13 @@ def _work_create_time(item: dict) -> int:
         return 0
 
 
+def _apply_work_published_at(work: Work, item: dict) -> None:
+    """Persist platform publication time while preserving legacy values when absent."""
+    create_time = _work_create_time(item)
+    if create_time > 0:
+        work.published_at = datetime.fromtimestamp(create_time)
+
+
 def _select_latest_work(work_list: list) -> dict | None:
     """
     选出"真正最新"的作品作为增量游标。
@@ -736,6 +743,7 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
                 work = existing_work
                 # 更新 URL（抖音 URL 会过期）
                 _apply_work_media_payload(work, item, preserve_existing=True)
+                _apply_work_published_at(work, item)
                 work.title = item.get("desc", "") or work.title
             else:
                 # 创建新作品记录
@@ -746,6 +754,7 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
                     work_type="video",
                 )
                 _apply_work_media_payload(work, item)
+                _apply_work_published_at(work, item)
                 
                 db.add(work)
                 db.flush()
