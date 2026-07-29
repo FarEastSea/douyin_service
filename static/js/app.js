@@ -464,6 +464,25 @@
         ]);
         let completeConfigLoaded = false;
         let completeConfigRuntimeKeys = new Set();
+        let activeCompleteConfigDomain = COMPLETE_CONFIG_DOMAINS[0].id;
+
+        function switchCompleteConfigDomain(domainId) {
+            if (!COMPLETE_CONFIG_DOMAINS.some(domain => domain.id === domainId)) return;
+            activeCompleteConfigDomain = domainId;
+
+            document.querySelectorAll('#completeConfigNav [data-config-domain]').forEach(button => {
+                const active = button.dataset.configDomain === domainId;
+                button.classList.toggle('active', active);
+                button.setAttribute('aria-selected', String(active));
+                button.tabIndex = active ? 0 : -1;
+            });
+            document.querySelectorAll('#completeConfigGrid .config-domain').forEach(section => {
+                const active = section.dataset.configDomain === domainId;
+                section.classList.toggle('active', active);
+                section.hidden = !active;
+            });
+            _recalcSettingsHeight();
+        }
 
         function completeConfigInput(field, value) {
             const key = escapeHtml(field.key);
@@ -502,17 +521,23 @@
             const grid = document.getElementById('completeConfigGrid');
             if (!nav || !grid) return;
 
+            nav.setAttribute('role', 'tablist');
             nav.innerHTML = COMPLETE_CONFIG_DOMAINS.map(domain =>
-                `<button class="secondary" onclick="document.getElementById('config-domain-${domain.id}')?.scrollIntoView({behavior:'smooth',block:'start'})">${domain.title}</button>`
+                `<button class="secondary" type="button" role="tab" data-config-domain="${domain.id}" aria-controls="config-domain-${domain.id}">${domain.title}</button>`
             ).join('');
 
             grid.innerHTML = COMPLETE_CONFIG_DOMAINS.map(domain => {
                 const domainFields = domain.keys.map(key => fieldMap.get(key)).filter(Boolean);
-                return `<section class="settings-section config-domain" id="config-domain-${domain.id}">
+                return `<section class="settings-section config-domain" id="config-domain-${domain.id}" role="tabpanel" data-config-domain="${domain.id}">
                     <div class="config-domain-heading"><div><h4>${domain.title}</h4><p>${domain.description}</p></div><span>${domainFields.length} 项</span></div>
                     <div class="settings-form-grid">${domainFields.map(field => completeConfigInput(field, values[field.key]?.value ?? field.default)).join('')}</div>
                 </section>`;
             }).join('');
+
+            nav.querySelectorAll('[data-config-domain]').forEach(button => {
+                button.addEventListener('click', () => switchCompleteConfigDomain(button.dataset.configDomain));
+            });
+            switchCompleteConfigDomain(activeCompleteConfigDomain);
 
             grid.querySelectorAll('.config-switch input').forEach(input => {
                 input.addEventListener('change', () => {
@@ -556,6 +581,8 @@
             }
             const invalid = controls.find(control => !control.checkValidity());
             if (invalid) {
+                const domainId = invalid.closest('.config-domain')?.dataset.configDomain;
+                if (domainId) switchCompleteConfigDomain(domainId);
                 invalid.reportValidity();
                 return;
             }
