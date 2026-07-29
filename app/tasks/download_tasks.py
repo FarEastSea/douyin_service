@@ -24,6 +24,7 @@ from app.models.database import get_sync_db, init_db_sync
 from app.models.models import (
     Author, Work, DownloadTask, DownloadHistory, SystemConfig,
     SubscriptionCheckReport,
+    AuthorProfileHistory,
 )
 from app.services.downloader import (
     DouyinDownloader,
@@ -327,10 +328,31 @@ def sync_author_profile(author: Author, downloader: DouyinDownloader) -> dict:
         "changed": changed,
         "nickname": author.nickname,
         "avatar_url": author.avatar_url,
+        "old_nickname": old_nickname,
+        "old_avatar_url": old_avatar,
         "account_status": account_status,
         "account_status_label": account_status_label,
         "account_status_detail": account_status_detail,
     }
+
+
+def record_author_profile_history(db: Session, author: Author, profile_result: dict) -> int:
+    """把本次真实发生的昵称/头像变化追加到历史，不覆盖旧记录。"""
+    changes = 0
+    pairs = (
+        ("nickname", profile_result.get("old_nickname"), author.nickname),
+        ("avatar", profile_result.get("old_avatar_url"), author.avatar_url),
+    )
+    for field_name, old_value, new_value in pairs:
+        if old_value and new_value and old_value != new_value:
+            db.add(AuthorProfileHistory(
+                author_id=author.id,
+                field_name=field_name,
+                old_value=old_value,
+                new_value=new_value,
+            ))
+            changes += 1
+    return changes
 
 
 @celery_app.task(bind=True, name="app.tasks.download_tasks.download_single_file",
@@ -673,6 +695,7 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
 
         try:
             profile_result = sync_author_profile(author, downloader)
+            record_author_profile_history(db, author, profile_result)
             if profile_result.get("changed"):
                 redis_client.append_activity_log(
                     "info",
@@ -995,6 +1018,7 @@ def check_subscriptions(force: bool = False):
                 downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
 
                 profile_result = sync_author_profile(author, downloader)
+                record_author_profile_history(db, author, profile_result)
 
                 if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
                     # 成功拿到账号状态，说明与抖音通信正常，不是我方被限流
@@ -1002,6 +1026,7 @@ def check_subscriptions(force: bool = False):
                     # 账号异常：sync_author_profile 已写入结构化标记（前端可据此筛选）。
                     # 仅标注、保留订阅状态与历史数据，是否退订由用户手动决定。
                     author.last_check_time = datetime.now()
+                    author.last_auto_update_at = author.last_check_time
                     db.commit()
                     redis_client.append_activity_log(
                         "warning",
@@ -1034,6 +1059,7 @@ def check_subscriptions(force: bool = False):
                 
                 if not work_list:
                     author.last_check_time = datetime.now()
+                    author.last_auto_update_at = author.last_check_time
                     author.last_error = "作品列表为空，可能是 Cookie 过期、被限流或作者暂无作品"
                     db.commit()
                     results.append({
@@ -1086,6 +1112,7 @@ def check_subscriptions(force: bool = False):
 
                 # 更新检查时间
                 author.last_check_time = datetime.now()
+                author.last_auto_update_at = author.last_check_time
                 author.total_works = len(work_list)
                 latest_work = _select_latest_work(work_list)
                 if latest_work:
@@ -1116,6 +1143,7 @@ def check_subscriptions(force: bool = False):
                     # 仅标注（前端可据此筛选），保留订阅状态与历史数据，由用户手动决定是否退订
                     _mark_author_account_anomaly(author, anomaly_code, anomaly_label, error_msg)
                     author.last_check_time = datetime.now()
+                    author.last_auto_update_at = author.last_check_time
                     db.commit()
                     consecutive_rate_limited = 0  # 账号异常不是限流，重置计数
                     logger.warning(
@@ -1141,6 +1169,7 @@ def check_subscriptions(force: bool = False):
                     continue
 
                 author.last_check_time = datetime.now()
+                author.last_auto_update_at = author.last_check_time
                 author.last_error = error_msg[:1000]
                 db.commit()
                 logger.warning(

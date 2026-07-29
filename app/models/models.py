@@ -37,6 +37,7 @@ class Author(Base):
     is_subscribed = Column(Boolean, default=False)
     check_interval = Column(Integer, default=21600)  # 检查间隔(秒)
     last_check_time = Column(DateTime)
+    last_auto_update_at = Column(DateTime)
     last_aweme_id = Column(String(64))  # 上次最新作品ID
     
     # 统计
@@ -51,6 +52,26 @@ class Author(Base):
     
     # 关系
     works = relationship("Work", back_populates="author", cascade="all, delete-orphan")
+    profile_history = relationship(
+        "AuthorProfileHistory", back_populates="author",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
+
+
+class AuthorProfileHistory(Base):
+    """作者昵称或头像变更历史。"""
+    __tablename__ = "author_profile_history"
+    __table_args__ = (Index("idx_author_profile_history", "author_id", "observed_at"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    author_id = Column(Integer, ForeignKey("authors.id", ondelete="CASCADE"), nullable=False)
+    field_name = Column(String(16), nullable=False)
+    old_value = Column(Text)
+    new_value = Column(Text)
+    observed_at = Column(DateTime, default=datetime.now, nullable=False)
+    source = Column(String(32), default="profile_sync")
+
+    author = relationship("Author", back_populates="profile_history")
 
 
 class Work(Base):

@@ -15,10 +15,12 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.models.database import get_async_db
-from app.models.models import Author, Work, DownloadTask, SubscriptionCheckReport
+from app.models.models import (
+    Author, Work, DownloadTask, SubscriptionCheckReport, AuthorProfileHistory,
+)
 from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
     PaginatedAuthorsResponse
@@ -382,6 +384,51 @@ async def list_authors(
     
     result = await db.execute(query)
     authors = result.scalars().all()
+
+    latest_report_result = await db.execute(
+        select(SubscriptionCheckReport)
+        .where(SubscriptionCheckReport.status != "running")
+        .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
+        .limit(1)
+    )
+    latest_report = latest_report_result.scalar_one_or_none()
+    latest_details = []
+    if latest_report:
+        try:
+            latest_details = json.loads(latest_report.details_json or "[]")
+        except (TypeError, ValueError):
+            latest_details = []
+    detail_map = {item.get("author_id"): item for item in latest_details}
+    breakpoint_id = next((item.get("author_id") for item in latest_details if item.get("status") == "deferred"), None)
+    history_counts = {}
+    if authors:
+        history_result = await db.execute(
+            select(AuthorProfileHistory.author_id, func.count(AuthorProfileHistory.id))
+            .where(AuthorProfileHistory.author_id.in_([author.id for author in authors]))
+            .group_by(AuthorProfileHistory.author_id)
+        )
+        history_counts = dict(history_result.all())
+    runtime_config = await get_runtime_config(db)
+    global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
+    status_messages = {
+        "new_works": "发现新作", "success": "暂未更新", "account_warning": "账号异常",
+        "warning": "检查警告", "failed": "检查失败", "deferred": "限流后未执行",
+        "not_due": "等待轮询",
+    }
+    for author in authors:
+        detail = detail_map.get(author.id, {})
+        status = detail.get("status")
+        author.auto_update_status = status
+        author.auto_update_message = status_messages.get(status, detail.get("message"))
+        next_at = None
+        if author.is_subscribed and author.last_auto_update_at:
+            next_at = author.last_auto_update_at + timedelta(seconds=max(author.check_interval or 0, global_interval, settings.MIN_CHECK_INTERVAL))
+        if author.is_subscribed and status == "deferred" and latest_report and latest_report.started_at:
+            cycle_at = latest_report.started_at + timedelta(seconds=global_interval)
+            next_at = max(next_at, cycle_at) if next_at else cycle_at
+        author.expected_next_auto_update_at = next_at
+        author.is_last_breakpoint = author.id == breakpoint_id
+        author.profile_history_count = int(history_counts.get(author.id, 0))
     
     # 计算总页数
     pages = (total + page_size - 1) // page_size if total > 0 else 1
@@ -477,7 +524,19 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
             downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
             return sync_author_profile(author, downloader)
 
-        await asyncio.to_thread(_sync)
+        profile_result = await asyncio.to_thread(_sync)
+        for field_name, old_value, new_value in (
+            ("nickname", profile_result.get("old_nickname"), author.nickname),
+            ("avatar", profile_result.get("old_avatar_url"), author.avatar_url),
+        ):
+            if old_value and new_value and old_value != new_value:
+                db.add(AuthorProfileHistory(
+                    author_id=author.id,
+                    field_name=field_name,
+                    old_value=old_value,
+                    new_value=new_value,
+                    source="manual_sync",
+                ))
         await db.commit()
         await db.refresh(author)
         return author
@@ -485,6 +544,90 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
         author.last_error = str(e)[:1000]
         await db.commit()
         raise HTTPException(status_code=500, detail=f"同步作者头像失败: {str(e)}")
+
+
+@router.get("/{author_id}/profile-history")
+async def get_author_profile_history(author_id: int, db: AsyncSession = Depends(get_async_db)):
+    author_result = await db.execute(select(Author).where(Author.id == author_id))
+    author = author_result.scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="作者不存在")
+    history_result = await db.execute(
+        select(AuthorProfileHistory)
+        .where(AuthorProfileHistory.author_id == author_id)
+        .order_by(AuthorProfileHistory.observed_at.desc(), AuthorProfileHistory.id.desc())
+        .limit(200)
+    )
+    return {
+        "author": {"id": author.id, "nickname": author.nickname, "avatar_url": author.avatar_url},
+        "items": [{
+            "id": item.id, "field_name": item.field_name, "old_value": item.old_value,
+            "new_value": item.new_value, "source": item.source,
+            "observed_at": item.observed_at.isoformat() if item.observed_at else None,
+        } for item in history_result.scalars().all()],
+    }
+
+
+@router.get("/{author_id}/auto-update")
+async def get_author_auto_update(author_id: int, db: AsyncSession = Depends(get_async_db)):
+    """从集中报告中查询单个作者的自动更新轨迹，作者页不复制存储报告数据。"""
+    author_result = await db.execute(select(Author).where(Author.id == author_id))
+    author = author_result.scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="作者不存在")
+
+    runtime_config = await get_runtime_config(db)
+    global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
+    report_result = await db.execute(
+        select(SubscriptionCheckReport)
+        .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
+        .limit(50)
+    )
+    entries = []
+    for report in report_result.scalars().all():
+        try:
+            details = json.loads(report.details_json or "[]")
+        except (TypeError, ValueError):
+            details = []
+        item = next((detail for detail in details if detail.get("author_id") == author_id), None)
+        if not item:
+            continue
+        report_breakpoint_id = next(
+            (detail.get("author_id") for detail in details if detail.get("status") == "deferred"),
+            None,
+        )
+        entries.append({
+            "report_id": report.id,
+            "trigger_type": report.trigger_type,
+            "report_status": report.status,
+            "status": item.get("status"),
+            "message": item.get("message") or item.get("error") or item.get("warning"),
+            "new_works": int(item.get("new_works", 0) or 0),
+            "is_breakpoint": item.get("status") == "deferred" and author_id == report_breakpoint_id,
+            "started_at": report.started_at.isoformat() if report.started_at else None,
+            "finished_at": report.finished_at.isoformat() if report.finished_at else None,
+        })
+
+    expected_next_at = None
+    if author.is_subscribed and author.last_auto_update_at:
+        expected_next_at = author.last_auto_update_at + timedelta(
+            seconds=max(author.check_interval or 0, global_interval, settings.MIN_CHECK_INTERVAL)
+        )
+    if entries and entries[0]["status"] == "deferred" and entries[0]["started_at"]:
+        cycle_at = datetime.fromisoformat(entries[0]["started_at"]) + timedelta(seconds=global_interval)
+        expected_next_at = max(expected_next_at, cycle_at) if expected_next_at else cycle_at
+
+    return {
+        "author": {
+            "id": author.id, "nickname": author.nickname, "avatar_url": author.avatar_url,
+            "is_subscribed": author.is_subscribed,
+        },
+        "last_auto_update_at": author.last_auto_update_at.isoformat() if author.last_auto_update_at else None,
+        "expected_next_auto_update_at": expected_next_at.isoformat() if expected_next_at else None,
+        "check_interval_seconds": max(author.check_interval or 0, global_interval, settings.MIN_CHECK_INTERVAL),
+        "latest": entries[0] if entries else None,
+        "history": entries,
+    }
 
 
 @router.delete("/{author_id}", response_model=MessageResponse)
@@ -683,6 +826,8 @@ async def get_subscription_reports(
     db: AsyncSession = Depends(get_async_db),
 ):
     """获取最近的订阅检查报告，包含每位作者的明确结果。"""
+    runtime_config = await get_runtime_config(db)
+    global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
     result = await db.execute(
         select(SubscriptionCheckReport)
         .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
@@ -717,6 +862,11 @@ async def get_subscription_reports(
             "details": details,
             "started_at": report.started_at.isoformat() if report.started_at else None,
             "finished_at": report.finished_at.isoformat() if report.finished_at else None,
+            "global_interval_seconds": global_interval,
+            "expected_next_cycle_at": (
+                (report.started_at + timedelta(seconds=global_interval)).isoformat()
+                if report.started_at and report.trigger_type == "auto" else None
+            ),
         })
     return {"items": reports}
 

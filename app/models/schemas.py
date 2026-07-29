@@ -62,6 +62,12 @@ class AuthorResponse(BaseModel):
     created_at: datetime
     already_exists: bool = False
     position: Optional[int] = None
+    auto_update_status: Optional[str] = None
+    auto_update_message: Optional[str] = None
+    last_auto_update_at: Optional[datetime] = None
+    expected_next_auto_update_at: Optional[datetime] = None
+    is_last_breakpoint: bool = False
+    profile_history_count: int = 0
     
     class Config:
         from_attributes = True

@@ -118,6 +118,7 @@ def _migrate_missing_columns(connection):
         ("works", "excluded_file_indices", "ALTER TABLE works ADD COLUMN excluded_file_indices TEXT"),
         ("works", "live_photo_urls", "ALTER TABLE works ADD COLUMN live_photo_urls TEXT"),
         ("works", "published_at", "ALTER TABLE works ADD COLUMN published_at TIMESTAMP NULL"),
+        ("authors", "last_auto_update_at", "ALTER TABLE authors ADD COLUMN last_auto_update_at TIMESTAMP NULL"),
     ]
 
     for table_name, column_name, alter_sql in migrations:

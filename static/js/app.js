@@ -1333,10 +1333,23 @@
                 const authorNameHtml = profileUrl
                     ? `<a class="author-link" href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener noreferrer nofollow" title="打开作者主页">${escapeHtml(author.nickname || '未知作者')}</a>`
                     : escapeHtml(author.nickname || '未知作者');
+                const updateLabels = {
+                    new_works: ['发现新作', 'ok'], success: ['暂未更新', 'muted'],
+                    account_warning: ['账号异常', 'warn'], warning: ['检查警告', 'warn'],
+                    failed: ['检查失败', 'error'], deferred: ['限流后未执行', 'warn'], not_due: ['等待轮询', 'muted']
+                };
+                const updateState = updateLabels[author.auto_update_status];
+                const updateText = author.is_last_breakpoint
+                    ? '自动更新 · 续检断点'
+                    : `自动更新 · ${updateState ? updateState[0] : (author.last_auto_update_at ? '等待轮询' : '尚未检查')}`;
+                const updateTone = author.is_last_breakpoint ? 'breakpoint' : (updateState?.[1] || 'muted');
+                const updateBadges = author.is_subscribed
+                    ? `<button class="author-tracking-tag ${updateTone}" onclick="openAuthorAutoUpdate(${author.id})" title="查看该作者自动更新详情">${escapeHtml(updateText)}</button>`
+                    : '';
                 return `
                 <div class="author-item" data-author-id="${author.id}" style="flex-wrap:wrap;">
                     <div class="author-avatar">${avatarHtml}</div>
-                    <div class="author-name"><div class="author-name-row">${authorNameHtml}${statusBadgeHtml}</div></div>
+                    <div class="author-name"><div class="author-name-row">${authorNameHtml}${statusBadgeHtml}</div><div class="author-tracking-tags">${updateBadges}</div></div>
                     <span style="color: var(--text-secondary); font-size: 12px;">
                         ${author.total_works || 0} 作品 / ${author.downloaded_works || 0} 已下载
                     </span>
@@ -1348,6 +1361,7 @@
                         <button class="secondary" onclick="openAuthorWorksPreview(${author.id})">作品管理</button>
                         <button class="secondary" onclick="filterTasksByAuthor(${author.id})">关联任务</button>
                         <button class="secondary sync-avatar-btn" onclick="syncAuthorAvatar(${author.id})">同步头像</button>
+                        <button class="secondary" onclick="openAuthorHistory(${author.id})">资料历史${author.profile_history_count ? ` (${author.profile_history_count})` : ''}</button>
                         <button class="secondary dl-btn" onclick="downloadAuthor(${author.id})" style="padding: 6px 12px; font-size: 12px;">
                             下载
                         </button>
@@ -1586,6 +1600,8 @@
                     c.classList.remove('platform-active');
                 }
             });
+            document.querySelectorAll('.douyin-only-nav').forEach(el => { el.style.display = platform === 'douyin' ? '' : 'none'; });
+            if (platform !== 'douyin' && currentSubTab[platform] === 'updates') currentSubTab[platform] = 'authors';
 
             // 恢复子标签（桌面侧边栏与移动端均生效）
             const sub = currentSubTab[platform] || 'tasks';
@@ -1593,6 +1609,7 @@
 
             // 加载该平台所有数据
             loadAllPlatformData(platform);
+            loadPlatformData(platform, sub);
         }
 
         // 切换子标签（仅移动端生效）
@@ -1633,8 +1650,8 @@
                 if (sub === 'tasks') fetchTasks();
                 else if (sub === 'authors') {
                     fetchAuthors();
-                    fetchSubscriptionReports();
                 }
+                else if (sub === 'updates') fetchSubscriptionReports();
                 else if (sub === 'settings') {
                     checkCookie();
                     loadRuntimeConfig();
@@ -2180,7 +2197,8 @@
             try {
                 const data = await apiRequest(`${API_BASE}/authors/check-all`, { method: 'POST' }, '启动订阅检查失败');
                 showToast(data.message || '正在检查更新...');
-                document.getElementById('subscriptionReportHeadline').textContent = '自动更新报告：检查任务已提交，等待执行…';
+                const reportHeadline = document.getElementById('subscriptionReportHeadline');
+                if (reportHeadline) reportHeadline.textContent = '自动更新报告：检查任务已提交，等待执行…';
                 window.setTimeout(fetchSubscriptionReports, 5000);
             } catch (e) {
                 showToast(e.message || '操作失败', 'error');
@@ -2199,24 +2217,34 @@
         async function fetchSubscriptionReports() {
             const headline = document.getElementById('subscriptionReportHeadline');
             const body = document.getElementById('subscriptionReportBody');
-            if (!headline || !body) return;
+            if (!body) return;
             try {
                 const response = await apiFetch(`${API_BASE}/authors/reports/subscriptions?limit=10`);
                 if (!response.ok) throw new Error('加载报告失败');
                 const reports = (await response.json()).items || [];
                 if (!reports.length) {
-                    headline.textContent = '自动更新报告：暂无记录';
+                    if (headline) headline.textContent = '自动更新报告：暂无记录';
                     body.innerHTML = '<div class="report-empty">完成一次订阅检查后，这里会显示每位作者的结果。</div>';
                     return;
                 }
                 const latest = reports[0];
                 const [latestLabel] = subscriptionReportStatus(latest.status);
-                headline.textContent = `自动更新报告：${latestLabel} · 已检查 ${latest.checked_authors}/${latest.due_authors} · 新作品 ${latest.new_works}`;
+                if (headline) headline.textContent = `自动更新报告：${latestLabel} · 已检查 ${latest.checked_authors}/${latest.due_authors} · 新作品 ${latest.new_works}`;
+                const setMetric = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; };
+                setMetric('autoMetricSubscribed', latest.total_authors);
+                setMetric('autoMetricChecked', latest.checked_authors);
+                setMetric('autoMetricSuccess', latest.success_authors);
+                setMetric('autoMetricNewWorks', latest.new_works);
+                setMetric('autoMetricWarnings', latest.warning_authors + latest.failed_authors);
+                setMetric('autoMetricRemaining', latest.remaining_authors);
+                const breakpoint = (latest.details || []).find(item => item.status === 'deferred');
+                const cycle = document.getElementById('autoUpdateCycle');
+                if (cycle) cycle.innerHTML = `<strong>最近周期：</strong>${escapeHtml(latest.summary || latestLabel)}${breakpoint ? ` · <strong>续检断点：</strong>${escapeHtml(breakpoint.nickname || `作者 ${breakpoint.author_id}`)}` : ''}${latest.expected_next_cycle_at ? ` · <strong>预计下周期：</strong>${escapeHtml(formatDateTime(latest.expected_next_cycle_at))}` : ''}`;
                 body.innerHTML = reports.map((report, reportIndex) => {
                     const [label, tone] = subscriptionReportStatus(report.status);
                     const details = (report.details || []).map(item => {
                         const itemTone = item.status === 'failed' ? 'error' : ((item.status === 'warning' || item.status === 'account_warning') ? 'warn' : ((item.status === 'not_due' || item.status === 'deferred') ? 'muted' : 'ok'));
-                        return `<div class="report-author-row"><span>${escapeHtml(item.nickname || `作者 ${item.author_id}`)}</span><span class="report-state ${itemTone}">${escapeHtml(item.message || item.status)}</span></div>`;
+                        return `<div class="report-author-row"><button class="report-author-link" onclick="navigateToAuthor(${Number(item.author_id) || 0})">${escapeHtml(item.nickname || `作者 ${item.author_id}`)}</button><span class="report-state ${itemTone}">${escapeHtml(item.message || item.status)}</span></div>`;
                     }).join('');
                     return `<details class="report-run" ${reportIndex === 0 ? 'open' : ''}>
                         <summary><span>${escapeHtml(formatDateTime(report.started_at))} · ${report.trigger_type === 'manual' ? '手动' : '自动'}</span><span class="report-state ${tone}">${escapeHtml(label)}</span></summary>
@@ -2230,18 +2258,69 @@
                     ? window.setTimeout(fetchSubscriptionReports, 10000)
                     : null;
             } catch (error) {
-                headline.textContent = '自动更新报告：加载失败';
+                if (headline) headline.textContent = '自动更新报告：加载失败';
                 body.innerHTML = `<div class="report-empty">${escapeHtml(error.message || '加载失败')}</div>`;
             }
         }
 
-        function toggleSubscriptionReports() {
-            const body = document.getElementById('subscriptionReportBody');
-            const toggle = document.getElementById('subscriptionReportToggle');
-            if (!body || !toggle) return;
-            body.hidden = !body.hidden;
-            toggle.textContent = body.hidden ? '查看详情' : '收起';
-            if (!body.hidden) fetchSubscriptionReports();
+        function openAutoUpdatePage() {
+            switchSubTab('updates');
+            fetchSubscriptionReports();
+        }
+
+        async function openAuthorHistory(authorId) {
+            const modal = document.getElementById('authorHistoryModal');
+            const body = document.getElementById('authorHistoryBody');
+            if (!modal || !body) return;
+            modal.classList.add('show'); modal.setAttribute('aria-hidden', 'false');
+            body.innerHTML = '<div class="report-empty">正在加载资料历史…</div>';
+            try {
+                const data = await apiRequest(`${API_BASE}/authors/${authorId}/profile-history`, {}, '获取作者资料历史失败');
+                document.getElementById('authorHistoryTitle').textContent = `${data.author.nickname || '作者'} · 资料历史`;
+                document.getElementById('authorHistoryMeta').textContent = `共 ${data.items.length} 条变更`;
+                body.innerHTML = data.items.length ? data.items.map(item => {
+                    const isAvatar = item.field_name === 'avatar';
+                    const oldValue = isAvatar ? `<img class="history-avatar" src="${escapeHtml(item.old_value)}" loading="lazy" referrerpolicy="no-referrer">` : `<span>${escapeHtml(item.old_value || '—')}</span>`;
+                    const newValue = isAvatar ? `<img class="history-avatar" src="${escapeHtml(item.new_value)}" loading="lazy" referrerpolicy="no-referrer">` : `<span>${escapeHtml(item.new_value || '—')}</span>`;
+                    return `<div class="profile-history-row"><div><strong>${isAvatar ? '头像变更' : '昵称变更'}</strong><small>${escapeHtml(formatDateTime(item.observed_at))}</small></div><div class="profile-history-change">${oldValue}<b>→</b>${newValue}</div></div>`;
+                }).join('') : '<div class="empty-state"><p>尚未记录到昵称或头像变化</p></div>';
+            } catch (error) { body.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`; }
+        }
+
+        function closeAuthorHistory() {
+            const modal = document.getElementById('authorHistoryModal');
+            if (modal) { modal.classList.remove('show'); modal.setAttribute('aria-hidden', 'true'); }
+        }
+
+        async function openAuthorAutoUpdate(authorId) {
+            const modal = document.getElementById('authorAutoUpdateModal');
+            const body = document.getElementById('authorAutoUpdateBody');
+            if (!modal || !body) return;
+            modal.classList.add('show'); modal.setAttribute('aria-hidden', 'false');
+            body.innerHTML = '<div class="report-empty">正在从自动更新中心查询该作者记录…</div>';
+            try {
+                const data = await apiRequest(`${API_BASE}/authors/${authorId}/auto-update`, {}, '获取作者自动更新信息失败');
+                const latest = data.latest;
+                const [statusLabel, tone] = subscriptionReportStatus(latest?.report_status === 'running' ? 'running' : latest?.status);
+                document.getElementById('authorAutoUpdateTitle').textContent = `${data.author.nickname || '作者'} · 自动更新`;
+                document.getElementById('authorAutoUpdateMeta').textContent = data.author.is_subscribed ? '已订阅' : '未订阅';
+                const history = (data.history || []).map(item => {
+                    const itemTone = item.status === 'failed' ? 'error' : ((item.status === 'warning' || item.status === 'account_warning' || item.status === 'deferred') ? 'warn' : (item.status === 'not_due' ? 'muted' : 'ok'));
+                    return `<div class="author-auto-history-row"><div><strong>${escapeHtml(formatDateTime(item.started_at))}</strong><small>${item.trigger_type === 'manual' ? '手动检查' : '自动检查'}</small></div><span class="report-state ${itemTone}">${escapeHtml(item.message || item.status || '无结果')}</span>${item.new_works ? `<b>新作品 ${item.new_works}</b>` : ''}</div>`;
+                }).join('');
+                body.innerHTML = `<div class="author-auto-overview">
+                    <div><span>当前状态</span><strong class="report-state ${tone}">${escapeHtml(latest?.message || statusLabel || '尚未检查')}</strong></div>
+                    <div><span>上次自动更新</span><strong>${escapeHtml(formatDateTime(data.last_auto_update_at))}</strong></div>
+                    <div><span>预计下次轮询</span><strong>${escapeHtml(formatDateTime(data.expected_next_auto_update_at))}</strong></div>
+                    <div><span>有效检查间隔</span><strong>${Math.round((data.check_interval_seconds || 0) / 3600 * 10) / 10} 小时</strong></div>
+                </div>${latest?.is_breakpoint ? '<div class="auto-update-cycle"><strong>续检断点：</strong>该作者是上轮风控中断后第一位等待续检的作者。</div>' : ''}
+                <div class="author-auto-history">${history || '<div class="empty-state"><p>自动更新中心尚无该作者记录</p></div>'}</div>`;
+            } catch (error) { body.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`; }
+        }
+
+        function closeAuthorAutoUpdate() {
+            const modal = document.getElementById('authorAutoUpdateModal');
+            if (modal) { modal.classList.remove('show'); modal.setAttribute('aria-hidden', 'true'); }
         }
 
         // 抖音任务状态标签切换

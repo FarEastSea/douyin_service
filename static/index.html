@@ -37,6 +37,7 @@
             <nav class="sidebar-nav">
                 <button class="sub-tab active" data-sub="tasks" onclick="switchSubTab('tasks')"><span class="nav-glyph">🎬</span>下载任务</button>
                 <button class="sub-tab" data-sub="authors" onclick="switchSubTab('authors')"><span class="nav-glyph">👤</span>作者管理</button>
+                <button class="sub-tab douyin-only-nav" data-sub="updates" onclick="switchSubTab('updates')"><span class="nav-glyph">↻</span>自动更新</button>
                 <button class="sub-tab" data-sub="settings" onclick="switchSubTab('settings')"><span class="nav-glyph">⚙️</span>设置</button>
             </nav>
 
@@ -76,6 +77,7 @@
         <div class="sub-tabs" id="subTabs">
             <button class="sub-tab active" data-sub="tasks" onclick="switchSubTab('tasks')">下载任务</button>
             <button class="sub-tab" data-sub="authors" onclick="switchSubTab('authors')">作者管理</button>
+            <button class="sub-tab douyin-only-nav" data-sub="updates" onclick="switchSubTab('updates')">自动更新</button>
             <button class="sub-tab" data-sub="settings" onclick="switchSubTab('settings')">设置</button>
         </div>
 
@@ -159,18 +161,28 @@
                             <input type="hidden" id="authorStatusFilter" value="all">
                         </div>
                     </div>
-                    <div class="subscription-report" id="subscriptionReport">
-                        <button type="button" class="subscription-report-summary" onclick="toggleSubscriptionReports()">
-                            <span id="subscriptionReportHeadline">自动更新报告：暂无记录</span>
-                            <span id="subscriptionReportToggle">查看详情</span>
-                        </button>
-                        <div class="subscription-report-body" id="subscriptionReportBody" hidden></div>
-                    </div>
                     <div class="author-list" id="authorList">
                         <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无作者</p></div>
                     </div>
                     <div class="pagination" id="authorsPagination"></div>
                 </div>
+            </div>
+
+            <div class="card auto-update-page" data-sub="updates">
+                <div class="card-header">
+                    <div class="card-title"><div class="card-icon">↻</div>自动更新中心</div>
+                    <div style="display:flex;gap:8px;"><button class="secondary" onclick="fetchSubscriptionReports()">刷新</button><button onclick="checkAllSubscriptions()">立即检查全部</button></div>
+                </div>
+                <div class="auto-update-metrics">
+                    <div><strong id="autoMetricSubscribed">0</strong><span>订阅作者</span></div>
+                    <div><strong id="autoMetricChecked">0</strong><span>本轮已检查</span></div>
+                    <div><strong id="autoMetricSuccess">0</strong><span>检查成功</span></div>
+                    <div><strong id="autoMetricNewWorks">0</strong><span>发现新作</span></div>
+                    <div><strong id="autoMetricWarnings">0</strong><span>警告/失败</span></div>
+                    <div><strong id="autoMetricRemaining">0</strong><span>等待续检</span></div>
+                </div>
+                <div class="auto-update-cycle" id="autoUpdateCycle">尚无自动更新周期记录</div>
+                <div class="subscription-report-body auto-update-report-list" id="subscriptionReportBody"></div>
             </div>
 
             <div class="card" data-sub="settings">
@@ -566,6 +578,20 @@
                 </div>
                 <div class="author-works-grid" id="authorWorksGrid"></div>
             </div>
+        </div>
+    </div>
+
+    <div class="preview-modal" id="authorHistoryModal" aria-hidden="true" onclick="if(event.target.id==='authorHistoryModal') closeAuthorHistory()">
+        <div class="preview-dialog author-history-dialog" role="dialog" aria-modal="true">
+            <div class="preview-header"><div class="preview-title"><strong id="authorHistoryTitle">作者资料历史</strong><span id="authorHistoryMeta"></span></div><button class="secondary preview-close" onclick="closeAuthorHistory()">×</button></div>
+            <div class="preview-body" id="authorHistoryBody"></div>
+        </div>
+    </div>
+
+    <div class="preview-modal" id="authorAutoUpdateModal" aria-hidden="true" onclick="if(event.target.id==='authorAutoUpdateModal') closeAuthorAutoUpdate()">
+        <div class="preview-dialog author-auto-dialog" role="dialog" aria-modal="true">
+            <div class="preview-header"><div class="preview-title"><strong id="authorAutoUpdateTitle">作者自动更新</strong><span id="authorAutoUpdateMeta"></span></div><button class="secondary preview-close" onclick="closeAuthorAutoUpdate()">×</button></div>
+            <div class="preview-body" id="authorAutoUpdateBody"></div>
         </div>
     </div>
 
