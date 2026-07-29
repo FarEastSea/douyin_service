@@ -58,6 +58,8 @@ class ProcessManager:
             cmd = [
                 self._python, "-m", "celery",
                 "-A", "app.tasks.celery_app", "worker",
+                "--hostname=douyin-worker@%h",
+                f"--pidfile={os.path.join(self._project_dir, 'logs', 'celery_worker.pid')}",
                 "--pool=prefork",
                 f"--concurrency={self._worker_concurrency}",
                 "--loglevel=info",
@@ -126,6 +128,7 @@ class ProcessManager:
             cmd = [
                 self._python, "-m", "celery",
                 "-A", "app.tasks.celery_app", "beat",
+                f"--pidfile={os.path.join(self._project_dir, 'logs', 'celery_beat.pid')}",
                 "--loglevel=info",
             ]
 

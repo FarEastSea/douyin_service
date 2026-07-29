@@ -26,6 +26,12 @@ fi
 echo "Restarting gunicorn..."
 mkdir -p "$LOG_DIR"
 
+# Stop Celery processes left behind by an earlier Gunicorn generation. Celery
+# is started by the FastAPI lifespan below, so an orphan would create duplicate
+# workers with the same node name.
+pkill -TERM -f "celery.*-A app.tasks.celery_app.*worker" 2>/dev/null || true
+pkill -TERM -f "celery.*-A app.tasks.celery_app.*beat" 2>/dev/null || true
+
 pkill -f "gunicorn.*main:app.*${PORT}" 2>/dev/null || true
 pkill -f "gunicorn.*${PROJECT_DIR}" 2>/dev/null || true
 
