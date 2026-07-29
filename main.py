@@ -77,9 +77,24 @@ async def lifespan(app: FastAPI):
         yield
         return
     
-    # 确保下载目录存在
-    download_dir = ensure_download_dir()
-    print(f"✅ 下载目录: {download_dir}")
+    # 下载目录属于可在维护页修复的配置。权限或路径错误不能让 Web
+    # worker 退出，否则用户将失去再次进入维护模式的机会。
+    try:
+        download_dir = ensure_download_dir()
+        print(f"✅ 下载目录: {download_dir}")
+    except Exception as e:
+        BOOTSTRAP_STATUS["ready"] = False
+        BOOTSTRAP_STATUS.setdefault("errors", []).append({
+            "key": "DOWNLOAD_DIRECTORY",
+            "label": "下载目录",
+            "group": "下载目录",
+            "message": f"{type(e).__name__}: {str(e)[:300]}",
+        })
+        app.state.degraded_mode = True
+        app.state.bootstrap_status = BOOTSTRAP_STATUS
+        print(f"❌ 下载目录初始化失败，进入配置维护模式: {e}")
+        yield
+        return
     
     # 检查 Redis 连接
     from app.core import redis_client as rc

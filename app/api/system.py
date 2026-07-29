@@ -22,7 +22,15 @@ from app.models.schemas import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core import updater
-from app.core.env_config import ENV_FIELDS, FIELD_MAP, get_env_values, read_env_file, validate_env, write_env_updates
+from app.core.env_config import (
+    ENV_FIELDS,
+    FIELD_MAP,
+    check_download_directory,
+    get_env_values,
+    read_env_file,
+    validate_env,
+    write_env_updates,
+)
 from app.core.runtime_config import (
     RUNTIME_CONFIG_ENV_KEYS,
     RUNTIME_CONFIG_SCHEMA,
@@ -188,6 +196,10 @@ async def save_complete_settings(
         field = FIELD_MAP[key]
         if field.required and not str(value if value is not None else "").strip():
             raise HTTPException(status_code=400, detail=f"{field.label}不能为空")
+
+    download_error = check_download_directory({**current, **updates})
+    if download_error:
+        raise HTTPException(status_code=400, detail=download_error["message"])
 
     runtime_by_env = {env_key: runtime_key for runtime_key, env_key in RUNTIME_CONFIG_ENV_KEYS.items()}
     runtime_updates = {

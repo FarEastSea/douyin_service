@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings
 from pathlib import Path
 from typing import Optional
 
-from app.core.env_config import read_env_file
+from app.core.env_config import ENV_PATH, check_download_directory, read_env_file
 
 
 class Settings(BaseSettings):
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     X_TASK_STATE_TTL_SECONDS: int = 24 * 3600
     
     class Config:
-        env_file = ".env"
+        env_file = ENV_PATH
         env_file_encoding = "utf-8"
         extra = "ignore"  # 忽略 .env 中多余的变量（如旧版 DATABASE_URL）
 
@@ -133,13 +133,19 @@ settings = WebSettings()
 # 确保下载目录存在
 def ensure_download_dir():
     """确保下载目录存在"""
-    download_path = Path(settings.DOWNLOAD_DIR)
-    if not download_path.exists():
-        download_path.mkdir(parents=True, exist_ok=True)
-    
-    x_download_path = Path(settings.X_DOWNLOAD_DIR)
-    if not x_download_path.exists():
-        x_download_path.mkdir(parents=True, exist_ok=True)
-    
-    return Path(settings.DOWNLOAD_ROOT)
+    current = settings.snapshot()
+    values = {
+        "DOWNLOAD_ROOT": current.DOWNLOAD_ROOT,
+        "DOUYIN_DOWNLOAD_SUBDIR": current.DOUYIN_DOWNLOAD_SUBDIR,
+        "X_DOWNLOAD_SUBDIR": current.X_DOWNLOAD_SUBDIR,
+    }
+    error = check_download_directory(values)
+    if error:
+        raise ValueError(error["message"])
+
+    root = Path(current.DOWNLOAD_ROOT).expanduser()
+    # 根目录必须由管理员预先创建；仅平台子目录由应用按配置自动创建。
+    (root / current.DOUYIN_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
+    (root / current.X_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
+    return root
 

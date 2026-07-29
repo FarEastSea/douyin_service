@@ -1,10 +1,22 @@
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
 
-ENV_PATH = Path(".env")
+def _find_project_root() -> Path:
+    """以 main.py 所在目录为项目根目录，不依赖启动工作目录或部署绝对路径。"""
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        if (parent / "main.py").is_file():
+            return parent
+    raise RuntimeError(f"无法从 {current_file} 定位包含 main.py 的项目根目录")
+
+
+# 项目整体迁移时该路径会随 main.py 自动变化。
+ENV_PATH = _find_project_root() / ".env"
 
 
 class EnvField(BaseModel):
@@ -120,6 +132,41 @@ def _check_redis(values: Dict[str, str]) -> Optional[Dict[str, str]]:
         }
 
 
+def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]:
+    root_value = str(values.get("DOWNLOAD_ROOT") or "").strip()
+    if not root_value:
+        return None
+
+    root = Path(root_value).expanduser()
+    if not root.exists():
+        message = "下载根目录不存在，请先在服务器上创建该目录"
+    elif not root.is_dir():
+        message = "下载根目录不是目录"
+    elif not os.access(root, os.R_OK | os.W_OK | os.X_OK):
+        message = "下载根目录不可访问或不可写，请检查目录权限"
+    else:
+        for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR"):
+            value = str(values.get(key) or "").strip()
+            if not value:
+                continue
+            subdir = Path(value)
+            if subdir.is_absolute() or ".." in subdir.parts or not str(subdir).strip("./\\"):
+                return {
+                    "key": key,
+                    "label": FIELD_MAP[key].label,
+                    "group": FIELD_MAP[key].group,
+                    "message": "下载子目录必须是根目录下的相对路径",
+                }
+        return None
+
+    return {
+        "key": "DOWNLOAD_ROOT_ACCESS",
+        "label": FIELD_MAP["DOWNLOAD_ROOT"].label,
+        "group": FIELD_MAP["DOWNLOAD_ROOT"].group,
+        "message": f"{message}: {root}",
+    }
+
+
 def read_env_file() -> Dict[str, str]:
     values: Dict[str, str] = {}
     if not ENV_PATH.exists():
@@ -155,6 +202,9 @@ def validate_env(values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
 
     errors = []
     if not missing:
+        download_error = check_download_directory(values)
+        if download_error:
+            errors.append(download_error)
         db_error = _check_database(values)
         if db_error:
             errors.append(db_error)
@@ -172,7 +222,7 @@ def validate_env(values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     }
 
 
-def write_env_updates(updates: Dict[str, Any]) -> None:
+def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
     current = read_env_file()
     clean_updates = {}
     for key, value in updates.items():
@@ -201,4 +251,37 @@ def write_env_updates(updates: Dict[str, Any]) -> None:
         if field.key in clean_updates and field.key not in seen:
             new_lines.append(f"{field.key}={clean_updates[field.key]}")
 
-    ENV_PATH.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+    content = "\n".join(new_lines).rstrip() + "\n"
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode = ENV_PATH.stat().st_mode if ENV_PATH.exists() else None
+    temp_path = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=ENV_PATH.parent,
+            prefix=".env.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_path = Path(temp_file.name)
+        if existing_mode is not None:
+            os.chmod(temp_path, existing_mode)
+        os.replace(temp_path, ENV_PATH)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+    persisted = read_env_file()
+    mismatched = {
+        key: value
+        for key, value in clean_updates.items()
+        if persisted.get(key) != value
+    }
+    if mismatched:
+        raise OSError(f".env 写入校验失败: {', '.join(sorted(mismatched))}")
+    return {key: persisted[key] for key in clean_updates}

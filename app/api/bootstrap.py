@@ -3,7 +3,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
-from app.core.env_config import read_env_file, validate_env, write_env_updates
+from app.core.env_config import check_download_directory, read_env_file, validate_env, write_env_updates
 
 
 router = APIRouter(tags=["初始化配置"])
@@ -34,14 +34,22 @@ async def bootstrap_status(request: Request):
 
 @router.post("/bootstrap/config")
 async def save_bootstrap_config(request: Request, payload: dict = Body(...)):
+    values = payload.get("values", payload)
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail="配置内容格式不正确")
+    candidate = {**read_env_file(), **values}
+    download_error = check_download_directory(candidate)
+    if download_error:
+        raise HTTPException(status_code=400, detail=download_error["message"])
     try:
-        write_env_updates(payload.get("values", payload))
+        persisted = write_env_updates(values)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)[:300]}")
     status = _effective_bootstrap_status(request)
     return {
         "success": True,
         "message": "配置已保存，请重启 Web 服务使配置生效。",
+        "persisted_keys": sorted(persisted),
         **status,
     }
 
