@@ -3,6 +3,7 @@ X/Twitter 下载任务 API 路由
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,11 +12,12 @@ import os
 import signal
 
 from app.models.database import get_async_db
-from app.models.models import XDownloadTask, XAuthor, SystemConfig
+from app.models.models import XDownloadTask, XAuthor, XMediaAsset, SystemConfig
 from app.models.schemas import (
     XDownloadRequest, XDownloadTaskResponse, PaginatedXTasksResponse,
     XCookieUpdate, MessageResponse,
     XAuthorCreate, XAuthorResponse, PaginatedXAuthorsResponse,
+    XMediaAssetResponse,
 )
 from app.tasks.x_download_tasks import download_x_profile, check_x_subscriptions
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
@@ -128,6 +130,52 @@ async def get_x_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     return serialize_x_task(task, redis_client.get_x_task_state(task.id))
+
+
+@router.get("/tasks/{task_id}/media", response_model=list[XMediaAssetResponse])
+async def list_x_task_media(task_id: int, db: AsyncSession = Depends(get_async_db)):
+    """列出任务关联的每一个可预览资源。"""
+    task = (await db.execute(select(XDownloadTask).where(XDownloadTask.id == task_id))).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    assets = (await db.execute(
+        select(XMediaAsset).where(XMediaAsset.x_author_id == task.x_author_id).order_by(XMediaAsset.created_at, XMediaAsset.id)
+    )).scalars().all()
+    return [XMediaAssetResponse(
+        id=item.id, task_id=item.task_id, media_type=item.media_type,
+        filename=item.filename, size_bytes=item.size_bytes or 0, mime_type=item.mime_type,
+        preview_url=f"/api/x/media/{item.id}/preview",
+        download_url=f"/api/x/media/{item.id}/download", created_at=item.created_at,
+    ) for item in assets]
+
+
+def _safe_x_media_path(asset: XMediaAsset):
+    from pathlib import Path
+    path = Path(asset.file_path).expanduser().resolve()
+    root = Path(settings.X_DOWNLOAD_DIR).expanduser().resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="资源路径不在当前 X 下载目录内")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="资源文件不存在")
+    return path
+
+
+@router.get("/media/{asset_id}/preview")
+async def preview_x_media(asset_id: int, db: AsyncSession = Depends(get_async_db)):
+    asset = (await db.execute(select(XMediaAsset).where(XMediaAsset.id == asset_id))).scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    return FileResponse(_safe_x_media_path(asset), media_type=asset.mime_type)
+
+
+@router.get("/media/{asset_id}/download")
+async def download_x_media(asset_id: int, db: AsyncSession = Depends(get_async_db)):
+    asset = (await db.execute(select(XMediaAsset).where(XMediaAsset.id == asset_id))).scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    return FileResponse(_safe_x_media_path(asset), media_type=asset.mime_type, filename=asset.filename)
 
 
 @router.get("/tasks/{task_id}/log")

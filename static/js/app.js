@@ -2311,6 +2311,9 @@
                     if (t.status === 'failed' || t.status === 'cancelled') {
                         actions += `<button class="secondary" onclick="retryXTask(${t.id})">重试</button>`;
                     }
+                    if (Number(t.file_count || 0) > 0) {
+                        actions += `<button class="primary" onclick="openXMedia(${t.id}, '${escapedUsername}')">查看资源</button>`;
+                    }
                     actions += `<button class="secondary" onclick="deleteXTask(${t.id})">删除</button>`;
                     if (t.status !== 'pending' || t.last_log_line || t.output_log) {
                         actions += `<button class="secondary" onclick="toggleXLog(${t.id})">日志</button>`;
@@ -2350,6 +2353,32 @@
 
         function refreshXTasks() {
             fetchXTasks();
+        }
+
+        async function openXMedia(taskId, username) {
+            try {
+                const res = await apiFetch(`${API_BASE}/x/tasks/${taskId}/media`);
+                const items = await res.json();
+                if (!res.ok) throw new Error(items.detail || '加载资源失败');
+                let modal = document.getElementById('xMediaModal');
+                if (!modal) {
+                    modal = document.createElement('div');
+                    modal.id = 'xMediaModal';
+                    modal.className = 'x-media-modal';
+                    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+                    document.body.appendChild(modal);
+                }
+                modal.innerHTML = `<div class="x-media-dialog">
+                    <div class="x-media-header"><div><strong>@${escapeHtml(username)}</strong><span>${items.length} 个资源</span></div><button class="secondary" onclick="document.getElementById('xMediaModal').remove()">关闭</button></div>
+                    <div class="x-media-grid">${items.length ? items.map(item => `
+                        <article class="x-media-card">
+                            ${item.media_type === 'video'
+                                ? `<video controls preload="metadata" src="${item.preview_url}"></video>`
+                                : `<img loading="lazy" src="${item.preview_url}" alt="${escapeHtml(item.filename)}">`}
+                            <div class="x-media-caption"><span title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</span><a class="secondary" href="${item.download_url}">下载</a></div>
+                        </article>`).join('') : '<div class="empty-state"><p>没有可预览资源</p></div>'}</div>
+                </div>`;
+            } catch (e) { showToast(e.message || '加载资源失败', 'error'); }
         }
 
         function renderXPagination() {

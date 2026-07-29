@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import DownloadHistory, DownloadTask, XDownloadTask
+from app.models.models import DownloadHistory, DownloadTask, XDownloadTask, XMediaAsset
 
 
 def rebase_path(value: Optional[str], old_root: str, new_root: str) -> Optional[str]:
@@ -39,7 +39,7 @@ async def migrate_download_paths(
     new_x_download_dir: str,
 ) -> dict:
     """同步迁移所有已存在任务、历史记录和 X 任务中的持久化路径。"""
-    changed = {"tasks": 0, "history": 0, "x_tasks": 0}
+    changed = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0}
 
     tasks = (await db.execute(select(DownloadTask))).scalars().all()
     for task in tasks:
@@ -63,6 +63,13 @@ async def migrate_download_paths(
         if download_dir != task.download_dir:
             task.download_dir = download_dir
             changed["x_tasks"] += 1
+
+    x_media = (await db.execute(select(XMediaAsset))).scalars().all()
+    for asset in x_media:
+        file_path = rebase_path(asset.file_path, old_x_download_dir, new_x_download_dir)
+        if file_path != asset.file_path:
+            asset.file_path = file_path
+            changed["x_media"] += 1
 
     await db.flush()
     return changed

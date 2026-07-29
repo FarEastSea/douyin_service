@@ -178,6 +178,12 @@ async def save_complete_settings(
         raise HTTPException(status_code=400, detail="没有可保存的配置")
 
     current = read_env_file()
+    for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR"):
+        if key not in updates:
+            continue
+        subdir = Path(str(updates[key]).strip())
+        if subdir.is_absolute() or ".." in subdir.parts or not str(subdir).strip("./\\"):
+            raise HTTPException(status_code=400, detail=f"{FIELD_MAP[key].label}必须是根目录下的相对子目录")
     for key, value in updates.items():
         field = FIELD_MAP[key]
         if field.required and not str(value if value is not None else "").strip():
@@ -197,12 +203,19 @@ async def save_complete_settings(
         environment_updates = {key: value for key, value in updates.items() if key not in runtime_by_env}
         if environment_updates:
             write_env_updates(environment_updates)
+        legacy_douyin = current.get("DOWNLOAD_DIR")
+        old_root = current.get("DOWNLOAD_ROOT") or (str(Path(legacy_douyin).parent) if legacy_douyin else "/downloads")
+        old_douyin = legacy_douyin or str(Path(old_root) / current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))
+        old_x = current.get("X_DOWNLOAD_DIR") or str(Path(old_root) / current.get("X_DOWNLOAD_SUBDIR", "X"))
+        new_root = str(updates.get("DOWNLOAD_ROOT", old_root))
+        new_douyin = str(Path(new_root) / str(updates.get("DOUYIN_DOWNLOAD_SUBDIR", current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))))
+        new_x = str(Path(new_root) / str(updates.get("X_DOWNLOAD_SUBDIR", current.get("X_DOWNLOAD_SUBDIR", "X"))))
         path_changes = await migrate_download_paths(
             db,
-            old_download_dir=current.get("DOWNLOAD_DIR", "/downloads"),
-            new_download_dir=str(updates.get("DOWNLOAD_DIR", current.get("DOWNLOAD_DIR", "/downloads"))),
-            old_x_download_dir=current.get("X_DOWNLOAD_DIR", "/downloads/X"),
-            new_x_download_dir=str(updates.get("X_DOWNLOAD_DIR", current.get("X_DOWNLOAD_DIR", "/downloads/X"))),
+            old_download_dir=old_douyin,
+            new_download_dir=new_douyin,
+            old_x_download_dir=old_x,
+            new_x_download_dir=new_x,
         )
 
         cookie_keys = {"DOUYIN_COOKIE": "douyin_cookie", "X_COOKIE": "x_cookie"}

@@ -2,7 +2,9 @@
 
 from datetime import datetime
 import logging
+import mimetypes
 import os
+from pathlib import Path
 import traceback
 
 from sqlalchemy import select
@@ -10,7 +12,7 @@ from sqlalchemy import select
 from app.core import redis_client
 from app.core.config import settings
 from app.models.database import get_sync_db, init_db_sync
-from app.models.models import XAuthor, XDownloadTask
+from app.models.models import XAuthor, XDownloadTask, XMediaAsset
 from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_cookie_file
 from app.services.x_downloader import build_x_download_engine, is_media_download_line
 from app.services.x_task_service import (
@@ -114,16 +116,38 @@ def download_x_profile(self, task_id: int):
                 "last_heartbeat_at": task.last_heartbeat_at,
             })
 
+        # 每次使用配置时动态读取网页持久化后的值。
+        x_download_root = settings.X_DOWNLOAD_DIR
         result = engine.download_profile(
             profile_url=task.profile_url,
             username=task.username,
-            destination=settings.X_DOWNLOAD_DIR,
+            destination=x_download_root,
             cookie_file=cookie_path,
             on_line=on_line,
             task_id=task_id,
         )
 
-        task.download_dir = os.path.join(settings.X_DOWNLOAD_DIR, task.username)
+        task.download_dir = os.path.join(x_download_root, task.username)
+        existing_paths = {
+            row[0] for row in db.execute(
+                select(XMediaAsset.file_path).where(XMediaAsset.x_author_id == task.x_author_id)
+            ).all()
+        }
+        for file_path in result.files:
+            if file_path in existing_paths:
+                continue
+            mime_type, _ = mimetypes.guess_type(file_path)
+            media_type = "video" if (mime_type or "").startswith("video/") else "image"
+            path = Path(file_path)
+            db.add(XMediaAsset(
+                task_id=task.id,
+                x_author_id=task.x_author_id,
+                media_type=media_type,
+                file_path=file_path,
+                filename=path.name,
+                size_bytes=path.stat().st_size if path.is_file() else 0,
+                mime_type=mime_type,
+            ))
         update_x_task_runtime(
             task,
             phase="finalizing",
@@ -149,7 +173,7 @@ def download_x_profile(self, task_id: int):
         if result.success:
             logger.info(f"X 任务 {task_id} 完成: {result.file_count} 个文件")
             if author:
-                author.total_downloads = (author.total_downloads or 0) + result.file_count
+                author.total_downloads = result.file_count
                 author.last_check_time = datetime.now()
                 sync_x_author(author, profile_url=task.profile_url)
         else:

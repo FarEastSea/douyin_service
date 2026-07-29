@@ -4871,6 +4871,17 @@
     box-shadow: var(--g-shadow-sm, none);
 }
 
+.x-media-modal { position:fixed; inset:0; z-index:1200; padding:4vh 4vw; background:rgba(0,0,0,.72); overflow:auto; }
+.x-media-dialog { max-width:1200px; margin:auto; padding:20px; border-radius:18px; background:var(--card-bg, #fff); }
+.x-media-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+.x-media-header div { display:flex; gap:12px; align-items:baseline; }
+.x-media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
+.x-media-card { overflow:hidden; border:1px solid var(--border-color,#ddd); border-radius:12px; background:rgba(127,127,127,.06); }
+.x-media-card img,.x-media-card video { width:100%; height:260px; display:block; object-fit:contain; background:#080808; }
+.x-media-caption { display:flex; align-items:center; gap:10px; padding:10px; }
+.x-media-caption span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.x-media-caption a { text-decoration:none; }
+
 .bootstrap-head {
     display: flex;
     align-items: flex-start;

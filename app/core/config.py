@@ -19,8 +19,14 @@ class Settings(BaseSettings):
     APP_NAME: str = "媒体下载管理系统"
     DEBUG: bool = False
 
-    # 下载目录 - 飞牛NAS挂载路径
-    DOWNLOAD_DIR: str = "/downloads"
+    # 统一下载目录
+    DOWNLOAD_ROOT: str = "/downloads"
+    DOUYIN_DOWNLOAD_SUBDIR: str = "douyin"
+    X_DOWNLOAD_SUBDIR: str = "X"
+
+    @property
+    def DOWNLOAD_DIR(self) -> str:
+        return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.DOUYIN_DOWNLOAD_SUBDIR)
 
     # 数据库配置
     DB_TYPE: str = "postgresql"
@@ -88,7 +94,9 @@ class Settings(BaseSettings):
     DOUYIN_COOKIE: Optional[str] = None
     
     # X/Twitter 下载配置
-    X_DOWNLOAD_DIR: str = "/downloads/X"
+    @property
+    def X_DOWNLOAD_DIR(self) -> str:
+        return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.X_DOWNLOAD_SUBDIR)
     X_DOWNLOAD_ENGINE: str = "gallery-dl"
     X_COOKIE: Optional[str] = None
     X_COOKIE_FILE: Optional[str] = None
@@ -108,7 +116,13 @@ class WebSettings:
     @staticmethod
     def snapshot() -> Settings:
         # 显式传入网页配置，使其优先于进程环境变量，且不缓存旧值。
-        return Settings.model_validate(read_env_file())
+        values = read_env_file()
+        # 首次升级兼容：将旧抖音完整目录拆成统一根目录和子目录。
+        if "DOWNLOAD_ROOT" not in values and values.get("DOWNLOAD_DIR"):
+            legacy = Path(values["DOWNLOAD_DIR"]).expanduser()
+            values["DOWNLOAD_ROOT"] = str(legacy.parent)
+            values["DOUYIN_DOWNLOAD_SUBDIR"] = legacy.name
+        return Settings.model_validate(values)
 
     def __getattr__(self, name: str):
         return getattr(self.snapshot(), name)
@@ -127,5 +141,5 @@ def ensure_download_dir():
     if not x_download_path.exists():
         x_download_path.mkdir(parents=True, exist_ok=True)
     
-    return download_path
+    return Path(settings.DOWNLOAD_ROOT)
 

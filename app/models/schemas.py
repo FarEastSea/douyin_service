@@ -282,12 +282,25 @@ class XDownloadTaskResponse(BaseModel):
     author_display_name: Optional[str] = None
     author_account_status: Optional[str] = None
     has_live_state: bool = False
+    preview_count: int = 0
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
 
     class Config:
         from_attributes = True
+
+
+class XMediaAssetResponse(BaseModel):
+    id: int
+    task_id: int
+    media_type: str
+    filename: str
+    size_bytes: int = 0
+    mime_type: Optional[str] = None
+    preview_url: str
+    download_url: str
+    created_at: datetime
 
 
 class PaginatedXTasksResponse(BaseModel):

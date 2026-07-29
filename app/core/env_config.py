@@ -20,8 +20,9 @@ class EnvField(BaseModel):
 ENV_FIELDS: List[EnvField] = [
     EnvField(key="APP_NAME", label="应用名称", group="应用", default="媒体下载管理系统", help="显示与识别当前服务的名称"),
     EnvField(key="DEBUG", label="调试模式", group="应用", default="false", help="生产环境建议关闭"),
-    EnvField(key="DOWNLOAD_DIR", label="抖音下载目录", group="应用", default="/downloads", required=True),
-    EnvField(key="X_DOWNLOAD_DIR", label="X 下载目录", group="应用", default="/downloads/X"),
+    EnvField(key="DOWNLOAD_ROOT", label="下载根目录", group="下载目录", default="/downloads", required=True, help="两个平台下载文件的共同根目录"),
+    EnvField(key="DOUYIN_DOWNLOAD_SUBDIR", label="抖音子目录", group="下载目录", default="douyin", required=True, help="根目录下的相对子目录"),
+    EnvField(key="X_DOWNLOAD_SUBDIR", label="X 子目录", group="下载目录", default="X", required=True, help="根目录下的相对子目录"),
     EnvField(key="DB_TYPE", label="数据库类型", group="数据库", default="postgresql", required=True),
     EnvField(key="DB_HOST", label="数据库主机", group="数据库", default="localhost", required=True),
     EnvField(key="DB_PORT", label="数据库端口", group="数据库", default="5432", required=True),

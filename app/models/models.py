@@ -268,6 +268,28 @@ class XDownloadTask(Base):
     last_heartbeat_at = Column(DateTime)
 
     x_author = relationship("XAuthor", back_populates="download_tasks")
+    media_assets = relationship("XMediaAsset", back_populates="task", cascade="all, delete-orphan")
+
+
+class XMediaAsset(Base):
+    """X 下载得到的单个本地媒体资源。"""
+    __tablename__ = "x_media_assets"
+    __table_args__ = (
+        Index("idx_x_media_task", "task_id", "created_at"),
+        Index("idx_x_media_author", "x_author_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("x_download_tasks.id", ondelete="CASCADE"), nullable=False)
+    x_author_id = Column(Integer, ForeignKey("x_authors.id", ondelete="CASCADE"), nullable=True)
+    media_type = Column(String(16), nullable=False)
+    file_path = Column(Text, nullable=False, unique=True)
+    filename = Column(Text, nullable=False)
+    size_bytes = Column(Integer, default=0)
+    mime_type = Column(String(128))
+    created_at = Column(DateTime, server_default=func.now())
+
+    task = relationship("XDownloadTask", back_populates="media_assets")
 
 
 class SystemConfig(Base):
