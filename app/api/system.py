@@ -30,6 +30,8 @@ from app.core.runtime_config import (
     save_runtime_config as persist_runtime_config,
 )
 
+from app.services.media_paths import migrate_download_paths
+
 router = APIRouter(tags=["系统管理"])
 
 
@@ -195,6 +197,13 @@ async def save_complete_settings(
         environment_updates = {key: value for key, value in updates.items() if key not in runtime_by_env}
         if environment_updates:
             write_env_updates(environment_updates)
+        path_changes = await migrate_download_paths(
+            db,
+            old_download_dir=current.get("DOWNLOAD_DIR", "/downloads"),
+            new_download_dir=str(updates.get("DOWNLOAD_DIR", current.get("DOWNLOAD_DIR", "/downloads"))),
+            old_x_download_dir=current.get("X_DOWNLOAD_DIR", "/downloads/X"),
+            new_x_download_dir=str(updates.get("X_DOWNLOAD_DIR", current.get("X_DOWNLOAD_DIR", "/downloads/X"))),
+        )
 
         cookie_keys = {"DOUYIN_COOKIE": "douyin_cookie", "X_COOKIE": "x_cookie"}
         for env_key, config_key in cookie_keys.items():
@@ -236,7 +245,11 @@ async def save_complete_settings(
     return MessageResponse(
         success=True,
         message=message,
-        data={"restart_required": bool(restart_keys), "restart_keys": restart_keys},
+        data={
+            "restart_required": bool(restart_keys),
+            "restart_keys": restart_keys,
+            "migrated_paths": path_changes,
+        },
     )
 
 # ============ 下载历史 ============

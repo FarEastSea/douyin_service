@@ -1,4 +1,4 @@
-/* 2026-07 ????????????????????????????? */
+/* 2026-07 管理界面视觉与响应式布局刷新 */
 :root,[data-theme="dark"]{
   --ui-canvas:#090b12;--ui-surface:rgba(20,23,34,.92);--ui-raised:rgba(28,31,44,.96);
   --ui-line:rgba(255,255,255,.075);--ui-line-strong:rgba(255,255,255,.13);
@@ -152,7 +152,7 @@ button.secondary:hover{
   .app-sidebar .platform-tabs{padding:5px;border:1px solid var(--ui-line);border-radius:14px;background:rgba(255,255,255,.025)}
   .app-sidebar .platform-tab{min-height:42px;padding:10px 13px;border-radius:10px;font-size:13px}
   .sidebar-nav{gap:6px}
-  .sidebar-nav::before{content:'???';padding:0 10px 4px;color:var(--ui-muted);font-size:10px;font-weight:700;letter-spacing:.16em}
+  .sidebar-nav::before{content:'导航';padding:0 10px 4px;color:var(--ui-muted);font-size:10px;font-weight:700;letter-spacing:.16em}
   .sidebar-nav .sub-tab{min-height:46px;padding:9px 12px;border:0;border-radius:12px;background:transparent;font-size:13px}
   .sidebar-nav .sub-tab:hover{border-color:transparent;background:rgba(255,255,255,.045);transform:none}
   .sidebar-nav .sub-tab.active{

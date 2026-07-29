@@ -11,6 +11,8 @@ from pydantic_settings import BaseSettings
 from pathlib import Path
 from typing import Optional
 
+from app.core.env_config import read_env_file
+
 
 class Settings(BaseSettings):
     # 应用配置
@@ -100,8 +102,19 @@ class Settings(BaseSettings):
         extra = "ignore"  # 忽略 .env 中多余的变量（如旧版 DATABASE_URL）
 
 
-settings = Settings()
+class WebSettings:
+    """动态读取由网页设置中心维护的配置。"""
 
+    @staticmethod
+    def snapshot() -> Settings:
+        # 显式传入网页配置，使其优先于进程环境变量，且不缓存旧值。
+        return Settings.model_validate(read_env_file())
+
+    def __getattr__(self, name: str):
+        return getattr(self.snapshot(), name)
+
+
+settings = WebSettings()
 
 # 确保下载目录存在
 def ensure_download_dir():

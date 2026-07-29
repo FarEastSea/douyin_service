@@ -36,8 +36,8 @@ from app.services.downloader import (
     payload_live_photo_urls,
 )
 from app.core.config import settings
-from app.core.env_config import read_env_file
 from app.core.runtime_config import get_runtime_config
+from app.services.media_paths import resolve_media_path
 
 router = APIRouter(prefix="/tasks", tags=["下载任务"])
 
@@ -402,12 +402,11 @@ async def preview_task_video(task_id: int, db: AsyncSession = Depends(get_async_
     if not task.file_path:
         raise HTTPException(status_code=404, detail="任务没有可预览文件")
 
-    file_path = Path(task.file_path).expanduser().resolve()
-    configured_download_dir = read_env_file().get("DOWNLOAD_DIR") or settings.DOWNLOAD_DIR
-    download_root = Path(configured_download_dir).expanduser().resolve()
-
     try:
-        file_path.relative_to(download_root)
+        file_path = resolve_media_path(task.file_path, settings.DOWNLOAD_DIR)
+        if str(file_path) != task.file_path:
+            task.file_path = str(file_path)
+            await db.commit()
     except ValueError:
         raise HTTPException(status_code=403, detail="文件不在下载目录内")
 
