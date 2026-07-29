@@ -106,7 +106,7 @@ async def lifespan(app: FastAPI):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="媒体下载管理系统",
+    title=settings.APP_NAME if settings is not None else "媒体下载管理系统",
     description="""
 ## 功能特性
 
@@ -173,7 +173,7 @@ async def root():
         return FileResponse(index_path)
     
     return {
-        "name": "媒体下载管理系统",
+        "name": settings.APP_NAME if settings is not None else "媒体下载管理系统",
         "version": "2.0.0",
         "docs": "/docs",
         "api": "/api"

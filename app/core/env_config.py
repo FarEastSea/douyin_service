@@ -18,6 +18,7 @@ class EnvField(BaseModel):
 
 
 ENV_FIELDS: List[EnvField] = [
+    EnvField(key="APP_NAME", label="应用名称", group="应用", default="媒体下载管理系统", help="显示与识别当前服务的名称"),
     EnvField(key="DEBUG", label="调试模式", group="应用", default="false", help="生产环境建议关闭"),
     EnvField(key="DOWNLOAD_DIR", label="抖音下载目录", group="应用", default="/downloads", required=True),
     EnvField(key="X_DOWNLOAD_DIR", label="X 下载目录", group="应用", default="/downloads/X"),

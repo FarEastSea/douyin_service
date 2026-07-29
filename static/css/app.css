@@ -4971,3 +4971,145 @@ button:disabled {
         width: 100%;
     }
 }
+.settings-overview {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 4px 2px 16px;
+}
+.settings-overview h3 {
+    margin: 0 0 6px;
+    font-size: 18px;
+}
+.settings-overview p,
+.config-domain-heading p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.config-domain-nav {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 0 0 14px;
+    scrollbar-width: thin;
+}
+.config-domain-nav button {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 12px;
+}
+.complete-config-grid {
+    display: grid;
+    gap: 14px;
+}
+.config-domain {
+    scroll-margin-top: 20px;
+}
+.config-domain-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+.config-domain-heading h4 {
+    margin-bottom: 3px !important;
+}
+.config-domain-heading > span {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+.config-field {
+    min-width: 0;
+}
+.config-field > label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 22px;
+    margin-bottom: 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+}
+.config-field input,
+.config-field select,
+.config-field textarea {
+    width: 100%;
+}
+.config-field textarea {
+    min-height: 72px;
+    resize: vertical;
+}
+.config-field code {
+    display: block;
+    margin-top: 5px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    opacity: .75;
+}
+.config-field-help {
+    display: block;
+    margin-top: 5px;
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+.required-mark {
+    color: var(--error);
+}
+.config-apply-badge {
+    margin-left: auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+.config-apply-badge.immediate {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+.config-apply-badge.restart {
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.config-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+.config-switch input {
+    width: auto;
+}
+.complete-config-actions {
+    position: sticky;
+    bottom: 10px;
+    z-index: 4;
+    margin-top: 16px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-card) 94%, transparent);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+    backdrop-filter: blur(12px);
+}
+@media (max-width: 768px) {
+    .settings-overview {
+        align-items: stretch;
+        flex-direction: column;
+    }
+    .complete-config-actions {
+        bottom: 64px;
+    }
+}

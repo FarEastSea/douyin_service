@@ -10,7 +10,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy import select, func, text, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from pathlib import Path
 
@@ -22,8 +22,9 @@ from app.models.schemas import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core import updater
-from app.core.env_config import read_env_file, validate_env, write_env_updates
+from app.core.env_config import ENV_FIELDS, FIELD_MAP, get_env_values, read_env_file, validate_env, write_env_updates
 from app.core.runtime_config import (
+    RUNTIME_CONFIG_ENV_KEYS,
     RUNTIME_CONFIG_SCHEMA,
     get_runtime_config,
     save_runtime_config as persist_runtime_config,
@@ -41,6 +42,10 @@ class RuntimeConfigUpdate(BaseModel):
     download_retry_count: Optional[int] = None
     download_retry_delay: Optional[int] = None
     stuck_task_timeout: Optional[int] = None
+
+
+class CompleteConfigUpdate(BaseModel):
+    values: Dict[str, Any]
 
 
 # ============ Cookie 配置 ============
@@ -141,6 +146,98 @@ async def update_runtime_settings(
     )
     return MessageResponse(success=True, message="运行配置已保存并同步到 .env", data={"config": config})
 
+
+@router.get("/config/all")
+async def get_complete_settings(db: AsyncSession = Depends(get_async_db)):
+    """返回设置中心使用的完整配置清单，敏感值始终脱敏。"""
+    values = get_env_values(mask_secret=True)
+    runtime = await get_runtime_config(db)
+    for runtime_key, env_key in RUNTIME_CONFIG_ENV_KEYS.items():
+        if runtime_key in runtime and env_key in values:
+            value = runtime[runtime_key]
+            values[env_key]["value"] = "true" if value is True else "false" if value is False else str(value)
+
+    return {
+        "success": True,
+        "fields": [field.model_dump() for field in ENV_FIELDS],
+        "values": values,
+        "runtime_keys": list(RUNTIME_CONFIG_ENV_KEYS.values()),
+    }
+
+
+@router.post("/config/all", response_model=MessageResponse)
+async def save_complete_settings(
+    request: CompleteConfigUpdate,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """统一保存全部网页配置，并同步运行时配置与平台 Cookie。"""
+    updates = {key: value for key, value in request.values.items() if key in FIELD_MAP}
+    if not updates:
+        raise HTTPException(status_code=400, detail="没有可保存的配置")
+
+    current = read_env_file()
+    for key, value in updates.items():
+        field = FIELD_MAP[key]
+        if field.required and not str(value if value is not None else "").strip():
+            raise HTTPException(status_code=400, detail=f"{field.label}不能为空")
+
+    runtime_by_env = {env_key: runtime_key for runtime_key, env_key in RUNTIME_CONFIG_ENV_KEYS.items()}
+    runtime_updates = {
+        runtime_by_env[key]: value
+        for key, value in updates.items()
+        if key in runtime_by_env
+    }
+
+    try:
+        if runtime_updates:
+            await persist_runtime_config(db, runtime_updates)
+
+        environment_updates = {key: value for key, value in updates.items() if key not in runtime_by_env}
+        if environment_updates:
+            write_env_updates(environment_updates)
+
+        cookie_keys = {"DOUYIN_COOKIE": "douyin_cookie", "X_COOKIE": "x_cookie"}
+        for env_key, config_key in cookie_keys.items():
+            value = updates.get(env_key)
+            if value == "********":
+                value = current.get(env_key, "")
+            if value is None or not str(value).strip():
+                continue
+            result = await db.execute(select(SystemConfig).where(SystemConfig.key == config_key))
+            config_row = result.scalar_one_or_none()
+            if config_row:
+                config_row.value = str(value).strip()
+            else:
+                db.add(SystemConfig(key=config_key, value=str(value).strip()))
+
+        await db.commit()
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        await db.rollback()
+        raise
+
+    douyin_cookie = updates.get("DOUYIN_COOKIE")
+    if douyin_cookie and douyin_cookie != "********":
+        redis_client.set_cookie(str(douyin_cookie).strip())
+    x_cookie = updates.get("X_COOKIE")
+    if x_cookie and x_cookie != "********":
+        redis_client.set_x_cookie(str(x_cookie).strip())
+
+    redis_client.append_activity_log("info", "system", "设置中心配置已更新", ", ".join(sorted(updates)))
+    restart_keys = sorted(
+        key for key in updates
+        if key not in RUNTIME_CONFIG_ENV_KEYS and key not in {"DOUYIN_COOKIE", "X_COOKIE"}
+    )
+    message = "配置已保存"
+    if restart_keys:
+        message += "；部分基础配置需重启 Web、Worker 和 Beat 后生效"
+    return MessageResponse(
+        success=True,
+        message=message,
+        data={"restart_required": bool(restart_keys), "restart_keys": restart_keys},
+    )
 
 # ============ 下载历史 ============
 

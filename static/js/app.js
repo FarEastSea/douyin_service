@@ -446,6 +446,139 @@
             }
         }
 
+        const COMPLETE_CONFIG_DOMAINS = [
+            { id: 'app', title: '应用与存储', description: '服务名称、调试模式与媒体保存位置', keys: ['APP_NAME', 'DEBUG', 'DOWNLOAD_DIR', 'X_DOWNLOAD_DIR'] },
+            { id: 'auth', title: '平台认证', description: '抖音和 X/Twitter 的登录凭据与下载引擎', keys: ['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE', 'X_DOWNLOAD_ENGINE'] },
+            { id: 'download', title: '下载执行', description: '并发、分块、超时和失败重试策略', keys: ['MAX_CONCURRENT_DOWNLOADS', 'DOWNLOAD_CHUNK_SIZE', 'DOWNLOAD_TIMEOUT', 'DOWNLOAD_RETRY_COUNT', 'DOWNLOAD_RETRY_DELAY', 'STUCK_TASK_TIMEOUT'] },
+            { id: 'subscription', title: '订阅与风控', description: '自动检查频率和平台请求节流', keys: ['AUTO_CHECK_ENABLED', 'DEFAULT_CHECK_INTERVAL', 'MIN_CHECK_INTERVAL', 'REQUEST_DELAY', 'AUTHOR_CHECK_DELAY'] },
+            { id: 'database', title: '数据库', description: 'PostgreSQL 或 MySQL 的生产连接信息', keys: ['DB_TYPE', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'] },
+            { id: 'queue', title: 'Redis 与任务队列', description: '缓存、消息队列和任务结果存储', keys: ['REDIS_URL', 'REDIS_PASSWORD', 'CELERY_BROKER_URL', 'CELERY_RESULT_BACKEND'] },
+            { id: 'x-task', title: 'X 任务留存', description: 'X 下载任务日志与状态的保留策略', keys: ['X_TASK_LOG_MAX_LINES', 'X_TASK_LOG_TTL_SECONDS', 'X_TASK_STATE_TTL_SECONDS'] }
+        ];
+        const COMPLETE_CONFIG_BOOLEAN_KEYS = new Set(['DEBUG', 'AUTO_CHECK_ENABLED']);
+        const COMPLETE_CONFIG_NUMBER_KEYS = new Set([
+            'DB_PORT', 'MAX_CONCURRENT_DOWNLOADS', 'DOWNLOAD_CHUNK_SIZE', 'DOWNLOAD_TIMEOUT',
+            'DOWNLOAD_RETRY_COUNT', 'DOWNLOAD_RETRY_DELAY', 'DEFAULT_CHECK_INTERVAL',
+            'MIN_CHECK_INTERVAL', 'REQUEST_DELAY', 'AUTHOR_CHECK_DELAY', 'STUCK_TASK_TIMEOUT',
+            'X_TASK_LOG_MAX_LINES', 'X_TASK_LOG_TTL_SECONDS', 'X_TASK_STATE_TTL_SECONDS'
+        ]);
+        let completeConfigLoaded = false;
+        let completeConfigRuntimeKeys = new Set();
+
+        function completeConfigInput(field, value) {
+            const key = escapeHtml(field.key);
+            const label = `${escapeHtml(field.label)}${field.required ? ' <span class="required-mark">*</span>' : ''}`;
+            const hint = field.help ? `<span class="config-field-help">${escapeHtml(field.help)}</span>` : '';
+            let control;
+            if (COMPLETE_CONFIG_BOOLEAN_KEYS.has(field.key)) {
+                const checked = String(value).toLowerCase() === 'true' ? ' checked' : '';
+                control = `<label class="config-switch"><input type="checkbox" data-config-key="${key}"${checked}><span>${checked ? '已启用' : '已关闭'}</span></label>`;
+            } else if (field.key === 'DB_TYPE') {
+                control = `<select data-config-key="${key}">
+                    <option value="postgresql"${value === 'postgresql' ? ' selected' : ''}>PostgreSQL</option>
+                    <option value="mysql"${value === 'mysql' ? ' selected' : ''}>MySQL / MariaDB</option>
+                </select>`;
+            } else {
+                const isCookie = field.key === 'DOUYIN_COOKIE' || field.key === 'X_COOKIE';
+                const type = field.secret ? 'password' : COMPLETE_CONFIG_NUMBER_KEYS.has(field.key) ? 'number' : 'text';
+                const step = ['REQUEST_DELAY', 'AUTHOR_CHECK_DELAY'].includes(field.key) ? 'any' : '1';
+                const attrs = `${field.required ? ' required' : ''}${type === 'number' ? ` step="${step}" min="0"` : ''}`;
+                control = isCookie
+                    ? `<textarea data-config-key="${key}"${attrs} rows="3" autocomplete="off">${escapeHtml(String(value ?? ''))}</textarea>`
+                    : `<input type="${type}" data-config-key="${key}" value="${escapeHtml(String(value ?? ''))}"${attrs} autocomplete="${field.secret ? 'new-password' : 'off'}">`;
+            }
+            const mode = completeConfigRuntimeKeys.has(field.key) || ['DOUYIN_COOKIE', 'X_COOKIE'].includes(field.key)
+                ? '<span class="config-apply-badge immediate">立即生效</span>'
+                : '<span class="config-apply-badge restart">重启生效</span>';
+            return `<div class="config-field"><label>${label}${mode}</label>${control}${hint}<code>${key}</code></div>`;
+        }
+
+        function renderCompleteConfig(data) {
+            const fields = data.fields || [];
+            const values = data.values || {};
+            const fieldMap = new Map(fields.map(field => [field.key, field]));
+            completeConfigRuntimeKeys = new Set(data.runtime_keys || []);
+            const nav = document.getElementById('completeConfigNav');
+            const grid = document.getElementById('completeConfigGrid');
+            if (!nav || !grid) return;
+
+            nav.innerHTML = COMPLETE_CONFIG_DOMAINS.map(domain =>
+                `<button class="secondary" onclick="document.getElementById('config-domain-${domain.id}')?.scrollIntoView({behavior:'smooth',block:'start'})">${domain.title}</button>`
+            ).join('');
+
+            grid.innerHTML = COMPLETE_CONFIG_DOMAINS.map(domain => {
+                const domainFields = domain.keys.map(key => fieldMap.get(key)).filter(Boolean);
+                return `<section class="settings-section config-domain" id="config-domain-${domain.id}">
+                    <div class="config-domain-heading"><div><h4>${domain.title}</h4><p>${domain.description}</p></div><span>${domainFields.length} 项</span></div>
+                    <div class="settings-form-grid">${domainFields.map(field => completeConfigInput(field, values[field.key]?.value ?? field.default)).join('')}</div>
+                </section>`;
+            }).join('');
+
+            grid.querySelectorAll('.config-switch input').forEach(input => {
+                input.addEventListener('change', () => {
+                    const text = input.parentElement.querySelector('span');
+                    if (text) text.textContent = input.checked ? '已启用' : '已关闭';
+                });
+            });
+            const status = document.getElementById('completeConfigStatus');
+            if (status) {
+                status.textContent = `${fields.length} 项配置`;
+                status.className = 'status-tag status-completed';
+            }
+            completeConfigLoaded = true;
+            _recalcSettingsHeight();
+        }
+
+        async function loadCompleteConfig() {
+            const status = document.getElementById('completeConfigStatus');
+            if (status) {
+                status.textContent = '读取中';
+                status.className = 'status-tag status-pending';
+            }
+            try {
+                const data = await apiRequest(`${API_BASE}/config/all`, {}, '读取完整配置失败');
+                renderCompleteConfig(data);
+            } catch (e) {
+                if (status) {
+                    status.textContent = '读取失败';
+                    status.className = 'status-tag status-failed';
+                }
+                const grid = document.getElementById('completeConfigGrid');
+                if (grid) grid.innerHTML = `<div class="empty-state"><p>${escapeHtml(e.message || '读取完整配置失败')}</p></div>`;
+            }
+        }
+
+        async function saveCompleteConfig() {
+            const controls = [...document.querySelectorAll('#completeConfigGrid [data-config-key]')];
+            if (!controls.length) {
+                showToast('配置尚未加载', 'error');
+                return;
+            }
+            const invalid = controls.find(control => !control.checkValidity());
+            if (invalid) {
+                invalid.reportValidity();
+                return;
+            }
+            const values = {};
+            controls.forEach(control => {
+                values[control.dataset.configKey] = control.type === 'checkbox' ? control.checked : control.value;
+            });
+            try {
+                const data = await apiRequest(`${API_BASE}/config/all`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ values })
+                }, '保存完整配置失败');
+                showToast(data.message || '配置已保存');
+                await loadCompleteConfig();
+                loadRuntimeConfig();
+                loadDbConfig();
+                checkCookie();
+                checkXCookie();
+            } catch (e) {
+                showToast(e.message || '保存完整配置失败', 'error');
+            }
+        }
         function refreshTasks() {
             fetchTasks();
             fetchStatus();
@@ -2712,8 +2845,12 @@
                 const toggle = document.getElementById(toggleId);
 
                 // 恢复设置子标签
-                let savedTab = localStorage.getItem(`settings-${platform}-tab`) || (platform === 'douyin' ? 'account' : 'config');
-                if (platform === 'douyin' && savedTab === 'config') savedTab = 'account';
+                let savedTab = localStorage.getItem(`settings-${platform}-tab`) || (platform === 'douyin' ? 'all' : 'config');
+                if (platform === 'douyin' && localStorage.getItem('settings-layout-version') !== '2') {
+                    savedTab = 'all';
+                    localStorage.setItem('settings-layout-version', '2');
+                }
+                if (platform === 'douyin' && savedTab === 'config') savedTab = 'all';
                 switchSettingsTab(platform, savedTab);
 
                 if (expanded && body && toggle) {
@@ -3336,6 +3473,7 @@
             fetchStatus();
             switchPlatform('douyin');
             loadRuntimeConfig();
+            loadCompleteConfig();
             loadDbConfig();
             loadProcessStatus();
             pollTimer = setInterval(() => {
