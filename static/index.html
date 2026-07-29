@@ -159,6 +159,13 @@
                             <input type="hidden" id="authorStatusFilter" value="all">
                         </div>
                     </div>
+                    <div class="subscription-report" id="subscriptionReport">
+                        <button type="button" class="subscription-report-summary" onclick="toggleSubscriptionReports()">
+                            <span id="subscriptionReportHeadline">自动更新报告：暂无记录</span>
+                            <span id="subscriptionReportToggle">查看详情</span>
+                        </button>
+                        <div class="subscription-report-body" id="subscriptionReportBody" hidden></div>
+                    </div>
                     <div class="author-list" id="authorList">
                         <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无作者</p></div>
                     </div>

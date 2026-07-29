@@ -14,6 +14,7 @@
         let authorsPage = 1, authorsPageSize = 10, authorsTotalPages = 1, authorsTotal = 0;
         let authorsSubscribeFilter = '', authorsStatusFilter = 'all';
         let pollTimer = null, pollInterval = 5000;
+        let subscriptionReportPollTimer = null;
         let runtimeConfig = null;
         let bootstrapMode = false;
         let currentMediaPreviewType = null;
@@ -1630,7 +1631,10 @@
             loadedPanels[key] = true;
             if (platform === 'douyin') {
                 if (sub === 'tasks') fetchTasks();
-                else if (sub === 'authors') fetchAuthors();
+                else if (sub === 'authors') {
+                    fetchAuthors();
+                    fetchSubscriptionReports();
+                }
                 else if (sub === 'settings') {
                     checkCookie();
                     loadRuntimeConfig();
@@ -2176,9 +2180,68 @@
             try {
                 const data = await apiRequest(`${API_BASE}/authors/check-all`, { method: 'POST' }, '启动订阅检查失败');
                 showToast(data.message || '正在检查更新...');
+                document.getElementById('subscriptionReportHeadline').textContent = '自动更新报告：检查任务已提交，等待执行…';
+                window.setTimeout(fetchSubscriptionReports, 5000);
             } catch (e) {
                 showToast(e.message || '操作失败', 'error');
             }
+        }
+
+        function subscriptionReportStatus(status) {
+            return ({
+                running: ['执行中', 'running'], completed: ['已完成', 'ok'],
+                partial_rate_limited: ['疑似限流，等待下周期续检', 'warn'],
+                partial_timeout: ['超时前已保存进度', 'warn'],
+                failed: ['异常终止', 'error'], interrupted: ['疑似中断', 'error'], skipped: ['已跳过', 'muted']
+            })[status] || [status || '未知', 'muted'];
+        }
+
+        async function fetchSubscriptionReports() {
+            const headline = document.getElementById('subscriptionReportHeadline');
+            const body = document.getElementById('subscriptionReportBody');
+            if (!headline || !body) return;
+            try {
+                const response = await apiFetch(`${API_BASE}/authors/reports/subscriptions?limit=10`);
+                if (!response.ok) throw new Error('加载报告失败');
+                const reports = (await response.json()).items || [];
+                if (!reports.length) {
+                    headline.textContent = '自动更新报告：暂无记录';
+                    body.innerHTML = '<div class="report-empty">完成一次订阅检查后，这里会显示每位作者的结果。</div>';
+                    return;
+                }
+                const latest = reports[0];
+                const [latestLabel] = subscriptionReportStatus(latest.status);
+                headline.textContent = `自动更新报告：${latestLabel} · 已检查 ${latest.checked_authors}/${latest.due_authors} · 新作品 ${latest.new_works}`;
+                body.innerHTML = reports.map((report, reportIndex) => {
+                    const [label, tone] = subscriptionReportStatus(report.status);
+                    const details = (report.details || []).map(item => {
+                        const itemTone = item.status === 'failed' ? 'error' : ((item.status === 'warning' || item.status === 'account_warning') ? 'warn' : ((item.status === 'not_due' || item.status === 'deferred') ? 'muted' : 'ok'));
+                        return `<div class="report-author-row"><span>${escapeHtml(item.nickname || `作者 ${item.author_id}`)}</span><span class="report-state ${itemTone}">${escapeHtml(item.message || item.status)}</span></div>`;
+                    }).join('');
+                    return `<details class="report-run" ${reportIndex === 0 ? 'open' : ''}>
+                        <summary><span>${escapeHtml(formatDateTime(report.started_at))} · ${report.trigger_type === 'manual' ? '手动' : '自动'}</span><span class="report-state ${tone}">${escapeHtml(label)}</span></summary>
+                        <div class="report-metrics"><span>订阅 ${report.total_authors}</span><span>到期 ${report.due_authors}</span><span>成功 ${report.success_authors}</span><span>警告 ${report.warning_authors}</span><span>失败 ${report.failed_authors}</span><span>未执行 ${report.remaining_authors}</span></div>
+                        <div class="report-summary-text">${escapeHtml(report.summary || '暂无摘要')}</div>
+                        <div class="report-author-list">${details || '<div class="report-empty">本轮没有逐作者结果</div>'}</div>
+                    </details>`;
+                }).join('');
+                if (subscriptionReportPollTimer) window.clearTimeout(subscriptionReportPollTimer);
+                subscriptionReportPollTimer = latest.status === 'running'
+                    ? window.setTimeout(fetchSubscriptionReports, 10000)
+                    : null;
+            } catch (error) {
+                headline.textContent = '自动更新报告：加载失败';
+                body.innerHTML = `<div class="report-empty">${escapeHtml(error.message || '加载失败')}</div>`;
+            }
+        }
+
+        function toggleSubscriptionReports() {
+            const body = document.getElementById('subscriptionReportBody');
+            const toggle = document.getElementById('subscriptionReportToggle');
+            if (!body || !toggle) return;
+            body.hidden = !body.hidden;
+            toggle.textContent = body.hidden ? '查看详情' : '收起';
+            if (!body.hidden) fetchSubscriptionReports();
         }
 
         // 抖音任务状态标签切换

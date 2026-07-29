@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, or_
@@ -17,7 +18,7 @@ from typing import List, Optional
 from datetime import datetime
 
 from app.models.database import get_async_db
-from app.models.models import Author, Work, DownloadTask
+from app.models.models import Author, Work, DownloadTask, SubscriptionCheckReport
 from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
     PaginatedAuthorsResponse
@@ -674,4 +675,48 @@ async def check_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
         message="订阅检查任务已提交",
         data={"celery_task_id": celery_result.id}
     )
+
+
+@router.get("/reports/subscriptions")
+async def get_subscription_reports(
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """获取最近的订阅检查报告，包含每位作者的明确结果。"""
+    result = await db.execute(
+        select(SubscriptionCheckReport)
+        .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
+        .limit(limit)
+    )
+    reports = []
+    for report in result.scalars().all():
+        try:
+            details = json.loads(report.details_json or "[]")
+        except (TypeError, ValueError):
+            details = []
+        display_status = report.status
+        display_summary = report.summary
+        if display_status == "running" and report.started_at and (datetime.now() - report.started_at).total_seconds() > 2100:
+            display_status = "interrupted"
+            display_summary = "任务超过 35 分钟仍未结束，可能被 Worker 中断；下一轮会继续检查未处理作者"
+        reports.append({
+            "id": report.id,
+            "celery_task_id": report.celery_task_id,
+            "trigger_type": report.trigger_type,
+            "status": display_status,
+            "total_authors": report.total_authors or 0,
+            "due_authors": report.due_authors or 0,
+            "checked_authors": report.checked_authors or 0,
+            "success_authors": report.success_authors or 0,
+            "new_works": report.new_works or 0,
+            "warning_authors": report.warning_authors or 0,
+            "failed_authors": report.failed_authors or 0,
+            "skipped_authors": report.skipped_authors or 0,
+            "remaining_authors": report.remaining_authors or 0,
+            "summary": display_summary,
+            "details": details,
+            "started_at": report.started_at.isoformat() if report.started_at else None,
+            "finished_at": report.finished_at.isoformat() if report.finished_at else None,
+        })
+    return {"items": reports}
 

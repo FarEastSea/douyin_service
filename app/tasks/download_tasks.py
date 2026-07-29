@@ -9,7 +9,7 @@ Celery 下载任务
 5. 使用日志记录详细的错误信息,便于调试
 """
 
-from celery import shared_task
+from celery import shared_task, current_task
 from celery.exceptions import SoftTimeLimitExceeded
 from datetime import datetime
 from sqlalchemy import select, update
@@ -17,10 +17,14 @@ from sqlalchemy.orm import Session
 import time
 import logging
 import traceback
+import json
 
 from app.tasks.celery_app import celery_app
 from app.models.database import get_sync_db, init_db_sync
-from app.models.models import Author, Work, DownloadTask, DownloadHistory, SystemConfig
+from app.models.models import (
+    Author, Work, DownloadTask, DownloadHistory, SystemConfig,
+    SubscriptionCheckReport,
+)
 from app.services.downloader import (
     DouyinDownloader,
     is_video_work_payload,
@@ -90,6 +94,16 @@ def _parse_datetime(value: str):
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _is_probable_rate_limit_error(value: str | None) -> bool:
+    """识别抖音常见的限流、验证码和网关伪成功响应。"""
+    text = str(value or "").lower()
+    return any(token in text for token in (
+        "限流", "风控", "反爬", "验证码", "验证失败", "错误状态码", "非 json", "空响应", "服务异常",
+        "too many requests", "rate limit", "status 429", "http 429",
+        "status 403", "http 403", "captcha", "verify",
+    ))
 
 
 def _work_create_time(item: dict) -> int:
@@ -880,10 +894,11 @@ def check_subscriptions(force: bool = False):
     """
     init_db_sync()
     db = get_sync_db()
+    report = None
     
     try:
         runtime_config = get_runtime_config_sync(db)
-        if not runtime_config.get("auto_check_enabled", True):
+        if not force and not runtime_config.get("auto_check_enabled", True):
             redis_client.append_activity_log(
                 "info",
                 "task",
@@ -926,6 +941,14 @@ def check_subscriptions(force: bool = False):
             # 在真正请求抖音前就标记本轮已开始，失败也进入全局冷却。
             _mark_subscription_check_started(db)
 
+        report = SubscriptionCheckReport(
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+            trigger_type="manual" if force else "auto",
+            status="running",
+        )
+        db.add(report)
+        db.commit()
+
         # 获取所有订阅的作者：按"最久未检查优先"排序（从未检查过的排最前）。
         # 这样即使本轮因超时/限流提前结束，靠后的作者也会在下一轮优先被检查，
         # 避免固定顺序导致列表末尾的作者长期被漏检。
@@ -938,21 +961,31 @@ def check_subscriptions(force: bool = False):
                 Author.id.asc(),
             )
         ).scalars().all()
+        report.total_authors = len(authors)
+        db.commit()
         
         results = []
         skipped_count = 0
         checked_count = 0
         consecutive_rate_limited = 0
         stopped_for_timeout = False
+        stopped_for_rate_limit = False
         RATE_LIMIT_STOP_THRESHOLD = 3
         
         for author in authors:
             # 检查是否到达检查时间
-            if author.last_check_time:
+            if not force and author.last_check_time:
                 elapsed = (datetime.now() - author.last_check_time).total_seconds()
                 effective_interval = max(int(author.check_interval or 0), global_interval, settings.MIN_CHECK_INTERVAL)
                 if elapsed < effective_interval:
                     skipped_count += 1
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "status": "not_due",
+                        "message": "未到作者检查间隔",
+                        "next_check_seconds": int(effective_interval - elapsed),
+                    })
                     continue
             
             checked_count += 1
@@ -983,6 +1016,8 @@ def check_subscriptions(force: bool = False):
                         "account_status": profile_result.get("account_status"),
                         "status_label": profile_result.get("account_status_label"),
                         "skipped": True,
+                        "status": "account_warning",
+                        "message": profile_result.get("account_status_label"),
                     })
                     if author_delay > 0:
                         time.sleep(author_delay)
@@ -990,6 +1025,12 @@ def check_subscriptions(force: bool = False):
                 
                 # 获取最新作品（传入 sec_uid 避免冗余请求）
                 work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
+
+                # 空列表无法区分“确实无作品”和风控伪成功。短暂退避后复查一次，
+                # 两次都为空才记录警告，避免一次瞬时空响应造成整轮漏更。
+                if not work_list:
+                    time.sleep(max(3.0, min(author_delay, 10.0)))
+                    work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
                 
                 if not work_list:
                     author.last_check_time = datetime.now()
@@ -999,6 +1040,8 @@ def check_subscriptions(force: bool = False):
                         "author_id": author.id,
                         "nickname": author.nickname,
                         "warning": author.last_error,
+                        "status": "warning",
+                        "message": author.last_error,
                     })
                     if author_delay > 0:
                         time.sleep(author_delay)
@@ -1018,13 +1061,24 @@ def check_subscriptions(force: bool = False):
                         "author_id": author.id,
                         "nickname": author.nickname,
                         "new_works": len(new_works),
-                        "task_id": result.id
+                        "task_id": result.id,
+                        "status": "new_works",
+                        "message": f"发现 {len(new_works)} 个新作品，已提交下载",
                     })
                 elif profile_result.get("changed"):
                     results.append({
                         "author_id": author.id,
                         "nickname": author.nickname,
                         "avatar_synced": True,
+                        "status": "success",
+                        "message": "无新作品，作者资料已更新",
+                    })
+                else:
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "status": "success",
+                        "message": "检查成功，无新作品",
                     })
                 
                 # 本作者检查成功，重置连续限流计数
@@ -1079,6 +1133,8 @@ def check_subscriptions(force: bool = False):
                         "nickname": author.nickname,
                         "account_status": anomaly_code,
                         "status_label": anomaly_label,
+                        "status": "account_warning",
+                        "message": anomaly_label,
                     })
                     if author_delay > 0:
                         time.sleep(author_delay)
@@ -1099,15 +1155,18 @@ def check_subscriptions(force: bool = False):
                 results.append({
                     "author_id": author.id,
                     "nickname": author.nickname,
-                    "error": error_msg
+                    "error": error_msg,
+                    "status": "failed",
+                    "message": error_msg[:300],
                 })
 
                 # 疑似限流：不再因单个作者的偶发失败中断整轮检查。
                 # 只有连续多次疑似限流才提前停止本轮，避免持续请求扩大限制；
                 # 失败作者的 last_check_time 已更新，下一轮会自动排到后面重试。
-                if any(token in error_msg for token in ("限流", "非 JSON", "空响应", "服务异常")):
+                if _is_probable_rate_limit_error(error_msg):
                     consecutive_rate_limited += 1
                     if consecutive_rate_limited >= RATE_LIMIT_STOP_THRESHOLD:
+                        stopped_for_rate_limit = True
                         redis_client.append_activity_log(
                             "warning",
                             "task",
@@ -1132,17 +1191,84 @@ def check_subscriptions(force: bool = False):
         # 若因接近超时被迫提前结束，清除全局冷却，让下一次 Beat 立即继续。
         if stopped_for_timeout and not force:
             _reset_subscription_check_cooldown(db)
+
+        completed_author_ids = {item.get("author_id") for item in results}
+        if stopped_for_timeout or stopped_for_rate_limit:
+            deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
+            for author in authors:
+                if author.id not in completed_author_ids:
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "status": "deferred",
+                        "message": deferred_reason,
+                    })
+
+        due_count = checked_count + max(0, len(authors) - checked_count - skipped_count)
+        status_counts = {}
+        for item in results:
+            key = item.get("status", "unknown")
+            status_counts[key] = status_counts.get(key, 0) + 1
+        remaining_count = max(0, len(authors) - checked_count - skipped_count)
+        report.due_authors = due_count
+        report.checked_authors = checked_count
+        report.success_authors = status_counts.get("success", 0) + status_counts.get("new_works", 0)
+        report.new_works = sum(int(item.get("new_works", 0) or 0) for item in results)
+        report.warning_authors = status_counts.get("warning", 0) + status_counts.get("account_warning", 0)
+        report.failed_authors = status_counts.get("failed", 0)
+        report.skipped_authors = skipped_count
+        report.remaining_authors = remaining_count
+        report.status = "partial_rate_limited" if stopped_for_rate_limit else ("partial_timeout" if stopped_for_timeout else "completed")
+        report.summary = (
+            f"订阅 {len(authors)} 位，到期 {due_count} 位，已检查 {checked_count} 位，"
+            f"发现新作品 {report.new_works} 个，异常/警告 {report.warning_authors + report.failed_authors} 位"
+        )
+        report.details_json = json.dumps(results, ensure_ascii=False, default=str)
+        report.finished_at = datetime.now()
+        db.commit()
+
+        # 纯执行超时属于容量分片，可短延迟承接；风控中断则严格等待下一个
+        # 设置中心定义的自动更新周期，避免过早重试加重账号风险。
+        continuation_task_id = None
+        if not force and stopped_for_timeout and remaining_count > 0:
+            countdown = 30
+            try:
+                continuation = check_subscriptions.apply_async(kwargs={"force": False}, countdown=countdown)
+                continuation_task_id = continuation.id
+                redis_client.append_activity_log(
+                    "info", "task", "订阅检查已安排分批续检",
+                    f"{countdown} 秒后继续，剩余={remaining_count}, celery_task_id={continuation_task_id}",
+                )
+            except Exception as continuation_error:
+                logger.warning(f"订阅检查续检任务提交失败，将等待下一次 Beat: {continuation_error}")
         
         return {
             "success": True,
             "checked": checked_count,
             "skipped": skipped_count,
             "stopped_for_timeout": stopped_for_timeout,
+            "stopped_for_rate_limit": stopped_for_rate_limit,
+            "report_id": report.id,
+            "continuation_task_id": continuation_task_id,
             "results": results,
         }
     
     except Exception as e:
         db.rollback()
+        error_summary = f"{type(e).__name__}: {str(e)[:500]}"
+        logger.error(f"订阅检查任务异常终止: {error_summary}\n{traceback.format_exc()}")
+        try:
+            redis_client.append_activity_log("error", "task", "订阅检查任务异常终止", error_summary)
+        except Exception:
+            pass
+        if report:
+            try:
+                report.status = "failed"
+                report.summary = f"订阅检查任务异常终止: {error_summary}"
+                report.finished_at = datetime.now()
+                db.commit()
+            except Exception:
+                db.rollback()
         return {"success": False, "error": str(e)}
     finally:
         db.close()

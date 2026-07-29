@@ -5133,3 +5133,16 @@ button:disabled {
         bottom: 64px;
     }
 }
+        .subscription-report { margin: 0 0 12px; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; background: var(--bg-secondary); }
+        .subscription-report-summary { width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 0; border-radius: 0; background: transparent; color: var(--text-primary); font-size: 13px; text-align: left; }
+        .subscription-report-summary span:last-child { color: var(--text-secondary); white-space: nowrap; }
+        .subscription-report-body { padding: 0 10px 10px; max-height: 420px; overflow: auto; }
+        .report-run { border-top: 1px solid var(--border-color); padding: 9px 2px; }
+        .report-run summary { display: flex; justify-content: space-between; gap: 10px; cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+        .report-metrics { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0; }
+        .report-metrics span, .report-state { padding: 2px 7px; border-radius: 999px; background: rgba(128,128,128,.12); font-size: 11px; }
+        .report-state.ok { color: #2e9d68; } .report-state.warn { color: #d58b16; } .report-state.error { color: #d94c4c; } .report-state.muted { color: var(--text-secondary); }
+        .report-summary-text, .report-empty { padding: 6px 0; color: var(--text-secondary); font-size: 12px; }
+        .report-author-list { display: grid; gap: 4px; }
+        .report-author-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 7px; border-radius: 6px; background: var(--bg-primary); font-size: 12px; }
+        .report-author-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

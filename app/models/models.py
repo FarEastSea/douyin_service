@@ -13,6 +13,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.models.database import Base
 import json
+from datetime import datetime
 
 from app.models.work_media import (
     normalize_image_urls,
@@ -300,4 +301,28 @@ class SystemConfig(Base):
     key = Column(String(64), unique=True, nullable=False)
     value = Column(Text)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class SubscriptionCheckReport(Base):
+    """一次订阅自动/手动检查的可审计结果。"""
+    __tablename__ = "subscription_check_reports"
+    __table_args__ = (Index("idx_subscription_report_started", "started_at"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    celery_task_id = Column(String(64), index=True)
+    trigger_type = Column(String(16), nullable=False, default="auto")
+    status = Column(String(32), nullable=False, default="running", index=True)
+    total_authors = Column(Integer, default=0)
+    due_authors = Column(Integer, default=0)
+    checked_authors = Column(Integer, default=0)
+    success_authors = Column(Integer, default=0)
+    new_works = Column(Integer, default=0)
+    warning_authors = Column(Integer, default=0)
+    failed_authors = Column(Integer, default=0)
+    skipped_authors = Column(Integer, default=0)
+    remaining_authors = Column(Integer, default=0)
+    summary = Column(Text)
+    details_json = Column(Text, default="[]")
+    started_at = Column(DateTime, default=datetime.now, nullable=False)
+    finished_at = Column(DateTime)
 
