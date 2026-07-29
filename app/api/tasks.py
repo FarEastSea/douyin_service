@@ -375,7 +375,12 @@ async def list_tasks(
     total = total_result.scalar()
     
     # 获取分页数据
-    query = base_query.order_by(DownloadTask.created_at.desc())
+    # 批量创建的任务可能共享同一个 created_at。必须用唯一主键打破并列，
+    # 否则数据库可在每次分页查询时以不同顺序返回这些任务。
+    query = base_query.order_by(
+        DownloadTask.created_at.desc(),
+        DownloadTask.id.desc(),
+    )
     query = query.offset((page - 1) * page_size).limit(page_size)
     
     result = await db.execute(query)

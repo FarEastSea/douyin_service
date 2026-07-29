@@ -9,7 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/app.css?v=20260730">
     <link rel="stylesheet" href="/static/css/error-notice.css?v=20260729">
-    <link rel="stylesheet" href="/static/css/ui-refresh.css?v=20260729">
+    <link rel="stylesheet" href="/static/css/ui-refresh.css?v=20260730-3">
 </head>
 
 <body>
@@ -88,13 +88,18 @@
                     <div class="card-header">
                         <div class="card-title"><div class="card-icon">🎬</div>下载任务</div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                            <button class="secondary" id="btnPauseAll" onclick="pauseAllTasks()" title="暂停所有下载中和等待中的任务">⏸ 全部暂停</button>
-                            <button class="secondary" id="btnRedispatch" onclick="redispatchPending()" title="重新分发所有待处理任务到Worker">分发待处理</button>
-                            <button class="secondary" id="btnForceRetryAll" onclick="forceRetryAllDownloading()" title="强制重试所有卡住的下载中任务">强制重试卡住</button>
-                            <button class="secondary" id="btnRetryAllFailed" onclick="retryAllFailed()" title="重试所有失败的任务">批量重试</button>
-                            <button class="secondary" id="btnRefreshRetryAll" onclick="refreshRetryAllFailed()" title="重新获取所有失败任务的下载链接后重试" style="display:none;">🔄 刷新链接重试</button>
-                            <button class="secondary" id="btnDeleteAllStatus" onclick="deleteAllByStatus()" title="删除当前筛选状态的所有任务" style="display:none;">🗑️ 全部删除</button>
                             <button class="secondary" onclick="refreshTasks()">刷新</button>
+                            <details class="action-menu card-action-menu" id="batchTaskMenu">
+                                <summary class="secondary">批量操作</summary>
+                                <div class="action-menu-popover">
+                                    <button class="secondary" id="btnPauseAll" onclick="pauseAllTasks()" title="暂停所有下载中和等待中的任务">⏸ 全部暂停</button>
+                                    <button class="secondary" id="btnRedispatch" onclick="redispatchPending()" title="重新分发所有待处理任务到Worker">分发待处理</button>
+                                    <button class="secondary" id="btnForceRetryAll" onclick="forceRetryAllDownloading()" title="强制重试所有卡住的下载中任务">强制重试卡住</button>
+                                    <button class="secondary" id="btnRetryAllFailed" onclick="retryAllFailed()" title="重试所有失败的任务">批量重试</button>
+                                    <button class="secondary" id="btnRefreshRetryAll" onclick="refreshRetryAllFailed()" title="重新获取所有失败任务的下载链接后重试" style="display:none;">🔄 刷新链接重试</button>
+                                    <button class="secondary danger-action" id="btnDeleteAllStatus" onclick="deleteAllByStatus()" title="删除当前筛选状态的所有任务" style="display:none;">🗑️ 全部删除</button>
+                                </div>
+                            </details>
                         </div>
                     </div>
                     <div class="input-group">
@@ -608,7 +613,7 @@
     </nav>
 
     <script src="/static/js/error-notice.js?v=20260729"></script>
-    <script src="/static/js/app.js?v=20260730"></script>
+    <script src="/static/js/app.js?v=20260730-3"></script>
 </body>
 
 </html>

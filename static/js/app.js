@@ -1348,24 +1348,30 @@
                     : '';
                 return `
                 <div class="author-item" data-author-id="${author.id}" style="flex-wrap:wrap;">
-                    <div class="author-avatar">${avatarHtml}</div>
+                    <button class="author-avatar author-avatar-button" onclick="openAuthorHistory(${author.id})" title="查看作者资料" aria-label="查看 ${escapeHtml(author.nickname || '作者')} 的资料">${avatarHtml}</button>
                     <div class="author-name"><div class="author-name-row">${authorNameHtml}${statusBadgeHtml}</div><div class="author-tracking-tags">${updateBadges}</div></div>
                     <span style="color: var(--text-secondary); font-size: 12px;">
                         ${author.total_works || 0} 作品 / ${author.downloaded_works || 0} 已下载
                     </span>
                     <div class="author-actions">
-                        <button class="subscribe-toggle ${author.is_subscribed ? 'subscribed' : 'secondary'}" 
-                                onclick="toggleSubscribe(${author.id}, ${author.is_subscribed})">
-                            ${author.is_subscribed ? '已订阅' : '订阅'}
+                        <button class="subscribe-toggle subscription-switch ${author.is_subscribed ? 'subscribed' : ''}"
+                                role="switch" aria-checked="${author.is_subscribed}" aria-label="订阅 ${escapeHtml(author.nickname || '作者')}"
+                                onclick="toggleSubscribe(${author.id}, ${author.is_subscribed}, this)">
+                            <span class="subscription-switch-label">订阅</span>
+                            <span class="subscription-switch-track" aria-hidden="true"><span class="subscription-switch-thumb"></span></span>
                         </button>
                         <button class="secondary" onclick="openAuthorWorksPreview(${author.id})">作品管理</button>
-                        <button class="secondary" onclick="filterTasksByAuthor(${author.id})">关联任务</button>
-                        <button class="secondary sync-avatar-btn" onclick="syncAuthorAvatar(${author.id})">同步头像</button>
-                        <button class="secondary" onclick="openAuthorHistory(${author.id})">资料历史${author.profile_history_count ? ` (${author.profile_history_count})` : ''}</button>
                         <button class="secondary dl-btn" onclick="downloadAuthor(${author.id})" style="padding: 6px 12px; font-size: 12px;">
                             下载
                         </button>
-                        <button class="secondary author-delete-btn" onclick="deleteAuthor(${author.id})">删除</button>
+                        <details class="action-menu">
+                            <summary class="secondary" title="更多操作" aria-label="更多操作">•••</summary>
+                            <div class="action-menu-popover">
+                                <button class="secondary" onclick="openAuthorHistory(${author.id})">作者资料</button>
+                                <button class="secondary" onclick="filterTasksByAuthor(${author.id})">关联任务</button>
+                                <button class="secondary author-delete-btn danger-action" onclick="deleteAuthor(${author.id})">删除作者</button>
+                            </div>
+                        </details>
                     </div>
                     ${errorHtml}
                 </div>`;
@@ -1688,9 +1694,21 @@
                     closeMediaPreview();
                 } else if (document.getElementById('authorWorksModal')?.classList.contains('show')) {
                     closeAuthorWorksPreview();
+                } else if (document.getElementById('authorHistoryModal')?.classList.contains('show')) {
+                    closeAuthorHistory();
+                } else if (document.getElementById('authorAutoUpdateModal')?.classList.contains('show')) {
+                    closeAuthorAutoUpdate();
                 }
                 closeFilterSelects();
             }
+        });
+
+        document.addEventListener('click', (e) => {
+            document.querySelectorAll('details.action-menu[open]').forEach(menu => {
+                if (!menu.contains(e.target) || e.target.closest('.action-menu-popover button')) {
+                    menu.removeAttribute('open');
+                }
+            });
         });
 
         window.addEventListener('resize', () => {
@@ -1698,7 +1716,8 @@
         });
 
         // 切换订阅
-        async function toggleSubscribe(authorId, isSubscribed) {
+        async function toggleSubscribe(authorId, isSubscribed, control) {
+            if (control) { control.disabled = true; control.classList.add('is-loading'); }
             try {
                 const action = isSubscribed ? 'unsubscribe' : 'subscribe';
                 await apiRequest(`${API_BASE}/authors/${authorId}/${action}`, { method: 'POST' }, '更新订阅状态失败');
@@ -1707,14 +1726,27 @@
                 fetchStatus();
             } catch (e) {
                 showToast(e.message || '操作失败', 'error');
+            } finally {
+                if (control && document.body.contains(control)) {
+                    control.disabled = false;
+                    control.classList.remove('is-loading');
+                }
             }
         }
 
         async function syncAuthorAvatar(authorId) {
-            const btn = document.querySelector(`.author-item[data-author-id="${authorId}"] .sync-avatar-btn`);
+            const btn = document.querySelector(`.sync-avatar-btn[data-author-id="${authorId}"]`);
             const oldText = btn?.textContent || '同步头像';
+            const oldHtml = btn?.innerHTML || '';
+            const isProfileAvatar = btn?.classList.contains('author-profile-avatar');
             if (btn) {
-                btn.textContent = '同步中...';
+                if (isProfileAvatar) {
+                    btn.classList.add('is-syncing');
+                    const label = btn.querySelector('span:last-child');
+                    if (label) label.textContent = '同步中…';
+                } else {
+                    btn.textContent = '同步中...';
+                }
                 btn.disabled = true;
             }
 
@@ -1726,12 +1758,20 @@
                 } else {
                     showToast(`已同步 ${data.nickname || '作者'} 头像`);
                 }
-                fetchAuthors();
+                await fetchAuthors();
+                if (document.getElementById('authorHistoryModal')?.classList.contains('show')) {
+                    openAuthorHistory(authorId);
+                }
             } catch (e) {
                 showToast(e.message || '同步失败', 'error');
             } finally {
-                if (btn) {
-                    btn.textContent = oldText;
+                if (btn && document.body.contains(btn)) {
+                    if (isProfileAvatar) {
+                        btn.innerHTML = oldHtml;
+                        btn.classList.remove('is-syncing');
+                    } else {
+                        btn.textContent = oldText;
+                    }
                     btn.disabled = false;
                 }
             }
@@ -2272,19 +2312,41 @@
             const modal = document.getElementById('authorHistoryModal');
             const body = document.getElementById('authorHistoryBody');
             if (!modal || !body) return;
+            const cachedAuthor = window._currentAuthorMap?.[authorId] || {};
+            const cachedAvatar = cachedAuthor.avatar_url
+                ? `<img src="${escapeHtml(cachedAuthor.avatar_url)}" alt="${escapeHtml(cachedAuthor.nickname || '作者')}头像" loading="lazy" referrerpolicy="no-referrer">`
+                : '<span>👤</span>';
             modal.classList.add('show'); modal.setAttribute('aria-hidden', 'false');
-            body.innerHTML = '<div class="report-empty">正在加载资料历史…</div>';
+            document.getElementById('authorHistoryTitle').textContent = cachedAuthor.nickname || '作者资料';
+            document.getElementById('authorHistoryMeta').textContent = '点击头像可同步最新资料';
+            body.innerHTML = `<section class="author-profile-hero">
+                <button class="author-profile-avatar sync-avatar-btn" data-author-id="${authorId}" onclick="syncAuthorAvatar(${authorId})" title="同步头像与作者资料">${cachedAvatar}<span>同步资料</span></button>
+                <div class="author-profile-summary">
+                    <h3>${escapeHtml(cachedAuthor.nickname || '作者')}</h3>
+                    <p>${cachedAuthor.total_works || 0} 作品 · ${cachedAuthor.downloaded_works || 0} 已下载</p>
+                    <div class="author-profile-actions">
+                        <button onclick="openAuthorWorksPreview(${authorId});closeAuthorHistory()">作品管理</button>
+                        <button class="secondary" onclick="filterTasksByAuthor(${authorId});closeAuthorHistory()">关联任务</button>
+                    </div>
+                </div>
+            </section><section class="author-profile-history"><div class="section-heading"><strong>资料变更</strong><span>正在加载…</span></div><div id="authorProfileHistoryList"></div></section>`;
             try {
                 const data = await apiRequest(`${API_BASE}/authors/${authorId}/profile-history`, {}, '获取作者资料历史失败');
-                document.getElementById('authorHistoryTitle').textContent = `${data.author.nickname || '作者'} · 资料历史`;
-                document.getElementById('authorHistoryMeta').textContent = `共 ${data.items.length} 条变更`;
-                body.innerHTML = data.items.length ? data.items.map(item => {
+                document.getElementById('authorHistoryTitle').textContent = data.author.nickname || cachedAuthor.nickname || '作者资料';
+                document.getElementById('authorHistoryMeta').textContent = `${data.items.length} 条资料变更 · 点击头像可同步`;
+                const list = document.getElementById('authorProfileHistoryList');
+                const headingMeta = body.querySelector('.section-heading span');
+                if (headingMeta) headingMeta.textContent = `${data.items.length} 条记录`;
+                if (list) list.innerHTML = data.items.length ? data.items.map(item => {
                     const isAvatar = item.field_name === 'avatar';
                     const oldValue = isAvatar ? `<img class="history-avatar" src="${escapeHtml(item.old_value)}" loading="lazy" referrerpolicy="no-referrer">` : `<span>${escapeHtml(item.old_value || '—')}</span>`;
                     const newValue = isAvatar ? `<img class="history-avatar" src="${escapeHtml(item.new_value)}" loading="lazy" referrerpolicy="no-referrer">` : `<span>${escapeHtml(item.new_value || '—')}</span>`;
                     return `<div class="profile-history-row"><div><strong>${isAvatar ? '头像变更' : '昵称变更'}</strong><small>${escapeHtml(formatDateTime(item.observed_at))}</small></div><div class="profile-history-change">${oldValue}<b>→</b>${newValue}</div></div>`;
                 }).join('') : '<div class="empty-state"><p>尚未记录到昵称或头像变化</p></div>';
-            } catch (error) { body.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`; }
+            } catch (error) {
+                const list = document.getElementById('authorProfileHistoryList');
+                if (list) list.innerHTML = `<div class="report-empty">${escapeHtml(error.message)}</div>`;
+            }
         }
 
         function closeAuthorHistory() {
@@ -2359,6 +2421,8 @@
             show('btnRefreshRetryAll', isFailed);
             // 全部删除: 仅失败页
             show('btnDeleteAllStatus', isFailed);
+            const batchMenu = document.getElementById('batchTaskMenu');
+            if (batchMenu) batchMenu.style.display = isPaused ? 'none' : '';
         }
 
         // X 任务标签切换
@@ -2733,8 +2797,11 @@
                             <div class="x-author-meta">${metaItems}</div>
                             ${errorBlock}
                             <div class="x-author-actions">
-                                <button class="subscribe-toggle ${a.is_subscribed ? 'subscribed' : 'secondary'}" onclick="toggleXSubscribe(${a.id}, ${a.is_subscribed})">
-                                    ${a.is_subscribed ? '已订阅' : '订阅'}
+                                <button class="subscribe-toggle subscription-switch ${a.is_subscribed ? 'subscribed' : ''}"
+                                        role="switch" aria-checked="${a.is_subscribed}" aria-label="订阅 ${displayName}"
+                                        onclick="toggleXSubscribe(${a.id}, ${a.is_subscribed}, this)">
+                                    <span class="subscription-switch-label">订阅</span>
+                                    <span class="subscription-switch-track" aria-hidden="true"><span class="subscription-switch-thumb"></span></span>
                                 </button>
                                 <button class="secondary" onclick="downloadXAuthor(${a.id})">下载</button>
                                 <button class="secondary" onclick="deleteXAuthor(${a.id})">删除</button>
@@ -2765,7 +2832,8 @@
             fetchXAuthors();
         }
 
-        async function toggleXSubscribe(authorId, isSubscribed) {
+        async function toggleXSubscribe(authorId, isSubscribed, control) {
+            if (control) { control.disabled = true; control.classList.add('is-loading'); }
             try {
                 const action = isSubscribed ? 'unsubscribe' : 'subscribe';
                 const res = await apiFetch(`${API_BASE}/x/authors/${authorId}/${action}`, { method: 'POST' });
@@ -2777,6 +2845,12 @@
                 }
                 fetchXAuthors();
             } catch (e) { showToast('操作失败', 'error'); }
+            finally {
+                if (control && document.body.contains(control)) {
+                    control.disabled = false;
+                    control.classList.remove('is-loading');
+                }
+            }
         }
 
         async function downloadXAuthor(authorId) {

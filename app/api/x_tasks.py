@@ -101,7 +101,11 @@ async def list_x_tasks(
     total_result = await db.execute(count_query)
     total = total_result.scalar()
 
-    query = base_query.order_by(XDownloadTask.created_at.desc())
+    # created_at 相同时用主键提供稳定顺序，避免轮询刷新后任务换位。
+    query = base_query.order_by(
+        XDownloadTask.created_at.desc(),
+        XDownloadTask.id.desc(),
+    )
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
