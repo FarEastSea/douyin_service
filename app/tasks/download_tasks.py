@@ -32,11 +32,13 @@ from app.services.downloader import (
     latest_video_url,
     payload_image_urls,
     payload_live_photo_urls,
+    prefer_avatar_url,
     _classify_author_account_status,
 )
 from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
+from app.services.avatar_cache import ensure_author_avatar_cached
 
 # 配置日志
 import os
@@ -305,7 +307,17 @@ def sync_author_profile(author: Author, downloader: DouyinDownloader) -> dict:
         author.nickname = nickname
 
     if avatar_url and account_status == "active":
-        author.avatar_url = avatar_url
+        author.avatar_url = prefer_avatar_url(author.avatar_url, avatar_url)
+        try:
+            ensure_author_avatar_cached(
+                author.id,
+                author.avatar_url,
+                downloader.filepath,
+                downloader.session,
+                timeout=downloader.download_timeout,
+            )
+        except Exception as exc:
+            logger.warning("缓存作者头像失败 author_id=%s: %s", author.id, exc)
     if profile_url:
         author.share_url = profile_url
 

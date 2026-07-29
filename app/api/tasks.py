@@ -34,6 +34,7 @@ from app.services.downloader import (
     latest_video_url,
     payload_image_urls,
     payload_live_photo_urls,
+    prefer_avatar_url,
 )
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
@@ -215,7 +216,7 @@ async def _handle_author_download(
         await db.flush()
     else:
         author.nickname = author_info.get("nickname") or author.nickname
-        author.avatar_url = author_info.get("avatar_url") or author.avatar_url
+        author.avatar_url = prefer_avatar_url(author.avatar_url, author_info.get("avatar_url"))
         author.share_url = author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or author.share_url
 
     author_created_at = author.created_at

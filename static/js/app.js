@@ -1325,7 +1325,7 @@
                     ? `<div class="author-error" style="color:var(--error);font-size:11px;width:100%;padding:2px 0 0 52px;word-break:break-all;">⚠ ${escapeHtml(authorStatus.errorMessage)}</div>`
                     : '';
                 const avatarHtml = author.avatar_url
-                    ? `<img src="${escapeHtml(author.avatar_url)}" alt="${escapeHtml(author.nickname || '作者')}头像" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('👤'))">`
+                    ? `<img src="${API_BASE}/authors/${author.id}/avatar" alt="${escapeHtml(author.nickname || '作者')}头像" loading="lazy" onerror="this.replaceWith(document.createTextNode('👤'))">`
                     : '👤';
                 const profileUrl = getAuthorProfileUrl(author);
                 const statusBadgeHtml = authorStatus.label
@@ -1341,8 +1341,8 @@
                 };
                 const updateState = updateLabels[author.auto_update_status];
                 const updateText = author.is_last_breakpoint
-                    ? '自动更新 · 续检断点'
-                    : `自动更新 · ${updateState ? updateState[0] : (author.last_auto_update_at ? '等待轮询' : '尚未检查')}`;
+                    ? '续检断点'
+                    : `${updateState ? updateState[0] : (author.last_auto_update_at ? '等待轮询' : '尚未检查')}`;
                 const updateTone = author.is_last_breakpoint ? 'breakpoint' : (updateState?.[1] || 'muted');
                 const updateBadges = author.is_subscribed
                     ? `<button class="author-tracking-tag ${updateTone}" onclick="openAuthorAutoUpdate(${author.id})" title="查看该作者自动更新详情">${escapeHtml(updateText)}</button>`
@@ -1493,7 +1493,7 @@
                 if (data.items && data.items.length > 0) {
                     searchResults.innerHTML = data.items.map(author => {
                         const avatarHtml = author.avatar_url
-                            ? `<img src="${escapeHtml(author.avatar_url)}" alt="" loading="lazy" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;border-radius:50%;" onerror="this.replaceWith(document.createTextNode('👤'))">`
+                            ? `<img src="${API_BASE}/authors/${author.id}/avatar" alt="" loading="lazy" style="width:100%;height:100%;object-fit:cover;border-radius:50%;" onerror="this.replaceWith(document.createTextNode('👤'))">`
                             : '👤';
                         return `
                         <div class="search-result-item" data-nickname="${escapeHtml(author.nickname || '未知作者')}" onclick="selectSearchResult(${author.id}, ${author.position}, this.dataset.nickname)">
@@ -2315,7 +2315,7 @@
             if (!modal || !body) return;
             const cachedAuthor = window._currentAuthorMap?.[authorId] || {};
             const cachedAvatar = cachedAuthor.avatar_url
-                ? `<img src="${escapeHtml(cachedAuthor.avatar_url)}" alt="${escapeHtml(cachedAuthor.nickname || '作者')}头像" loading="lazy" referrerpolicy="no-referrer">`
+                ? `<img src="${API_BASE}/authors/${authorId}/avatar" alt="${escapeHtml(cachedAuthor.nickname || '作者')}头像" loading="lazy">`
                 : '<span>👤</span>';
             modal.classList.add('show'); modal.setAttribute('aria-hidden', 'false');
             document.getElementById('authorHistoryTitle').textContent = cachedAuthor.nickname || '作者资料';
@@ -2367,7 +2367,7 @@
             closeAuthorHistory();
             openMediaPreview({
                 type: 'image',
-                url: author.avatar_url,
+                url: `${API_BASE}/authors/${authorId}/avatar`,
                 title: `${author.nickname || '作者'} · 头像`,
                 meta: '作者头像'
             });

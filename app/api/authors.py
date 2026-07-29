@@ -11,6 +11,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,7 +26,8 @@ from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
     PaginatedAuthorsResponse
 )
-from app.services.downloader import DouyinDownloader, author_profile_has_identity
+from app.services.downloader import DouyinDownloader, author_profile_has_identity, prefer_avatar_url
+from app.services.avatar_cache import ensure_author_avatar_cached, find_cached_author_avatar
 from app.tasks.download_tasks import (
     AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX,
     TERMINAL_AUTHOR_ACCOUNT_STATUSES,
@@ -251,7 +253,7 @@ async def add_author(
                 existing.nickname = latest_nickname
             latest_avatar_url = author_info.get("avatar_url")
             if latest_avatar_url:
-                existing.avatar_url = latest_avatar_url
+                existing.avatar_url = prefer_avatar_url(existing.avatar_url, latest_avatar_url)
             _apply_author_profile_status(existing, author_info)
             await db.commit()
             await db.refresh(existing)
@@ -544,6 +546,42 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
         author.last_error = str(e)[:1000]
         await db.commit()
         raise HTTPException(status_code=500, detail=f"同步作者头像失败: {str(e)}")
+
+
+@router.get("/{author_id}/avatar")
+async def get_author_avatar(author_id: int, db: AsyncSession = Depends(get_async_db)):
+    """返回本地头像；仅在缓存缺失时访问一次头像源地址。"""
+    result = await db.execute(select(Author).where(Author.id == author_id))
+    author = result.scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="作者不存在")
+
+    cached = find_cached_author_avatar(author.id, settings.DOWNLOAD_DIR, author.avatar_url)
+    if cached:
+        return FileResponse(cached, headers={"Cache-Control": "no-cache"})
+    if not author.avatar_url:
+        raise HTTPException(status_code=404, detail="作者暂无头像")
+
+    cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+    runtime_config = await get_runtime_config(db)
+
+    def _cache_avatar():
+        downloader = DouyinDownloader(cookie or "", settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        return ensure_author_avatar_cached(
+            author.id,
+            author.avatar_url,
+            downloader.filepath,
+            downloader.session,
+            timeout=downloader.download_timeout,
+        )
+
+    try:
+        cached = await asyncio.to_thread(_cache_avatar)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"缓存作者头像失败: {str(exc)}")
+    if not cached:
+        raise HTTPException(status_code=404, detail="作者暂无头像")
+    return FileResponse(cached, headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/{author_id}/profile-history")

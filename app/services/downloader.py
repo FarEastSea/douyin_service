@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 
 from app.core.config import settings
 from app.core import redis_client
@@ -130,6 +130,55 @@ def _extract_primary_url(media_payload: Any) -> Optional[str]:
     return None
 
 
+def _avatar_resolution_score(url: Optional[str], declared_size: int = 0) -> int:
+    """Best-effort score without downloading the image just to inspect its pixels."""
+    if not url:
+        return 0
+    dimensions = re.findall(r"(?<!\d)(\d{2,4})[xX_](\d{2,4})(?!\d)", url)
+    encoded_score = max((int(width) * int(height) for width, height in dimensions), default=0)
+    return max(encoded_score, declared_size * declared_size)
+
+
+def _extract_best_avatar_url(author: Dict[str, Any]) -> Optional[str]:
+    """Prefer Douyin's largest declared avatar variant and its best URL candidate."""
+    variants = (
+        ('avatar_720x720', 720),
+        ('avatar_larger', 600),
+        ('avatar_300x300', 300),
+        ('avatar_medium', 240),
+        ('avatar_168x168', 168),
+        ('avatar_thumb', 100),
+    )
+    candidates = []
+    for field_name, declared_size in variants:
+        payload = author.get(field_name)
+        urls = payload.get('url_list') if isinstance(payload, dict) else None
+        if not isinstance(urls, list):
+            continue
+        for url in urls:
+            normalized = _normalize_optional_text(url)
+            if normalized:
+                candidates.append((_avatar_resolution_score(normalized, declared_size), normalized))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def prefer_avatar_url(current_url: Optional[str], candidate_url: Optional[str]) -> Optional[str]:
+    """Keep an unchanged avatar URL unless the new candidate is detectably sharper."""
+    current = _normalize_optional_text(current_url)
+    candidate = _normalize_optional_text(candidate_url)
+    if not candidate:
+        return current
+    if not current or current == candidate:
+        return candidate or current
+
+    current_parts = urlsplit(current)
+    candidate_parts = urlsplit(candidate)
+    same_asset = current_parts.path == candidate_parts.path
+    if same_asset and _avatar_resolution_score(candidate) <= _avatar_resolution_score(current):
+        return current
+    return candidate
+
+
 def author_profile_has_identity(profile: Dict[str, Any]) -> bool:
     return bool(
         _normalize_optional_text(profile.get('nickname'))
@@ -234,14 +283,7 @@ class DouyinDownloader:
 
         return {
             'nickname': _normalize_optional_text(author.get('nickname')),
-            'avatar_url': (
-                _extract_primary_url(author.get('avatar_thumb'))
-                or _extract_primary_url(author.get('avatar_medium'))
-                or _extract_primary_url(author.get('avatar_larger'))
-                or _extract_primary_url(author.get('avatar_168x168'))
-                or _extract_primary_url(author.get('avatar_300x300'))
-                or _extract_primary_url(author.get('avatar_720x720'))
-            ),
+            'avatar_url': _extract_best_avatar_url(author),
             'sec_uid': sec_uid,
             'profile_url': DouyinDownloader.build_author_profile_url(sec_uid),
         }
