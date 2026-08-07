@@ -5,7 +5,8 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 BRANCH="main"
 PORT="${APP_PORT:-15000}"
-VENV_DIR="${VENV_DIR:-$PROJECT_DIR/venv}"
+VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venv}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 LOG_DIR="$PROJECT_DIR/logs"
 
 echo "Deploying ${PROJECT_NAME}..."
@@ -17,9 +18,25 @@ git fetch origin "$BRANCH"
 git reset --hard "origin/$BRANCH"
 
 echo "Installing dependencies..."
-if [ -f "$VENV_DIR/bin/activate" ] && [ -f "$PROJECT_DIR/requirements.txt" ]; then
-    source "$VENV_DIR/bin/activate"
-    pip install -r "$PROJECT_DIR/requirements.txt"
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+    if [ -z "$PYTHON_BIN" ]; then
+        for candidate in python3.12 python3.11; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+                PYTHON_BIN="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "$PYTHON_BIN" ] || ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info[:2] not in ((3, 11), (3, 12)))'; then
+        echo "Deploy failed: Python 3.11 or 3.12 is required. Set PYTHON_BIN to a supported interpreter." >&2
+        exit 1
+    fi
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+
+if [ -f "$PROJECT_DIR/requirements.txt" ]; then
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip
+    "$VENV_DIR/bin/python" -m pip install -r "$PROJECT_DIR/requirements.txt"
 fi
 
 echo "Restarting production service..."

@@ -4,7 +4,7 @@ set -euo pipefail
 # 生产同构启动脚本：Gunicorn 托管单个 Uvicorn worker，Celery Worker/Beat
 # 继续由 FastAPI lifespan 自动管理。路径从脚本位置推导，不写入部署目标信息。
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/venv}"
+VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
 APP_PORT="${APP_PORT:-15000}"
 LOG_DIR="${PROJECT_DIR}/logs"
 PID_FILE="${LOG_DIR}/gunicorn.pid"
