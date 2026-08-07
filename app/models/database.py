@@ -30,6 +30,15 @@ def _build_async_url(sync_url: str) -> str:
         return sync_url.replace("mysql+pymysql://", "mysql+aiomysql://", 1)
     return sync_url
 
+
+def _postgresql_connect_args(database_url: str, *, asynchronous: bool = False) -> dict:
+    """保持 PostgreSQL 客户端使用 UTF-8，即使历史数据库是 SQL_ASCII。"""
+    if not database_url.startswith(("postgresql://", "postgresql+")):
+        return {}
+    if asynchronous:
+        return {"server_settings": {"client_encoding": "UTF8"}}
+    return {"client_encoding": "UTF8"}
+
 _engine_lock = RLock()
 _async_engine: Optional[AsyncEngine] = None
 _async_engine_key: Optional[tuple] = None
@@ -64,6 +73,10 @@ async def get_async_engine() -> AsyncEngine:
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
+            connect_args=_postgresql_connect_args(
+                current.effective_database_url,
+                asynchronous=True,
+            ),
         )
         async with candidate.connect() as connection:
             await connection.execute(text("SELECT 1"))
@@ -120,6 +133,7 @@ def get_sync_engine() -> Engine:
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
+            connect_args=_postgresql_connect_args(current.effective_database_url),
         )
         with candidate.connect() as connection:
             connection.execute(text("SELECT 1"))

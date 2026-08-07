@@ -426,7 +426,7 @@ def _record_migration(
         "id": migration.migration_id,
         "migration_type": migration.migration_type,
         "description": migration.description,
-        "details": json.dumps(details, ensure_ascii=False, default=_json_default) if details else None,
+        "details": json.dumps(details, ensure_ascii=True, default=_json_default) if details else None,
     })
 
 
