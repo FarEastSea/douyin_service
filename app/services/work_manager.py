@@ -4,7 +4,7 @@
 为什么这样设计：
 1. 集中处理「删除作品 / 删除单个文件」时的磁盘文件清理，避免散落在各 API 中
 2. 删除文件前强制校验路径在 DOWNLOAD_DIR 内，杜绝越权删除
-3. 先删 DownloadHistory 再删 DownloadTask，规避外键约束报错（History 无 ON DELETE CASCADE）
+3. 删除历史再删任务兼容尚未升级级联外键的旧数据库
 4. 删除/重下后回写 Author.downloaded_works，保持统计一致
 """
 
@@ -14,9 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
-from sqlalchemy import select, func
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import Session, selectinload
 
 from app.core import redis_client
 from app.core.config import settings
@@ -117,18 +117,23 @@ async def _purge_tasks(db: AsyncSession, tasks: Iterable[DownloadTask]) -> int:
 
 
 async def recalc_author_counts(db: AsyncSession, author: Author) -> None:
-    """按未排除作品中已完成的文件数回写 author.downloaded_works，total_works 按未排除作品计。"""
+    """按未排除作品数与完整下载作品数回写作者计数。"""
     if author is None:
         return
+    # 会话关闭了 autoflush，先落实本次任务增删和作品排除状态，
+    # 否则下面的聚合查询会读到事务内的旧值。
+    await db.flush()
 
     downloaded = await db.execute(
-        select(func.count(DownloadTask.id))
-        .select_from(DownloadTask)
-        .join(Work, Work.id == DownloadTask.work_id)
+        select(func.count(Work.id))
         .where(
             Work.author_id == author.id,
             Work.is_excluded == False,  # noqa: E712
-            DownloadTask.status == "completed",
+            exists(select(DownloadTask.id).where(DownloadTask.work_id == Work.id)),
+            ~exists(select(DownloadTask.id).where(
+                DownloadTask.work_id == Work.id,
+                or_(DownloadTask.status != "completed", DownloadTask.status.is_(None)),
+            )),
         )
     )
     author.downloaded_works = int(downloaded.scalar() or 0)
@@ -140,6 +145,46 @@ async def recalc_author_counts(db: AsyncSession, author: Author) -> None:
         )
     )
     author.total_works = int(total.scalar() or 0)
+
+
+def refresh_work_download_state_sync(db: Session, work: Work) -> bool:
+    """在同步任务中按所有文件任务状态重算作品下载完成标记。"""
+    db.flush()
+    task_count = int(db.execute(
+        select(func.count(DownloadTask.id)).where(DownloadTask.work_id == work.id)
+    ).scalar() or 0)
+    incomplete_count = int(db.execute(
+        select(func.count(DownloadTask.id)).where(
+            DownloadTask.work_id == work.id,
+            or_(DownloadTask.status != "completed", DownloadTask.status.is_(None)),
+        )
+    ).scalar() or 0)
+    work.is_downloaded = task_count > 0 and incomplete_count == 0
+    return bool(work.is_downloaded)
+
+
+def recalc_author_counts_sync(db: Session, author: Author) -> None:
+    """Celery 同步会话使用的作者计数重算。"""
+    if author is None:
+        return
+    db.flush()
+    author.downloaded_works = int(db.execute(
+        select(func.count(Work.id)).where(
+            Work.author_id == author.id,
+            Work.is_excluded == False,  # noqa: E712
+            exists(select(DownloadTask.id).where(DownloadTask.work_id == Work.id)),
+            ~exists(select(DownloadTask.id).where(
+                DownloadTask.work_id == Work.id,
+                or_(DownloadTask.status != "completed", DownloadTask.status.is_(None)),
+            )),
+        )
+    ).scalar() or 0)
+    author.total_works = int(db.execute(
+        select(func.count(Work.id)).where(
+            Work.author_id == author.id,
+            Work.is_excluded == False,  # noqa: E712
+        )
+    ).scalar() or 0)
 
 
 async def delete_work(db: AsyncSession, work: Work) -> dict:

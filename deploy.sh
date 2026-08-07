@@ -1,12 +1,11 @@
 #!/bin/bash
 set -e
 
-PROJECT_NAME="douyin_service"
-PROJECT_DIR="/www/wwwroot/douyin_service"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
 BRANCH="main"
-PORT="15000"
-VENV_DIR="$PROJECT_DIR/venv"
-ENV_FILE="$PROJECT_DIR/.env"
+PORT="${APP_PORT:-15000}"
+VENV_DIR="${VENV_DIR:-$PROJECT_DIR/venv}"
 LOG_DIR="$PROJECT_DIR/logs"
 
 echo "Deploying ${PROJECT_NAME}..."
@@ -23,44 +22,15 @@ if [ -f "$VENV_DIR/bin/activate" ] && [ -f "$PROJECT_DIR/requirements.txt" ]; th
     pip install -r "$PROJECT_DIR/requirements.txt"
 fi
 
-echo "Restarting gunicorn..."
+echo "Restarting production service..."
 mkdir -p "$LOG_DIR"
 
-# Stop Celery processes left behind by an earlier Gunicorn generation. Celery
-# is started by the FastAPI lifespan below, so an orphan would create duplicate
-# workers with the same node name.
-pkill -TERM -f "celery.*-A app.tasks.celery_app.*worker" 2>/dev/null || true
-pkill -TERM -f "celery.*-A app.tasks.celery_app.*beat" 2>/dev/null || true
+# 不在 shell 中加载 .env。应用通过 app/core/env_config.py 的 ENV_PATH
+# 自行读取网页持久化配置，避免配置值被 shell 当作命令解释。
 
-pkill -f "gunicorn.*main:app.*${PORT}" 2>/dev/null || true
-pkill -f "gunicorn.*${PROJECT_DIR}" 2>/dev/null || true
-
-sleep 2
-
-cd "$PROJECT_DIR"
-
-if [ -f "$VENV_DIR/bin/activate" ]; then
-    source "$VENV_DIR/bin/activate"
-fi
-
-set -a
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
-fi
-set +a
-
-nohup gunicorn main:app \
-    --bind 0.0.0.0:${PORT} \
-    --workers 1 \
-    --threads 1 \
-    --worker-class uvicorn.workers.UvicornWorker \
-    --chdir "$PROJECT_DIR" \
-    --user www \
-    --access-logfile "$LOG_DIR/gunicorn-access.log" \
-    --error-logfile "$LOG_DIR/gunicorn-error.log" \
-    > "$LOG_DIR/gunicorn.log" 2>&1 &
-
-sleep 3
+chmod +x "$PROJECT_DIR/start.sh" "$PROJECT_DIR/stop.sh"
+"$PROJECT_DIR/stop.sh"
+APP_PORT="$PORT" VENV_DIR="$VENV_DIR" "$PROJECT_DIR/start.sh"
 
 if ss -lntp | grep -q ":${PORT}"; then
     echo "Deploy success. ${PROJECT_NAME} is running on port ${PORT}."

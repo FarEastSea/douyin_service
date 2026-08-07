@@ -7,21 +7,213 @@ Redis 客户端模块
 3. 提供暂停信号机制，通过 Redis SET 存储暂停的任务ID
 """
 
-import redis
+import json
+from threading import RLock
 import time as _time
 from datetime import datetime
-from app.core.config import settings
 from typing import Optional, Dict, Any, Iterable
-import json
+from urllib.parse import quote
 
-# 创建 Redis 连接池
-redis_pool = redis.ConnectionPool.from_url(
-    settings.redis_url_with_auth,
-    decode_responses=True
-)
+import redis
 
-# Redis 客户端
-redis_client = redis.Redis(connection_pool=redis_pool)
+from app.core import env_config
+from app.core.diagnostics import clear_runtime_error, report_runtime_error
+
+
+CONFIG_VERSION_KEY = "douyin:config:version"
+_CONFIG_VERSION_POLL_SECONDS = 0.5
+_observed_config_version = 0
+_version_cached = 0
+_version_last_checked = 0.0
+_version_source_key: Optional[tuple] = None
+_version_lock = RLock()
+_source_cached_signature: Optional[tuple] = None
+_source_cached_key: Optional[tuple] = None
+_source_lock = RLock()
+
+
+def _redis_url_from_values(values: Dict[str, str]) -> str:
+    redis_url = str(values.get("REDIS_URL") or "redis://localhost:6379/0").strip()
+    password = str(values.get("REDIS_PASSWORD") or "").strip()
+    if password and redis_url.startswith(("redis://", "rediss://")):
+        scheme, remainder = redis_url.split("://", 1)
+        authority = remainder.split("/", 1)[0]
+        if "@" not in authority:
+            redis_url = f"{scheme}://:{quote(password, safe='')}@{remainder}"
+    return redis_url
+
+
+def _redis_source_key(source_signature: Optional[tuple] = None) -> tuple:
+    global _source_cached_signature, _source_cached_key
+    signature = source_signature or (
+        *env_config.get_env_file_signature(),
+        env_config.get_local_config_generation(),
+    )
+    with _source_lock:
+        if _source_cached_signature == signature and _source_cached_key is not None:
+            return _source_cached_key
+        values = env_config.read_env_file()
+        _source_cached_signature = signature
+        _source_cached_key = (*signature, _redis_url_from_values(values))
+        return _source_cached_key
+
+
+def _redis_connection_key() -> tuple:
+    return (*_redis_source_key(), _observed_config_version)
+
+
+class _RedisManager:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._client: Optional[redis.Redis] = None
+        self._pool: Optional[redis.ConnectionPool] = None
+        self._key: Optional[tuple] = None
+        self._failed_key: Optional[tuple] = None
+        self._failed_client: Optional[redis.Redis] = None
+        self._failed_pool: Optional[redis.ConnectionPool] = None
+        self._failed_error: Optional[Exception] = None
+        self._retry_after = 0.0
+
+    def get_client(self) -> redis.Redis:
+        key = _redis_connection_key()
+        with self._lock:
+            if self._client is not None and self._key == key:
+                return self._client
+            if self._failed_key == key and _time.monotonic() < self._retry_after:
+                if self._client is not None:
+                    return self._client
+                if self._failed_client is not None:
+                    return self._failed_client
+                raise redis.ConnectionError(str(self._failed_error or "Redis 连接不可用"))
+
+            pool: Optional[redis.ConnectionPool] = None
+            candidate: Optional[redis.Redis] = None
+            try:
+                pool = redis.ConnectionPool.from_url(
+                    key[-2],
+                    decode_responses=True,
+                    socket_connect_timeout=1,
+                    socket_timeout=2,
+                    health_check_interval=30,
+                )
+                candidate = redis.Redis(connection_pool=pool)
+                candidate.ping()
+            except Exception as exc:
+                report_runtime_error("REDIS_CONNECTION", "Redis 连接", "Redis", exc)
+                previous_failed_pool = self._failed_pool
+                self._failed_key = key
+                self._failed_client = candidate
+                self._failed_pool = pool
+                self._failed_error = exc
+                self._retry_after = _time.monotonic() + 1.0
+                if previous_failed_pool is not None and previous_failed_pool is not pool:
+                    previous_failed_pool.disconnect()
+                if self._client is not None:
+                    if pool is not None:
+                        pool.disconnect()
+                    self._failed_client = None
+                    self._failed_pool = None
+                    return self._client
+                if candidate is not None:
+                    return candidate
+                raise
+
+            old_pool = self._pool
+            failed_pool = self._failed_pool
+            self._client = candidate
+            self._pool = pool
+            self._key = key
+            self._failed_key = None
+            self._failed_client = None
+            self._failed_pool = None
+            self._failed_error = None
+            self._retry_after = 0.0
+            clear_runtime_error("REDIS_CONNECTION")
+            if old_pool is not None and old_pool is not pool:
+                old_pool.disconnect()
+            if failed_pool is not None and failed_pool is not pool and failed_pool is not old_pool:
+                failed_pool.disconnect()
+            return candidate
+
+    def reset(self) -> None:
+        with self._lock:
+            if self._pool is not None:
+                self._pool.disconnect()
+            if self._failed_pool is not None and self._failed_pool is not self._pool:
+                self._failed_pool.disconnect()
+            self._client = None
+            self._pool = None
+            self._key = None
+            self._failed_key = None
+            self._failed_client = None
+            self._failed_pool = None
+            self._failed_error = None
+            self._retry_after = 0.0
+
+
+_redis_manager = _RedisManager()
+
+
+class _RedisClientProxy:
+    def __getattr__(self, name: str):
+        return getattr(_redis_manager.get_client(), name)
+
+
+redis_client = _RedisClientProxy()
+
+
+def capture_config_version_client() -> Optional[redis.Redis]:
+    try:
+        return _redis_manager.get_client()
+    except Exception:
+        return None
+
+
+def get_config_version_cached(source_signature: Optional[tuple] = None) -> int:
+    global _observed_config_version, _version_cached, _version_last_checked, _version_source_key
+    now = _time.monotonic()
+    source_key = _redis_source_key(source_signature)
+    with _version_lock:
+        if source_key == _version_source_key and now - _version_last_checked < _CONFIG_VERSION_POLL_SECONDS:
+            return _version_cached
+
+    try:
+        raw = _redis_manager.get_client().get(CONFIG_VERSION_KEY)
+        version = int(raw or 0)
+        clear_runtime_error("REDIS_CONFIG_VERSION")
+    except Exception as exc:
+        report_runtime_error("REDIS_CONFIG_VERSION", "配置版本同步", "Redis", exc)
+        version = _version_cached
+
+    with _version_lock:
+        _observed_config_version = version
+        _version_cached = version
+        _version_last_checked = now
+        _version_source_key = source_key
+        return version
+
+
+def bump_config_version(client: Optional[redis.Redis] = None) -> Optional[int]:
+    global _observed_config_version, _version_cached, _version_last_checked, _version_source_key
+    try:
+        target = client or _redis_manager.get_client()
+        version = int(target.incr(CONFIG_VERSION_KEY))
+        clear_runtime_error("REDIS_CONFIG_VERSION")
+    except Exception as exc:
+        report_runtime_error("REDIS_CONFIG_VERSION", "配置版本同步", "Redis", exc)
+        return None
+
+    with _version_lock:
+        _observed_config_version = version
+        _version_cached = version
+        _version_last_checked = _time.monotonic()
+        _version_source_key = _redis_source_key()
+    return version
+
+
+def reset_redis_client() -> None:
+    """测试与故障恢复使用：丢弃当前连接，下次调用自动重建。"""
+    _redis_manager.reset()
 
 
 # ============ 键名常量 ============
@@ -39,9 +231,22 @@ X_COOKIE_KEY = "x:cookie_file"
 X_TASK_LOG_PREFIX = "x:task:log:"
 X_TASK_PID_PREFIX = "x:task:pid:"
 X_TASK_STATE_PREFIX = "x:task:state:"
-X_TASK_LOG_MAX = settings.X_TASK_LOG_MAX_LINES
-X_TASK_LOG_TTL = settings.X_TASK_LOG_TTL_SECONDS
-X_TASK_STATE_TTL = settings.X_TASK_STATE_TTL_SECONDS
+def _x_task_log_max() -> int:
+    from app.core.config import settings
+
+    return settings.X_TASK_LOG_MAX_LINES
+
+
+def _x_task_log_ttl() -> int:
+    from app.core.config import settings
+
+    return settings.X_TASK_LOG_TTL_SECONDS
+
+
+def _x_task_state_ttl() -> int:
+    from app.core.config import settings
+
+    return settings.X_TASK_STATE_TTL_SECONDS
 
 
 # ============ 进度管理 ============
@@ -202,7 +407,7 @@ def check_connection() -> bool:
     try:
         redis_client.ping()
         return True
-    except redis.ConnectionError:
+    except Exception:
         return False
 
 
@@ -306,8 +511,8 @@ def append_x_task_log(task_id: int, line: str) -> None:
     key = f"{X_TASK_LOG_PREFIX}{task_id}"
     pipe = redis_client.pipeline()
     pipe.rpush(key, line)
-    pipe.ltrim(key, -X_TASK_LOG_MAX, -1)
-    pipe.expire(key, X_TASK_LOG_TTL)
+    pipe.ltrim(key, -_x_task_log_max(), -1)
+    pipe.expire(key, _x_task_log_ttl())
     pipe.execute()
 
 
@@ -345,13 +550,10 @@ def update_x_task_state(task_id: int, data: Dict[str, Any]) -> None:
         return
 
     redis_client.hset(key, mapping=serialized)
-    redis_client.expire(key, X_TASK_STATE_TTL)
+    redis_client.expire(key, _x_task_state_ttl())
 
 
-def get_x_task_state(task_id: int) -> Optional[Dict[str, Any]]:
-    """读取 X 任务的实时状态缓存。"""
-    key = f"{X_TASK_STATE_PREFIX}{task_id}"
-    raw_state = redis_client.hgetall(key)
+def _deserialize_x_task_state(raw_state: Dict[str, str]) -> Optional[Dict[str, Any]]:
     if not raw_state:
         return None
 
@@ -380,6 +582,27 @@ def get_x_task_state(task_id: int) -> Optional[Dict[str, Any]]:
             result[field_name] = value
 
     return result
+
+
+def get_x_task_state(task_id: int) -> Optional[Dict[str, Any]]:
+    """读取一个 X 任务的实时状态缓存。"""
+    raw_state = redis_client.hgetall(f"{X_TASK_STATE_PREFIX}{task_id}")
+    return _deserialize_x_task_state(raw_state)
+
+
+def get_x_task_states(task_ids: Iterable[int]) -> Dict[int, Optional[Dict[str, Any]]]:
+    """通过 Redis pipeline 一次读取多个 X 任务状态。"""
+    normalized_ids = [int(task_id) for task_id in task_ids]
+    if not normalized_ids:
+        return {}
+    pipeline = redis_client.pipeline(transaction=False)
+    for task_id in normalized_ids:
+        pipeline.hgetall(f"{X_TASK_STATE_PREFIX}{task_id}")
+    raw_states = pipeline.execute()
+    return {
+        task_id: _deserialize_x_task_state(raw_state)
+        for task_id, raw_state in zip(normalized_ids, raw_states)
+    }
 
 
 def delete_x_task_state(task_id: int) -> None:

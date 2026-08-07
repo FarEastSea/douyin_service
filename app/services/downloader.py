@@ -23,6 +23,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from app.core.config import settings
 from app.core import redis_client
+from app.core.network_security import get_douyin_response, validate_douyin_url
 from app.core.runtime_config import get_cached_runtime_config
 
 # 配置日志
@@ -379,8 +380,11 @@ class DouyinDownloader:
             raise ValueError("无效的分享链接")
 
         raw_url = url_match.group(1).strip()
-        res = self.session.get(raw_url, allow_redirects=True, timeout=self.download_timeout)
-        redirect_url = res.url
+        res, redirect_url = get_douyin_response(
+            self.session,
+            raw_url,
+            timeout=self.download_timeout,
+        )
 
         if re.search(r'/video/(\d+)', redirect_url) or re.search(r'/note/(\d+)', redirect_url):
             return {"type": "work", "redirect_url": redirect_url}
@@ -399,6 +403,7 @@ class DouyinDownloader:
         Returns:
             作品信息字典
         """
+        validate_douyin_url(redirect_url)
         aweme_id_match = re.search(r'/(?:video|note)/(\d+)', redirect_url)
         if not aweme_id_match:
             raise ValueError("无法从链接中提取作品ID")
@@ -406,7 +411,7 @@ class DouyinDownloader:
         aweme_id = aweme_id_match.group(1)
         api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}&device_platform=webapp&aid=6383"
 
-        res = self.session.get(api_url, timeout=self.download_timeout)
+        res, _ = get_douyin_response(self.session, api_url, timeout=self.download_timeout)
         if res.status_code != 200:
             raise ValueError(f"抖音 API 请求失败 (HTTP {res.status_code})，请检查 Cookie 是否有效")
         try:
@@ -451,9 +456,12 @@ class DouyinDownloader:
         
         url = url_match.group(1).strip()
         
-        # 获取重定向后的真实URL
-        res = self.session.get(url, allow_redirects=True, timeout=self.download_timeout)
-        redirects_url = res.url
+        # 逐跳校验重定向，禁止离开受信任抖音域名或解析到内网地址。
+        res, redirects_url = get_douyin_response(
+            self.session,
+            url,
+            timeout=self.download_timeout,
+        )
         
         # 从URL中提取 sec_uid
         sec_uid_match = re.search(r'user/([^/?]+)', redirects_url)
@@ -472,7 +480,8 @@ class DouyinDownloader:
         Returns:
             包含昵称、头像等信息的字典
         """
-        url = f"https://www.douyin.com/aweme/v1/web/user/profile/other/?device_platform=webapp&aid=6383&sec_user_id={sec_uid}"
+        encoded_sec_uid = quote(str(sec_uid), safe='')
+        url = f"https://www.douyin.com/aweme/v1/web/user/profile/other/?device_platform=webapp&aid=6383&sec_user_id={encoded_sec_uid}"
         profile_url = self.build_author_profile_url(sec_uid)
 
         def _build_author_info_response(
@@ -548,7 +557,7 @@ class DouyinDownloader:
             )
         
         try:
-            res = self.session.get(url, timeout=self.download_timeout)
+            res, _ = get_douyin_response(self.session, url, timeout=self.download_timeout)
             if res.status_code != 200:
                 body_preview = res.text[:200] if res.text else '(空响应)'
                 status_code, status_label = _classify_author_account_status(body_preview, res.status_code)
@@ -618,9 +627,10 @@ class DouyinDownloader:
         Returns:
             包含 aweme_list, has_more, max_cursor 的字典
         """
-        url = f"https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id={sec_uid}&max_cursor={max_cursor}&locate_query=false&show_live_replay_strategy=1&need_time_list=1&time_list_query=0&count={count}&publish_video_strategy_type=2&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Edge"
+        encoded_sec_uid = quote(str(sec_uid), safe='')
+        url = f"https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id={encoded_sec_uid}&max_cursor={max_cursor}&locate_query=false&show_live_replay_strategy=1&need_time_list=1&time_list_query=0&count={count}&publish_video_strategy_type=2&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Edge"
         
-        res = self.session.get(url, timeout=self.download_timeout)
+        res, _ = get_douyin_response(self.session, url, timeout=self.download_timeout)
         if res.status_code != 200:
             body_preview = res.text[:500] if res.text else '(空响应)'
             logger.error(
@@ -761,13 +771,21 @@ class DouyinDownloader:
             # 开始下载
             start_time = time.time()
             last_update_time = start_time
+            last_pause_check_time = start_time - 0.5
             bytes_since_last_update = 0
             
             mode = 'ab' if downloaded_bytes > 0 else 'wb'
             with open(temp_path, mode) as f:
                 for chunk in res.iter_content(chunk_size=settings.DOWNLOAD_CHUNK_SIZE):
-                    # 检查暂停信号
-                    if check_pause and check_pause():
+                    current_time = time.time()
+                    # 暂停检查与进度更新同频，避免每个 1MB chunk 都往返 Redis。
+                    should_check_pause = (
+                        check_pause
+                        and current_time - last_pause_check_time >= 0.5
+                    )
+                    if should_check_pause:
+                        last_pause_check_time = current_time
+                    if should_check_pause and check_pause():
                         # 保存进度并退出
                         if task_id:
                             redis_client.update_progress(task_id, {
@@ -873,7 +891,7 @@ class DouyinDownloader:
         """
         api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}&device_platform=webapp&aid=6383"
         
-        res = self.session.get(api_url, timeout=self.download_timeout)
+        res, _ = get_douyin_response(self.session, api_url, timeout=self.download_timeout)
         if res.status_code != 200:
             raise ValueError(f"刷新URL失败 (HTTP {res.status_code})")
         try:

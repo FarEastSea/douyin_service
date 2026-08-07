@@ -97,22 +97,30 @@ from celery.signals import worker_ready, worker_shutdown, task_prerun, task_post
 
 @worker_ready.connect
 def on_worker_ready(**kwargs):
-    """Worker 启动就绪时记录，同时输出注册了哪些任务和监听哪些队列"""
+    """Worker 启动时只执行一次迁移，并记录已注册任务。"""
+    try:
+        from app.models.database import init_db_sync
+        init_db_sync()
+    except Exception as e:
+        try:
+            from app.core import redis_client
+            redis_client.append_activity_log("error", "system", "Celery Worker 数据库迁移失败", str(e)[:200])
+        except Exception:
+            pass
+        # 迁移异常必须进入 Worker 启动日志，不能静默带病继续。
+        raise RuntimeError("Celery Worker 数据库迁移失败") from e
+
+    # Redis 活动日志不影响迁移成功判定；Redis 短暂不可用时 Worker 仍可启动。
     try:
         from app.core import redis_client
-        # 收集注册的任务（排除 celery 内置任务）
         registered = sorted([t for t in celery_app.tasks if not t.startswith('celery.')])
         redis_client.append_activity_log(
             "info", "system",
             "✅ Celery Worker 已启动并就绪",
             f"已注册 {len(registered)} 个任务: {', '.join(registered[:15])}"
         )
-    except Exception as e:
-        try:
-            from app.core import redis_client
-            redis_client.append_activity_log("info", "system", "✅ Celery Worker 已启动", str(e)[:200])
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 @worker_shutdown.connect

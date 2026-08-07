@@ -2,12 +2,15 @@
     'use strict';
 
     const originalFetch = window.fetch.bind(window);
+    const ADMIN_TOKEN_STORAGE_KEY = 'douyinAdminToken';
     let lastFingerprint = '';
     let lastShownAt = 0;
+    let tokenPromptPromise = null;
+    let tokenPromptResolve = null;
 
     const statusMessages = {
         400: ['请求参数不正确', '请核对输入内容和必填项后重试。'],
-        401: ['身份验证失败', '请更新账号凭据或 Cookie 后重试。'],
+        401: ['管理 Token 验证失败', '请在登录提示中输入当前管理 Token。'],
         403: ['当前操作没有权限', '请检查账号权限、Cookie 状态或文件访问权限。'],
         404: ['请求的资源不存在', '请刷新页面确认数据是否仍然存在。'],
         409: ['数据状态存在冲突', '请刷新页面获取最新状态，确认后再重试。'],
@@ -59,6 +62,118 @@
             return String(raw).split('?')[0];
         }
     }
+
+    function isProtectedSameOriginEndpoint(input) {
+        const raw = typeof input === 'string' ? input : (input && input.url) || '';
+        try {
+            const url = new URL(raw, window.location.origin);
+            return url.origin === window.location.origin
+                && (url.pathname.startsWith('/api/') || url.pathname === '/openapi.json');
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function getAdminToken() {
+        return (window.localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '').trim();
+    }
+
+    function setAdminToken(token) {
+        const normalized = String(token || '').trim();
+        if (normalized) window.localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, normalized);
+        else window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    }
+
+    function ensureAuthGate() {
+        let gate = document.getElementById('adminAuthGate');
+        if (gate) return gate;
+
+        gate = document.createElement('div');
+        gate.id = 'adminAuthGate';
+        gate.className = 'admin-auth-gate';
+        gate.setAttribute('aria-hidden', 'true');
+
+        const form = document.createElement('form');
+        form.className = 'admin-auth-dialog';
+        form.setAttribute('role', 'dialog');
+        form.setAttribute('aria-modal', 'true');
+        form.setAttribute('aria-labelledby', 'adminAuthTitle');
+
+        const kicker = document.createElement('div');
+        kicker.className = 'admin-auth-kicker';
+        kicker.textContent = '受保护的管理控制台';
+        const title = document.createElement('h2');
+        title.id = 'adminAuthTitle';
+        title.textContent = '输入管理 Token';
+        const message = document.createElement('p');
+        message.id = 'adminAuthMessage';
+        message.textContent = '管理 API 已启用鉴权，请输入服务器当前配置的 Token。';
+        const input = document.createElement('input');
+        input.id = 'adminAuthToken';
+        input.type = 'password';
+        input.autocomplete = 'current-password';
+        input.placeholder = 'Bearer Token';
+        input.required = true;
+        const hint = document.createElement('small');
+        hint.textContent = 'Token 仅保存在当前浏览器 localStorage 中，并通过 Authorization 请求头发送。';
+
+        const actions = document.createElement('div');
+        actions.className = 'admin-auth-actions';
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'secondary';
+        cancel.textContent = '暂不登录';
+        const submit = document.createElement('button');
+        submit.type = 'submit';
+        submit.textContent = '登录并继续';
+        actions.append(cancel, submit);
+        form.append(kicker, title, message, input, hint, actions);
+        gate.appendChild(form);
+        document.body.appendChild(gate);
+
+        function finish(value) {
+            gate.classList.remove('show');
+            gate.setAttribute('aria-hidden', 'true');
+            const resolve = tokenPromptResolve;
+            tokenPromptResolve = null;
+            tokenPromptPromise = null;
+            if (resolve) resolve(value);
+        }
+
+        form.addEventListener('submit', event => {
+            event.preventDefault();
+            const token = input.value.trim();
+            if (!token) return;
+            setAdminToken(token);
+            finish(token);
+        });
+        cancel.addEventListener('click', () => finish(''));
+        return gate;
+    }
+
+    function requestAdminToken(message) {
+        const gate = ensureAuthGate();
+        const messageNode = gate.querySelector('#adminAuthMessage');
+        const input = gate.querySelector('#adminAuthToken');
+        if (messageNode) messageNode.textContent = message || '请输入当前管理 Token。';
+        if (!tokenPromptPromise) {
+            tokenPromptPromise = new Promise(resolve => { tokenPromptResolve = resolve; });
+        }
+        gate.classList.add('show');
+        gate.setAttribute('aria-hidden', 'false');
+        if (input) {
+            input.value = '';
+            window.setTimeout(() => input.focus(), 0);
+        }
+        return tokenPromptPromise;
+    }
+
+    window.adminAuth = {
+        getToken: getAdminToken,
+        setToken: setAdminToken,
+        clearToken: () => setAdminToken(''),
+        requestToken: requestAdminToken
+    };
 
     function formatDetails(details) {
         if (!Array.isArray(details) || !details.length) return '';
@@ -161,8 +276,24 @@
 
     window.fetch = async function monitoredFetch(input, init) {
         const endpoint = endpointOf(input);
+        const protectedEndpoint = isProtectedSameOriginEndpoint(input);
         try {
-            const response = await originalFetch(input, init);
+            const template = new Request(input, init);
+            const send = async token => {
+                const request = template.clone();
+                if (!protectedEndpoint || !token) return originalFetch(request);
+                const headers = new Headers(request.headers);
+                headers.set('Authorization', `Bearer ${token}`);
+                return originalFetch(new Request(request, { headers }));
+            };
+
+            let response = await send(getAdminToken());
+            while (response.status === 401 && protectedEndpoint) {
+                setAdminToken('');
+                const token = await requestAdminToken('Token 缺失或验证失败，请重新输入当前管理 Token。');
+                if (!token) break;
+                response = await send(token);
+            }
             if (!response.ok && endpoint.startsWith('/api/')) {
                 const payload = await parseResponse(response);
                 const defaults = statusMessages[response.status] || ['请求处理失败', '请稍后重试；若问题持续，请记录排障信息。'];

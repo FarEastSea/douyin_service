@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from pathlib import Path
+import asyncio
 
 from app.models.database import get_async_db
 from app.models.models import Author, Work, DownloadTask, DownloadHistory, SystemConfig
@@ -31,6 +32,7 @@ from app.core.env_config import (
     validate_env,
     write_env_updates,
 )
+from app.core.network_security import validate_database_test_target
 from app.core.runtime_config import (
     RUNTIME_CONFIG_ENV_KEYS,
     RUNTIME_CONFIG_SCHEMA,
@@ -80,14 +82,17 @@ async def update_cookie(
 
     try:
         await db.flush()
-        write_env_updates({"DOUYIN_COOKIE": request.cookie})
+        await asyncio.to_thread(write_env_updates, {"DOUYIN_COOKIE": request.cookie})
         await db.commit()
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         await db.rollback()
         raise
 
     # 网页保存值优先，并同步到快速缓存。
-    redis_client.set_cookie(request.cookie)
+    await asyncio.to_thread(redis_client.set_cookie, request.cookie)
 
     return MessageResponse(success=True, message="Cookie 已更新并同步到 .env")
 
@@ -95,7 +100,7 @@ async def update_cookie(
 @router.get("/config/cookie", response_model=MessageResponse)
 async def get_cookie_status(db: AsyncSession = Depends(get_async_db)):
     """检查 Cookie 是否已配置"""
-    cookie = redis_client.get_cookie()
+    cookie = await asyncio.to_thread(redis_client.get_cookie)
     
     if not cookie:
         result = await db.execute(
@@ -103,7 +108,8 @@ async def get_cookie_status(db: AsyncSession = Depends(get_async_db)):
         )
         config = result.scalar_one_or_none()
         cookie = config.value if config else None
-    cookie = cookie or settings.DOUYIN_COOKIE
+    if not cookie:
+        cookie = (await asyncio.to_thread(settings.snapshot)).DOUYIN_COOKIE
     
     return MessageResponse(
         success=bool(cookie),
@@ -133,7 +139,7 @@ async def get_runtime_settings(db: AsyncSession = Depends(get_async_db)):
         "success": True,
         "config": config,
         "limits": limits,
-        "service": process_manager.get_status(),
+        "service": await asyncio.to_thread(process_manager.get_status),
     }
 
 
@@ -148,7 +154,8 @@ async def update_runtime_settings(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    redis_client.append_activity_log(
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
         "info",
         "system",
         "运行配置已更新",
@@ -160,7 +167,7 @@ async def update_runtime_settings(
 @router.get("/config/all")
 async def get_complete_settings(db: AsyncSession = Depends(get_async_db)):
     """返回设置中心使用的完整配置清单，敏感值始终脱敏。"""
-    values = get_env_values(mask_secret=True)
+    values = await asyncio.to_thread(get_env_values, mask_secret=True)
     runtime = await get_runtime_config(db)
     for runtime_key, env_key in RUNTIME_CONFIG_ENV_KEYS.items():
         if runtime_key in runtime and env_key in values:
@@ -185,7 +192,7 @@ async def save_complete_settings(
     if not updates:
         raise HTTPException(status_code=400, detail="没有可保存的配置")
 
-    current = read_env_file()
+    current = await asyncio.to_thread(read_env_file)
     for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR"):
         if key not in updates:
             continue
@@ -197,7 +204,10 @@ async def save_complete_settings(
         if field.required and not str(value if value is not None else "").strip():
             raise HTTPException(status_code=400, detail=f"{field.label}不能为空")
 
-    download_error = check_download_directory({**current, **updates})
+    download_error = await asyncio.to_thread(
+        check_download_directory,
+        {**current, **updates},
+    )
     if download_error:
         raise HTTPException(status_code=400, detail=download_error["message"])
 
@@ -208,13 +218,21 @@ async def save_complete_settings(
         if key in runtime_by_env
     }
 
+    requested_admin_token = updates.get("ADMIN_TOKEN")
+    requested_admin_token_text = str(requested_admin_token).strip() if requested_admin_token is not None else ""
+    new_admin_token = (
+        requested_admin_token_text
+        if requested_admin_token_text not in {"", "********"}
+        else None
+    )
+
     try:
         if runtime_updates:
             await persist_runtime_config(db, runtime_updates)
 
         environment_updates = {key: value for key, value in updates.items() if key not in runtime_by_env}
         if environment_updates:
-            write_env_updates(environment_updates)
+            await asyncio.to_thread(write_env_updates, environment_updates)
         legacy_douyin = current.get("DOWNLOAD_DIR")
         old_root = current.get("DOWNLOAD_ROOT") or (str(Path(legacy_douyin).parent) if legacy_douyin else "/downloads")
         old_douyin = legacy_douyin or str(Path(old_root) / current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))
@@ -222,13 +240,22 @@ async def save_complete_settings(
         new_root = str(updates.get("DOWNLOAD_ROOT", old_root))
         new_douyin = str(Path(new_root) / str(updates.get("DOUYIN_DOWNLOAD_SUBDIR", current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))))
         new_x = str(Path(new_root) / str(updates.get("X_DOWNLOAD_SUBDIR", current.get("X_DOWNLOAD_SUBDIR", "X"))))
-        path_changes = await migrate_download_paths(
-            db,
-            old_download_dir=old_douyin,
-            new_download_dir=new_douyin,
-            old_x_download_dir=old_x,
-            new_x_download_dir=new_x,
-        )
+        path_changes = {
+            "tasks": 0,
+            "history": 0,
+            "x_tasks": 0,
+            "x_media": 0,
+            "unresolved": {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0},
+            "unresolved_total": 0,
+        }
+        if old_douyin != new_douyin or old_x != new_x:
+            path_changes = await migrate_download_paths(
+                db,
+                old_download_dir=old_douyin,
+                new_download_dir=new_douyin,
+                old_x_download_dir=old_x,
+                new_x_download_dir=new_x,
+            )
 
         cookie_keys = {"DOUYIN_COOKIE": "douyin_cookie", "X_COOKIE": "x_cookie"}
         for env_key, config_key in cookie_keys.items():
@@ -254,17 +281,54 @@ async def save_complete_settings(
 
     douyin_cookie = updates.get("DOUYIN_COOKIE")
     if douyin_cookie and douyin_cookie != "********":
-        redis_client.set_cookie(str(douyin_cookie).strip())
+        await asyncio.to_thread(redis_client.set_cookie, str(douyin_cookie).strip())
     x_cookie = updates.get("X_COOKIE")
     if x_cookie and x_cookie != "********":
-        redis_client.set_x_cookie(str(x_cookie).strip())
+        await asyncio.to_thread(redis_client.set_x_cookie, str(x_cookie).strip())
 
-    redis_client.append_activity_log("info", "system", "设置中心配置已更新", ", ".join(sorted(updates)))
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info",
+        "system",
+        "设置中心配置已更新",
+        ", ".join(sorted(updates)),
+    )
+    hot_reload_keys = {
+        "DEBUG",
+        "DOWNLOAD_ROOT",
+        "DOUYIN_DOWNLOAD_SUBDIR",
+        "X_DOWNLOAD_SUBDIR",
+        "DB_TYPE",
+        "DB_HOST",
+        "DB_PORT",
+        "DB_USER",
+        "DB_PASSWORD",
+        "DB_NAME",
+        "REDIS_URL",
+        "REDIS_PASSWORD",
+        "DOWNLOAD_CHUNK_SIZE",
+        "MIN_CHECK_INTERVAL",
+        "X_DOWNLOAD_ENGINE",
+        "X_COOKIE_FILE",
+        "X_TASK_LOG_MAX_LINES",
+        "X_TASK_LOG_TTL_SECONDS",
+        "X_TASK_STATE_TTL_SECONDS",
+    }
     restart_keys = sorted(
         key for key in updates
-        if key not in RUNTIME_CONFIG_ENV_KEYS and key not in {"DOUYIN_COOKIE", "X_COOKIE"}
+        if key not in RUNTIME_CONFIG_ENV_KEYS
+        and key not in {
+            "DOUYIN_COOKIE",
+            "X_COOKIE",
+            "ADMIN_TOKEN",
+            "CORS_ALLOWED_ORIGINS",
+            *hot_reload_keys,
+        }
     )
     message = "配置已保存"
+    unresolved_paths = int(path_changes.get("unresolved_total", 0))
+    if unresolved_paths:
+        message += f"；有 {unresolved_paths} 行媒体路径未能重定位，请检查目录内容"
     if restart_keys:
         message += "；部分基础配置需重启 Web、Worker 和 Beat 后生效"
     return MessageResponse(
@@ -274,6 +338,7 @@ async def save_complete_settings(
             "restart_required": bool(restart_keys),
             "restart_keys": restart_keys,
             "migrated_paths": path_changes,
+            "admin_token": new_admin_token,
         },
     )
 
@@ -338,42 +403,43 @@ async def get_download_stats(db: AsyncSession = Depends(get_async_db)):
 
 @router.get("/status", response_model=SystemStatus)
 async def get_system_status(db: AsyncSession = Depends(get_async_db)):
-    """获取系统状态（带缓存）"""
-    # Redis 连接状态
-    redis_connected = redis_client.check_connection()
+    """获取统计、Redis、Celery 与本地进程的合并状态。"""
+    def _redis_snapshot():
+        try:
+            connected = redis_client.check_connection()
+        except Exception:
+            connected = False
+        try:
+            cached = redis_client.get_stats_cached()
+        except Exception:
+            cached = None
+        return connected, cached
 
-    # 尝试从缓存获取统计数据
-    cached_stats = redis_client.get_stats_cached()
-    if cached_stats:
-        return SystemStatus(**cached_stats)
-
-    # 缓存未命中，查询数据库
-    # 统计数据
-    author_result = await db.execute(select(func.count(Author.id)))
-    total_authors = author_result.scalar() or 0
-
-    subscribed_result = await db.execute(
-        select(func.count(Author.id)).where(Author.is_subscribed == True)
-    )
-    subscribed_authors = subscribed_result.scalar() or 0
-
-    pending_result = await db.execute(
-        select(func.count(DownloadTask.id)).where(DownloadTask.status == "pending")
-    )
-    pending_tasks = pending_result.scalar() or 0
-
-    downloading_result = await db.execute(
-        select(func.count(DownloadTask.id)).where(DownloadTask.status == "downloading")
-    )
-    downloading_tasks = downloading_result.scalar() or 0
-
-    history_result = await db.execute(select(func.count(DownloadHistory.id)))
-    total_downloads = history_result.scalar() or 0
+    redis_connected, cached_stats = await asyncio.to_thread(_redis_snapshot)
+    stat_keys = {
+        "total_authors",
+        "subscribed_authors",
+        "pending_tasks",
+        "downloading_tasks",
+        "total_downloads",
+    }
+    if cached_stats and stat_keys.issubset(cached_stats):
+        stats = {key: int(cached_stats.get(key) or 0) for key in stat_keys}
+    else:
+        stats_row = (await db.execute(select(
+            select(func.count(Author.id)).scalar_subquery().label("total_authors"),
+            select(func.count(Author.id)).where(Author.is_subscribed.is_(True)).scalar_subquery().label("subscribed_authors"),
+            select(func.count(DownloadTask.id)).where(DownloadTask.status == "pending").scalar_subquery().label("pending_tasks"),
+            select(func.count(DownloadTask.id)).where(DownloadTask.status == "downloading").scalar_subquery().label("downloading_tasks"),
+            select(func.count(DownloadHistory.id)).scalar_subquery().label("total_downloads"),
+        ))).mappings().one()
+        stats = {key: int(stats_row[key] or 0) for key in stat_keys}
+        if redis_connected:
+            await asyncio.to_thread(redis_client.set_stats_cached, stats)
 
     # Celery workers (通过 broker ping，带超时)
     celery_workers = 0
     try:
-        import asyncio
         def _inspect():
             from app.tasks.celery_app import celery_app
             insp = celery_app.control.inspect(timeout=2.0)
@@ -384,19 +450,15 @@ async def get_system_status(db: AsyncSession = Depends(get_async_db)):
     except Exception:
         pass
 
+    process_status = await asyncio.to_thread(process_manager.get_status)
+
     status = SystemStatus(
         redis_connected=redis_connected,
         celery_workers=celery_workers,
-        pending_tasks=pending_tasks,
-        downloading_tasks=downloading_tasks,
-        total_authors=total_authors,
-        subscribed_authors=subscribed_authors,
-        total_downloads=total_downloads
+        **stats,
+        worker_process_running=bool(process_status.get("worker", {}).get("running")),
+        beat_process_running=bool(process_status.get("beat", {}).get("running")),
     )
-
-    # 缓存结果
-    redis_client.set_stats_cached(status.model_dump())
-
     return status
 
 
@@ -524,7 +586,7 @@ async def run_celery_test():
     try:
         from app.tasks.celery_app import echo_test
 
-        async_result = echo_test.delay()
+        async_result = await asyncio.to_thread(echo_test.delay)
         task_id = async_result.id
 
         def _wait():
@@ -570,9 +632,13 @@ async def purge_old_queues():
 
     try:
         result = await asyncio.to_thread(_purge)
-        redis_client.append_activity_log("info", "system",
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "info",
+            "system",
             "🗑️ 已清除旧队列",
-            f"download={result.get('download', 0)}, scheduler={result.get('scheduler', 0)}")
+            f"download={result.get('download', 0)}, scheduler={result.get('scheduler', 0)}",
+        )
         return {"success": True, "purged": result}
     except Exception as e:
         return {"success": False, "error": str(e)[:200]}
@@ -581,18 +647,34 @@ async def purge_old_queues():
 @router.get("/worker-log")
 async def get_worker_log(lines: int = Query(100, ge=1, le=1000)):
     """读取 Worker 日志文件的最后 N 行"""
-    import os
     log_path = "logs/download_tasks.log"
-    if not os.path.exists(log_path):
+    if not Path(log_path).exists():
         return {"lines": [], "message": "日志文件不存在"}
 
     try:
-        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
-            all_lines = f.readlines()
-        tail = all_lines[-lines:]
-        return {"lines": [l.rstrip() for l in tail], "total_lines": len(all_lines)}
+        return await asyncio.to_thread(_tail_text_file, Path(log_path), lines)
     except Exception as e:
         return {"lines": [], "error": str(e)[:200]}
+
+
+def _tail_text_file(path: Path, line_count: int, max_bytes: int = 512 * 1024) -> dict:
+    """只读日志末尾固定字节，避免大日志整体进内存。"""
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        data = handle.read(max_bytes)
+    decoded = data.decode("utf-8", errors="replace").splitlines()
+    if start > 0 and decoded:
+        decoded = decoded[1:]
+    tail = decoded[-line_count:]
+    return {
+        "lines": tail,
+        "total_lines": len(decoded) if start == 0 else None,
+        "truncated": start > 0,
+        "sampled_bytes": len(data),
+    }
 
 
 # ============ 进度查询 ============
@@ -600,7 +682,7 @@ async def get_worker_log(lines: int = Query(100, ge=1, le=1000)):
 @router.get("/progress/active")
 async def get_active_progress():
     """获取所有活跃任务的进度"""
-    progress = redis_client.get_all_progress()
+    progress = await asyncio.to_thread(redis_client.get_all_progress)
     return {"tasks": progress}
 
 
@@ -618,21 +700,26 @@ class DatabaseConfig(BaseModel):
 @router.get("/config/database")
 async def get_database_config():
     """获取当前数据库配置（密码脱敏）"""
+    current = await asyncio.to_thread(settings.snapshot)
+    env_status = await asyncio.to_thread(validate_env)
     return {
-        "db_type": settings.DB_TYPE,
-        "db_host": settings.DB_HOST,
-        "db_port": settings.DB_PORT,
-        "db_user": settings.DB_USER,
-        "db_name": settings.DB_NAME,
-        "db_password_set": bool(settings.DB_PASSWORD),
-        "env": validate_env(),
+        "db_type": current.DB_TYPE,
+        "db_host": current.DB_HOST,
+        "db_port": current.DB_PORT,
+        "db_user": current.DB_USER,
+        "db_name": current.DB_NAME,
+        "db_password_set": bool(current.DB_PASSWORD),
+        "env": env_status,
     }
 
 @router.post("/config/database/test")
 async def test_database_connection(cfg: DatabaseConfig):
     """测试数据库连接"""
     try:
-        db_password = cfg.db_password or read_env_file().get("DB_PASSWORD", "")
+        effective_port = cfg.db_port or (3306 if cfg.db_type == "mysql" else 5432)
+        await asyncio.to_thread(validate_database_test_target, cfg.db_host, effective_port)
+        current = await asyncio.to_thread(read_env_file)
+        db_password = cfg.db_password or current.get("DB_PASSWORD", "")
         if cfg.db_type == "postgresql":
             user_part = cfg.db_user
             if db_password:
@@ -646,10 +733,19 @@ async def test_database_connection(cfg: DatabaseConfig):
         else:
             return {"success": False, "message": f"不支持的数据库类型: {cfg.db_type}"}
 
-        engine = create_engine(url, pool_pre_ping=True)
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        engine.dispose()
+        def _test_connection():
+            engine = create_engine(
+                url,
+                pool_pre_ping=True,
+                connect_args={"connect_timeout": 3},
+            )
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+            finally:
+                engine.dispose()
+
+        await asyncio.to_thread(_test_connection)
         return {"success": True, "message": "连接成功"}
     except Exception as e:
         return {"success": False, "message": f"连接失败: {str(e)[:300]}"}
@@ -659,12 +755,13 @@ async def test_database_connection(cfg: DatabaseConfig):
 async def save_database_config(cfg: DatabaseConfig):
     """保存数据库配置到 .env 文件"""
     try:
+        current = await asyncio.to_thread(read_env_file)
         updates = {
             "DB_TYPE": cfg.db_type,
             "DB_HOST": cfg.db_host,
             "DB_PORT": str(cfg.db_port or (5432 if cfg.db_type == "postgresql" else 3306)),
             "DB_USER": cfg.db_user,
-            "DB_PASSWORD": cfg.db_password or read_env_file().get("DB_PASSWORD", ""),
+            "DB_PASSWORD": cfg.db_password or current.get("DB_PASSWORD", ""),
             "DB_NAME": cfg.db_name,
         }
         db_password = updates["DB_PASSWORD"]
@@ -676,8 +773,10 @@ async def save_database_config(cfg: DatabaseConfig):
             updates["DATABASE_URL"] = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
         else:
             return MessageResponse(success=False, message=f"不支持的数据库类型: {cfg.db_type}")
-        write_env_updates(updates)
-        return MessageResponse(success=True, message="数据库配置已保存，请重启服务生效")
+        await asyncio.to_thread(write_env_updates, updates)
+        return MessageResponse(success=True, message="数据库配置已保存，下一次请求将自动使用新连接")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}")
 
@@ -703,14 +802,14 @@ async def get_logs(
     count: int = Query(100, ge=1, le=500),
 ):
     """获取活动日志"""
-    logs = redis_client.get_activity_logs(start, count)
+    logs = await asyncio.to_thread(redis_client.get_activity_logs, start, count)
     return {"logs": logs, "start": start, "count": len(logs)}
 
 
 @router.delete("/logs")
 async def clear_logs():
     """清空活动日志"""
-    redis_client.clear_activity_logs()
+    await asyncio.to_thread(redis_client.clear_activity_logs)
     return MessageResponse(success=True, message="日志已清空")
 
 
@@ -722,44 +821,52 @@ from app.core.process_manager import process_manager
 @router.get("/process/status")
 async def get_process_status():
     """获取 Worker 和 Beat 进程状态"""
-    return process_manager.get_status()
+    return await asyncio.to_thread(process_manager.get_status)
 
 
 @router.post("/process/worker/start")
 async def start_worker(concurrency: Optional[int] = Body(None, embed=True)):
     """启动 Celery Worker"""
-    result = process_manager.start_worker(concurrency)
+    result = await asyncio.to_thread(process_manager.start_worker, concurrency)
     if result.get("success"):
-        redis_client.append_activity_log("info", "system",
-            "▶️ Worker 已启动",
-            f"PID={result.get('pid')}, concurrency={result.get('concurrency')}")
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "info", "system", "▶️ Worker 已启动",
+            f"PID={result.get('pid')}, concurrency={result.get('concurrency')}",
+        )
     return result
 
 
 @router.post("/process/worker/stop")
 async def stop_worker():
     """停止 Celery Worker"""
-    result = process_manager.stop_worker()
+    result = await asyncio.to_thread(process_manager.stop_worker)
     if result.get("success"):
-        redis_client.append_activity_log("info", "system", "⏹️ Worker 已停止", result["message"])
+        await asyncio.to_thread(
+            redis_client.append_activity_log, "info", "system", "⏹️ Worker 已停止", result["message"]
+        )
     return result
 
 
 @router.post("/process/beat/start")
 async def start_beat():
     """启动 Celery Beat 定时调度器"""
-    result = process_manager.start_beat()
+    result = await asyncio.to_thread(process_manager.start_beat)
     if result.get("success"):
-        redis_client.append_activity_log("info", "system", "▶️ Beat 已启动", result["message"])
+        await asyncio.to_thread(
+            redis_client.append_activity_log, "info", "system", "▶️ Beat 已启动", result["message"]
+        )
     return result
 
 
 @router.post("/process/beat/stop")
 async def stop_beat():
     """停止 Celery Beat"""
-    result = process_manager.stop_beat()
+    result = await asyncio.to_thread(process_manager.stop_beat)
     if result.get("success"):
-        redis_client.append_activity_log("info", "system", "⏹️ Beat 已停止", result["message"])
+        await asyncio.to_thread(
+            redis_client.append_activity_log, "info", "system", "⏹️ Beat 已停止", result["message"]
+        )
     return result
 
 
@@ -770,7 +877,7 @@ class ConcurrencyUpdate(BaseModel):
 @router.get("/process/concurrency")
 async def get_concurrency():
     """获取当前最大并发下载数"""
-    return {"concurrency": process_manager.worker_concurrency}
+    return {"concurrency": await asyncio.to_thread(lambda: process_manager.worker_concurrency)}
 
 
 @router.post("/process/concurrency")
@@ -779,13 +886,14 @@ async def set_concurrency(body: ConcurrencyUpdate):
     new_val = max(1, min(body.concurrency, 20))
 
     # 更新 .env 持久化
-    _update_env_key("MAX_CONCURRENT_DOWNLOADS", str(new_val))
+    await asyncio.to_thread(_update_env_key, "MAX_CONCURRENT_DOWNLOADS", str(new_val))
 
     # 重启 Worker 使新并发数生效
-    result = process_manager.restart_worker(new_val)
-    redis_client.append_activity_log("info", "system",
-        f"🔄 并发数已调整为 {new_val}",
-        result["message"])
+    result = await asyncio.to_thread(process_manager.restart_worker, new_val)
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info", "system", f"🔄 并发数已调整为 {new_val}", result["message"],
+    )
     return {"success": True, "concurrency": new_val, "message": result["message"]}
 
 
@@ -857,7 +965,9 @@ async def apply_update():
     try:
         result = await asyncio.to_thread(updater.apply_update)
     except updater.GitUpdateError as e:
-        redis_client.append_activity_log("error", "system", "❌ 版本更新失败", str(e)[:300])
+        await asyncio.to_thread(
+            redis_client.append_activity_log, "error", "system", "❌ 版本更新失败", str(e)[:300]
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新出错：{str(e)[:300]}")
@@ -866,19 +976,20 @@ async def apply_update():
     if result.get("updated"):
         before_short = (result.get("before") or {}).get("short", "")
         after_short = (result.get("after") or {}).get("short", "")
-        redis_client.append_activity_log(
-            "info", "system",
-            "✅ 已拉取远程更新",
-            f"{before_short} → {after_short}",
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "info", "system", "✅ 已拉取远程更新", f"{before_short} → {after_short}",
         )
         # 重启后台进程以加载新代码
         try:
-            restart_msgs.append(process_manager.restart_worker().get("message", ""))
+            worker_result = await asyncio.to_thread(process_manager.restart_worker)
+            restart_msgs.append(worker_result.get("message", ""))
         except Exception as e:
             restart_msgs.append(f"Worker 重启失败: {str(e)[:150]}")
         try:
-            process_manager.stop_beat()
-            restart_msgs.append(process_manager.start_beat().get("message", ""))
+            await asyncio.to_thread(process_manager.stop_beat)
+            beat_result = await asyncio.to_thread(process_manager.start_beat)
+            restart_msgs.append(beat_result.get("message", ""))
         except Exception as e:
             restart_msgs.append(f"Beat 重启失败: {str(e)[:150]}")
 
@@ -929,10 +1040,9 @@ async def restart_web_service():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"发送热重载信号失败：{str(e)[:200]}")
 
-    redis_client.append_activity_log(
-        "info", "system",
-        "🔄 已向 gunicorn 发送热重载信号 (SIGHUP)",
-        f"master_pid={ppid}",
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info", "system", "🔄 已向 gunicorn 发送热重载信号 (SIGHUP)", f"master_pid={ppid}",
     )
     return {
         "success": True,

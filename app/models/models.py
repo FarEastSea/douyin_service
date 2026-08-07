@@ -8,7 +8,19 @@
 4. DownloadHistory 表：归档已完成的下载，便于查询统计
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, Index
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text as sql_text,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.models.database import Base
@@ -26,6 +38,13 @@ from app.models.work_media import (
 class Author(Base):
     """作者/订阅表"""
     __tablename__ = "authors"
+    __table_args__ = (
+        Index(
+            "idx_authors_is_subscribed_true",
+            "is_subscribed",
+            postgresql_where=sql_text("is_subscribed IS TRUE"),
+        ),
+    )
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     sec_uid = Column(String(255), unique=True, nullable=False, index=True)
@@ -77,6 +96,7 @@ class AuthorProfileHistory(Base):
 class Work(Base):
     """作品表"""
     __tablename__ = "works"
+    __table_args__ = (Index("idx_works_author_id", "author_id"),)
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     aweme_id = Column(String(64), unique=True, nullable=False, index=True)
@@ -172,13 +192,17 @@ class DownloadTask(Base):
         Index('idx_status_created', 'status', 'created_at'),
         # work_id+状态复合索引（用于按作品筛选）
         Index('idx_work_status', 'work_id', 'status'),
+        UniqueConstraint(
+            'work_id', 'file_index',
+            name='uq_download_tasks_work_file_index',
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     work_id = Column(Integer, ForeignKey("works.id"), nullable=False)
     celery_task_id = Column(String(64), index=True)  # Celery 任务ID
     
-    file_index = Column(Integer, default=0)  # 文件索引（图集中的第几张，从0开始）
+    file_index = Column(Integer, default=0, nullable=False)  # 文件索引（图集中的第几张，从0开始）
     file_name = Column(String(255))  # 文件名
     
     # 状态: pending, downloading, paused, completed, failed, cancelled
@@ -216,10 +240,15 @@ class DownloadTask(Base):
 class DownloadHistory(Base):
     """下载历史表"""
     __tablename__ = "download_history"
+    __table_args__ = (
+        Index("idx_download_history_completed_at", "completed_at"),
+        Index("idx_download_history_task_id", "task_id"),
+        Index("idx_download_history_work_id", "work_id"),
+    )
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(Integer, ForeignKey("download_tasks.id"), nullable=False)
-    work_id = Column(Integer, ForeignKey("works.id"), nullable=False)
+    task_id = Column(Integer, ForeignKey("download_tasks.id", ondelete="CASCADE"), nullable=False)
+    work_id = Column(Integer, ForeignKey("works.id", ondelete="CASCADE"), nullable=False)
     
     author_nickname = Column(String(255))
     work_title = Column(Text)
@@ -260,6 +289,7 @@ class XDownloadTask(Base):
     __tablename__ = "x_download_tasks"
     __table_args__ = (
         Index('idx_x_status_created', 'status', 'created_at'),
+        Index('idx_x_download_tasks_author_status', 'x_author_id', 'status'),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

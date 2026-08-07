@@ -7,11 +7,11 @@ import os
 from pathlib import Path
 import traceback
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core import redis_client
 from app.core.config import settings
-from app.models.database import get_sync_db, init_db_sync
+from app.models.database import get_sync_db
 from app.models.models import XAuthor, XDownloadTask, XMediaAsset
 from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_cookie_file
 from app.services.x_downloader import build_x_download_engine, is_media_download_line
@@ -56,7 +56,6 @@ def download_x_profile(self, task_id: int):
     Args:
         task_id: XDownloadTask 的数据库 ID
     """
-    init_db_sync()
     db = get_sync_db()
     cookie_path = None
     managed_cookie = False
@@ -173,7 +172,12 @@ def download_x_profile(self, task_id: int):
         if result.success:
             logger.info(f"X 任务 {task_id} 完成: {result.file_count} 个文件")
             if author:
-                author.total_downloads = result.file_count
+                db.flush()
+                author.total_downloads = int(db.execute(
+                    select(func.count(XMediaAsset.id)).where(
+                        XMediaAsset.x_author_id == author.id
+                    )
+                ).scalar() or 0)
                 author.last_check_time = datetime.now()
                 sync_x_author(author, profile_url=task.profile_url)
         else:
@@ -232,7 +236,6 @@ def download_x_profile(self, task_id: int):
 @celery_app.task(name="app.tasks.x_download_tasks.check_x_subscriptions")
 def check_x_subscriptions():
     """检查所有订阅的 X 用户，为到期的用户创建下载任务（gallery-dl 自动跳过已下载）"""
-    init_db_sync()
     db = get_sync_db()
     try:
         authors = db.execute(

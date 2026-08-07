@@ -13,11 +13,13 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import List
+import asyncio
 
 from app.models.database import get_async_db
-from app.models.models import Work, DownloadTask
+from app.models.models import Work
 from app.models.schemas import MessageResponse
 from app.services import work_manager
+from app.services.download_task_factory import ensure_download_task_async
 from app.tasks.download_tasks import download_single_file
 from app.core import redis_client
 
@@ -28,10 +30,20 @@ class BatchDeleteWorksRequest(BaseModel):
     work_ids: List[int] = Field(default_factory=list)
 
 
+def _clear_task_progress(task_ids: List[int]) -> None:
+    for task_id in task_ids:
+        redis_client.delete_progress(task_id)
+
+
+def _dispatch_download_tasks(task_ids: List[int]) -> None:
+    for task_id in task_ids:
+        download_single_file.delay(task_id)
+
+
 async def _load_work_with_tasks(db: AsyncSession, work_id: int) -> Work:
     result = await db.execute(
         select(Work)
-        .options(selectinload(Work.download_tasks))
+        .options(selectinload(Work.download_tasks), selectinload(Work.author))
         .where(Work.id == work_id)
     )
     work = result.scalar_one_or_none()
@@ -116,8 +128,6 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
     work.excluded_at = None
     work.excluded_file_indices = []
 
-    existing = {(t.file_index or 0): t for t in (work.download_tasks or [])}
-
     if work.work_type == "video":
         needed_indices = [0]
     else:
@@ -125,23 +135,26 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
         needed_indices = list(range(count)) if count > 0 else [0]
 
     dispatch_ids: List[int] = []
+    clear_progress_ids: List[int] = []
     for idx in needed_indices:
-        task = existing.get(idx)
-        if task is None:
-            task = DownloadTask(work_id=work.id, file_index=idx, status="pending")
-            db.add(task)
-            await db.flush()
+        task, action = await ensure_download_task_async(db, work.id, idx)
+        if action in {"created", "reused"}:
             dispatch_ids.append(task.id)
         elif task.status != "completed":
             task.status = "pending"
             task.error_message = None
-            redis_client.delete_progress(task.id)
+            clear_progress_ids.append(task.id)
             dispatch_ids.append(task.id)
 
+    if dispatch_ids:
+        work.is_downloaded = False
+    await work_manager.recalc_author_counts(db, work.author)
+
+    if clear_progress_ids:
+        await asyncio.to_thread(_clear_task_progress, clear_progress_ids)
     await db.commit()
 
-    for tid in dispatch_ids:
-        download_single_file.delay(tid)
+    await asyncio.to_thread(_dispatch_download_tasks, dispatch_ids)
 
     return MessageResponse(
         success=True,
@@ -162,15 +175,15 @@ async def retry_work_failed(work_id: int, db: AsyncSession = Depends(get_async_d
     if not failed_tasks:
         return MessageResponse(success=True, message="该作品没有失败任务", data={"count": 0})
 
+    failed_task_ids = [task.id for task in failed_tasks]
+    await asyncio.to_thread(_clear_task_progress, failed_task_ids)
     for task in failed_tasks:
         task.status = "pending"
         task.error_message = None
-        redis_client.delete_progress(task.id)
 
     await db.commit()
 
-    for task in failed_tasks:
-        download_single_file.delay(task.id)
+    await asyncio.to_thread(_dispatch_download_tasks, failed_task_ids)
 
     return MessageResponse(
         success=True,

@@ -8,14 +8,20 @@
 4. 连接池配置优化并发性能
 """
 
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+import asyncio
+from threading import RLock
+import time
+from typing import Optional
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, declarative_base
+
 from app.core.config import settings
+from app.core.diagnostics import clear_runtime_error, report_runtime_error
 
 Base = declarative_base()
-
-SYNC_DATABASE_URL = settings.effective_database_url
 
 def _build_async_url(sync_url: str) -> str:
     if sync_url.startswith("postgresql://"):
@@ -24,45 +30,142 @@ def _build_async_url(sync_url: str) -> str:
         return sync_url.replace("mysql+pymysql://", "mysql+aiomysql://", 1)
     return sync_url
 
-ASYNC_DATABASE_URL = _build_async_url(SYNC_DATABASE_URL)
+_engine_lock = RLock()
+_async_engine: Optional[AsyncEngine] = None
+_async_engine_key: Optional[tuple] = None
+_async_failed_key: Optional[tuple] = None
+_async_retry_after = 0.0
+_sync_engine: Optional[Engine] = None
+_sync_engine_key: Optional[tuple] = None
+_sync_failed_key: Optional[tuple] = None
+_sync_retry_after = 0.0
 
-async_engine = create_async_engine(
-    ASYNC_DATABASE_URL,
-    echo=settings.DEBUG,
-    future=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True
-)
 
-AsyncSessionLocal = async_sessionmaker(
-    bind=async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
-)
+def _current_engine_config():
+    current, config_key = settings.snapshot_with_key()
+    return current, config_key
 
-sync_engine = create_engine(
-    SYNC_DATABASE_URL,
-    echo=settings.DEBUG,
-    future=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True
-)
 
-# 同步会话工厂
-SyncSessionLocal = sessionmaker(
-    bind=sync_engine,
-    autocommit=False,
-    autoflush=False
-)
+async def get_async_engine() -> AsyncEngine:
+    global _async_engine, _async_engine_key, _async_failed_key, _async_retry_after
+    current, config_key = _current_engine_config()
+    with _engine_lock:
+        if _async_engine is not None and _async_engine_key == config_key:
+            return _async_engine
+        if _async_engine is not None and _async_failed_key == config_key and time.monotonic() < _async_retry_after:
+            return _async_engine
+
+    candidate: Optional[AsyncEngine] = None
+    try:
+        candidate = create_async_engine(
+            _build_async_url(current.effective_database_url),
+            echo=current.DEBUG,
+            future=True,
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+        )
+        async with candidate.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        if candidate is not None:
+            await candidate.dispose()
+        report_runtime_error("DATABASE_ASYNC_CONNECTION", "异步数据库连接", "数据库", exc)
+        with _engine_lock:
+            _async_failed_key = config_key
+            _async_retry_after = time.monotonic() + 1.0
+            if _async_engine is not None:
+                return _async_engine
+        raise RuntimeError("新的异步数据库配置不可用") from exc
+
+    duplicate_engine: Optional[AsyncEngine] = None
+    with _engine_lock:
+        # 候选连接验证期间，另一个请求可能已完成同一版本的切换。
+        # 此时保留已发布的引擎并释放本次重复创建的候选，避免把刚
+        # 返回给并发请求的引擎立即 dispose。
+        if _async_engine is not None and _async_engine_key == config_key:
+            duplicate_engine = candidate
+            selected_engine = _async_engine
+            old_engine = None
+        else:
+            old_engine = _async_engine
+            _async_engine = candidate
+            _async_engine_key = config_key
+            _async_failed_key = None
+            _async_retry_after = 0.0
+            selected_engine = candidate
+    clear_runtime_error("DATABASE_ASYNC_CONNECTION")
+    if duplicate_engine is not None:
+        await duplicate_engine.dispose()
+    if old_engine is not None and old_engine is not candidate:
+        await old_engine.dispose()
+    return selected_engine
+
+
+def get_sync_engine() -> Engine:
+    global _sync_engine, _sync_engine_key, _sync_failed_key, _sync_retry_after
+    current, config_key = _current_engine_config()
+    with _engine_lock:
+        if _sync_engine is not None and _sync_engine_key == config_key:
+            return _sync_engine
+        if _sync_engine is not None and _sync_failed_key == config_key and time.monotonic() < _sync_retry_after:
+            return _sync_engine
+
+    candidate: Optional[Engine] = None
+    try:
+        candidate = create_engine(
+            current.effective_database_url,
+            echo=current.DEBUG,
+            future=True,
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+        )
+        with candidate.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        if candidate is not None:
+            candidate.dispose()
+        report_runtime_error("DATABASE_SYNC_CONNECTION", "同步数据库连接", "数据库", exc)
+        with _engine_lock:
+            _sync_failed_key = config_key
+            _sync_retry_after = time.monotonic() + 1.0
+            if _sync_engine is not None:
+                return _sync_engine
+        raise RuntimeError("新的同步数据库配置不可用") from exc
+
+    duplicate_engine: Optional[Engine] = None
+    with _engine_lock:
+        if _sync_engine is not None and _sync_engine_key == config_key:
+            duplicate_engine = candidate
+            selected_engine = _sync_engine
+            old_engine = None
+        else:
+            old_engine = _sync_engine
+            _sync_engine = candidate
+            _sync_engine_key = config_key
+            _sync_failed_key = None
+            _sync_retry_after = 0.0
+            selected_engine = candidate
+    clear_runtime_error("DATABASE_SYNC_CONNECTION")
+    if duplicate_engine is not None:
+        duplicate_engine.dispose()
+    if old_engine is not None and old_engine is not candidate:
+        old_engine.dispose()
+    return selected_engine
 
 
 async def get_async_db():
     """FastAPI 依赖注入：获取异步数据库会话"""
-    async with AsyncSessionLocal() as session:
+    engine = await get_async_engine()
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+    async with session_factory() as session:
         try:
             yield session
             await session.commit()
@@ -75,7 +178,12 @@ async def get_async_db():
 
 def get_sync_db():
     """Celery 任务：获取同步数据库会话"""
-    db = SyncSessionLocal()
+    session_factory = sessionmaker(
+        bind=get_sync_engine(),
+        autocommit=False,
+        autoflush=False,
+    )
+    db = session_factory()
     try:
         return db
     except Exception:
@@ -84,58 +192,16 @@ def get_sync_db():
 
 
 async def init_db():
-    """初始化数据库表，并自动迁移缺失的列"""
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # 自动迁移：为已有表添加缺失的列
-        await conn.run_sync(_migrate_missing_columns)
-
-
-def _migrate_missing_columns(connection):
-    """检查并添加缺失的列"""
-    from sqlalchemy import text, inspect as sa_inspect
-    inspector = sa_inspect(connection)
-
-    migrations = [
-        ("x_download_tasks", "x_author_id", "ALTER TABLE x_download_tasks ADD COLUMN x_author_id INTEGER REFERENCES x_authors(id)"),
-        ("x_authors", "display_name", "ALTER TABLE x_authors ADD COLUMN display_name VARCHAR(255)"),
-        ("x_authors", "avatar_url", "ALTER TABLE x_authors ADD COLUMN avatar_url TEXT"),
-        ("x_authors", "account_status", "ALTER TABLE x_authors ADD COLUMN account_status VARCHAR(32)"),
-        ("x_authors", "account_status_label", "ALTER TABLE x_authors ADD COLUMN account_status_label VARCHAR(64)"),
-        ("x_authors", "last_error", "ALTER TABLE x_authors ADD COLUMN last_error TEXT"),
-        ("x_authors", "last_synced_at", "ALTER TABLE x_authors ADD COLUMN last_synced_at TIMESTAMP NULL"),
-        ("x_download_tasks", "phase", "ALTER TABLE x_download_tasks ADD COLUMN phase VARCHAR(32)"),
-        ("x_download_tasks", "engine_name", "ALTER TABLE x_download_tasks ADD COLUMN engine_name VARCHAR(32)"),
-        ("x_download_tasks", "total_media_count", "ALTER TABLE x_download_tasks ADD COLUMN total_media_count INTEGER"),
-        ("x_download_tasks", "downloaded_media_count", "ALTER TABLE x_download_tasks ADD COLUMN downloaded_media_count INTEGER"),
-        ("x_download_tasks", "progress_percent", "ALTER TABLE x_download_tasks ADD COLUMN progress_percent FLOAT"),
-        ("x_download_tasks", "last_log_line", "ALTER TABLE x_download_tasks ADD COLUMN last_log_line TEXT"),
-        ("x_download_tasks", "error_code", "ALTER TABLE x_download_tasks ADD COLUMN error_code VARCHAR(64)"),
-        ("x_download_tasks", "retry_count", "ALTER TABLE x_download_tasks ADD COLUMN retry_count INTEGER"),
-        ("x_download_tasks", "last_heartbeat_at", "ALTER TABLE x_download_tasks ADD COLUMN last_heartbeat_at TIMESTAMP NULL"),
-        ("works", "is_excluded", "ALTER TABLE works ADD COLUMN is_excluded BOOLEAN DEFAULT FALSE NOT NULL"),
-        ("works", "excluded_at", "ALTER TABLE works ADD COLUMN excluded_at TIMESTAMP NULL"),
-        ("works", "excluded_file_indices", "ALTER TABLE works ADD COLUMN excluded_file_indices TEXT"),
-        ("works", "live_photo_urls", "ALTER TABLE works ADD COLUMN live_photo_urls TEXT"),
-        ("works", "published_at", "ALTER TABLE works ADD COLUMN published_at TIMESTAMP NULL"),
-        ("authors", "last_auto_update_at", "ALTER TABLE authors ADD COLUMN last_auto_update_at TIMESTAMP NULL"),
-    ]
-
-    for table_name, column_name, alter_sql in migrations:
-        if table_name not in inspector.get_table_names():
-            continue
-        existing_columns = [col["name"] for col in inspector.get_columns(table_name)]
-        if column_name not in existing_columns:
-            try:
-                connection.execute(text(alter_sql))
-                print(f"  Migrate: {table_name} added column {column_name}")
-            except Exception as e:
-                print(f"  Migrate skip: {table_name}.{column_name} - {e}")
+    """在线程中执行同步迁移，避免阻塞 FastAPI 事件循环。"""
+    await asyncio.to_thread(init_db_sync)
 
 
 def init_db_sync():
-    """同步初始化数据库表（用于 Celery worker 启动时）"""
-    with sync_engine.begin() as connection:
-        Base.metadata.create_all(bind=connection)
-        _migrate_missing_columns(connection)
+    """在全局数据库锁下执行一次带版本记录的启动迁移。"""
+    # 确保所有 ORM 表已注册到 Base.metadata。
+    from app.models import models as _models  # noqa: F401
+    from app.models.migrations import run_schema_migrations
+
+    engine = get_sync_engine()
+    run_schema_migrations(engine, Base.metadata)
 

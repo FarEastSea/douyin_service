@@ -4,20 +4,22 @@
 为什么这样设计：
 1. 使用 FastAPI 的 lifespan 上下文管理器处理启动/关闭事件
 2. 注册所有 API 路由
-3. 配置 CORS 支持前端跨域访问
+3. 配置管理 Token 鉴权与显式 CORS 来源
 4. 提供静态文件服务（用于前端页面）
 """
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 import os
 
 from app.api import bootstrap
+from app.core.diagnostics import get_runtime_errors
 from app.core.env_config import validate_env
 from app.core.error_handling import register_exception_handlers
+from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware
 
 
 BOOTSTRAP_STATUS = validate_env()
@@ -30,6 +32,17 @@ if not BOOTSTRAP_MODE:
         from app.core.config import settings, ensure_download_dir
         from app.core.process_manager import process_manager
         from app.api import tasks, authors, system, x_tasks, works
+        config_errors = get_runtime_errors()
+        if config_errors:
+            BOOTSTRAP_MODE = True
+            BOOTSTRAP_STATUS = {
+                **BOOTSTRAP_STATUS,
+                "ready": False,
+                "errors": [
+                    *BOOTSTRAP_STATUS.get("errors", []),
+                    *config_errors,
+                ],
+            }
     except Exception as e:
         BOOTSTRAP_MODE = True
         BOOTSTRAP_STATUS = {
@@ -121,7 +134,7 @@ async def lifespan(app: FastAPI):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title=settings.APP_NAME if settings is not None else "媒体下载管理系统",
+    title="媒体下载管理系统",
     description="""
 ## 功能特性
 
@@ -138,7 +151,9 @@ app = FastAPI(
 - ReDoc: /redoc
     """,
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
 )
 
 app.state.bootstrap_status = BOOTSTRAP_STATUS
@@ -154,14 +169,16 @@ async def no_cache_api_responses(request: Request, call_next):
         response.headers["Expires"] = "0"
     return response
 
-# 配置 CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制具体域名
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 鉴权读取最新网页持久化 Token；CORS 位于外层，确保 401 也带正确的
+# 显式来源响应头。两者都不把配置固化为启动时快照。
+app.add_middleware(AdminAuthMiddleware)
+app.add_middleware(DynamicCORSMiddleware)
+
+
+@app.get("/api/health", include_in_schema=False)
+async def public_health():
+    """初始化模式与正常模式都始终可用的最小健康检查。"""
+    return {"status": "healthy", "bootstrap_mode": bool(app.state.degraded_mode)}
 
 app.include_router(bootstrap.router, prefix="/api")
 
@@ -180,6 +197,50 @@ if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
+@app.get("/docs", include_in_schema=False)
+async def swagger_docs():
+    """公开文档外壳；OpenAPI 描述和实际请求仍需管理 Token。"""
+    response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - API 文档",
+        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+    )
+    html = response.body.decode("utf-8")
+    auth_interceptors = """
+        requestInterceptor: (request) => {
+            let token = window.localStorage.getItem('douyinAdminToken') || '';
+            if (!token) {
+                token = window.prompt('请输入管理 Token 以加载受保护的 API 文档：') || '';
+                if (token) window.localStorage.setItem('douyinAdminToken', token.trim());
+            }
+            if (token) request.headers.Authorization = `Bearer ${token.trim()}`;
+            return request;
+        },
+        responseInterceptor: (response) => {
+            if (response.status === 401) {
+                window.localStorage.removeItem('douyinAdminToken');
+            }
+            return response;
+        },
+    """
+    html = html.replace(
+        "const ui = SwaggerUIBundle({",
+        f"const ui = SwaggerUIBundle({{{auth_interceptors}",
+        1,
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False)
+async def swagger_ui_redirect():
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_redirect():
+    return RedirectResponse(url="/docs", status_code=307)
+
+
 @app.get("/")
 async def root():
     """根路径 - 返回前端页面或 API 信息"""
@@ -188,7 +249,7 @@ async def root():
         return FileResponse(index_path)
     
     return {
-        "name": settings.APP_NAME if settings is not None else "媒体下载管理系统",
+        "name": "媒体下载管理系统",
         "version": "2.0.0",
         "docs": "/docs",
         "api": "/api"
@@ -202,5 +263,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=False if BOOTSTRAP_MODE or settings is None else settings.DEBUG
+        reload=False,
     )

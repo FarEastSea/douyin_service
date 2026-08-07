@@ -11,9 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 from typing import List, Optional
 from datetime import datetime
+import asyncio
 import json
 import mimetypes
 from pathlib import Path
@@ -39,12 +40,37 @@ from app.services.downloader import (
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
 from app.services.media_paths import resolve_media_path
+from app.services.download_task_factory import ensure_download_task_async
+from app.services.work_manager import recalc_author_counts
 
 router = APIRouter(prefix="/tasks", tags=["下载任务"])
 
 VIDEO_PREVIEW_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 IMAGE_PREVIEW_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 PREVIEWABLE_EXTENSIONS = VIDEO_PREVIEW_EXTENSIONS | IMAGE_PREVIEW_EXTENSIONS
+
+
+def _update_task_runtime(
+    task_ids: List[int],
+    *,
+    pause: bool = False,
+    resume: bool = False,
+    clear_progress: bool = False,
+) -> None:
+    """批量执行同步 Redis 操作，供异步接口在线程中调用。"""
+    for task_id in task_ids:
+        if pause:
+            redis_client.pause_task(task_id)
+        if resume:
+            redis_client.resume_task(task_id)
+        if clear_progress:
+            redis_client.delete_progress(task_id)
+
+
+def _dispatch_download_tasks(task_ids: List[int]) -> None:
+    """批量向 Celery 投递任务，避免阻塞 FastAPI 事件循环。"""
+    for task_id in task_ids:
+        download_single_file.delay(task_id)
 
 
 def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing: bool = False) -> None:
@@ -79,7 +105,12 @@ def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing:
     work.video_url = None
 
 
-def _build_task_preview_data(task: DownloadTask, work: Optional[Work]) -> dict:
+def _build_task_preview_data(
+    task: DownloadTask,
+    work: Optional[Work],
+    *,
+    include_remote_preview: bool = True,
+) -> dict:
     """构造任务预览元数据。"""
     if not work:
         return {
@@ -101,8 +132,8 @@ def _build_task_preview_data(task: DownloadTask, work: Optional[Work]) -> dict:
             "local_preview_available": False,
         }
 
-    image_urls = work.image_urls or []
-    live_photo_urls = work.live_photo_urls or []
+    image_urls = (work.image_urls or []) if include_remote_preview else []
+    live_photo_urls = (work.live_photo_urls or []) if include_remote_preview else []
     live_photo_url = (
         live_photo_urls[task.file_index]
         if 0 <= task.file_index < len(live_photo_urls)
@@ -123,11 +154,19 @@ def _build_task_preview_data(task: DownloadTask, work: Optional[Work]) -> dict:
     }
 
 
-def _serialize_download_task(task: DownloadTask) -> DownloadTaskResponse:
+def _serialize_download_task(
+    task: DownloadTask,
+    *,
+    include_remote_preview: bool = True,
+) -> DownloadTaskResponse:
     """将任务 ORM 对象转换为包含预览字段的响应对象。"""
     work = task.work
     author = work.author if work else None
-    preview_data = _build_task_preview_data(task, work)
+    preview_data = _build_task_preview_data(
+        task,
+        work,
+        include_remote_preview=include_remote_preview,
+    )
 
     item = DownloadTaskResponse.model_validate(task)
     item.author_id = author.id if author else None
@@ -152,12 +191,12 @@ async def create_download_task(
     创建下载任务 - 自动识别作者主页链接或单个作品链接
     """
     try:
-        cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+        current_settings = await asyncio.to_thread(settings.snapshot)
+        cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
         if not cookie:
             raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
         
         # 检查 Celery Worker 是否在线
-        import asyncio
         try:
             def _ping_worker():
                 from app.tasks.celery_app import celery_app
@@ -174,9 +213,9 @@ async def create_download_task(
             pass
 
         runtime_config = await get_runtime_config(db)
-        downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
 
-        url_info = downloader.detect_url_type(request.share_url)
+        url_info = await asyncio.to_thread(downloader.detect_url_type, request.share_url)
 
         if url_info["type"] == "work":
             return await _handle_single_work(downloader, url_info["redirect_url"], db)
@@ -195,11 +234,11 @@ async def _handle_author_download(
     downloader: DouyinDownloader, share_url: str, db: AsyncSession
 ) -> BatchDownloadResponse:
     """处理作者主页链接 - 原有逻辑"""
-    sec_uid = downloader.get_sec_uid(share_url)
+    sec_uid = await asyncio.to_thread(downloader.get_sec_uid, share_url)
     result = await db.execute(select(Author).where(Author.sec_uid == sec_uid))
     author = result.scalar_one_or_none()
     author_exists = author is not None
-    author_info = downloader.get_author_info(sec_uid)
+    author_info = await asyncio.to_thread(downloader.get_author_info, sec_uid)
 
     if not author and not author_profile_has_identity(author_info):
         detail = author_info.get("account_status_detail") or author_info.get("account_status_label") or "抖音未返回可用的作者资料"
@@ -220,6 +259,7 @@ async def _handle_author_download(
         author.share_url = author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or author.share_url
 
     author_created_at = author.created_at
+    await recalc_author_counts(db, author)
     await db.commit()
 
     author_position = None
@@ -229,7 +269,7 @@ async def _handle_author_download(
         )
         author_position = pos_result.scalar() or 0
 
-    download_author_works.delay(author.id, start_index=1)
+    await asyncio.to_thread(download_author_works.delay, author.id, start_index=1)
 
     return BatchDownloadResponse(
         url_type="author",
@@ -248,7 +288,7 @@ async def _handle_single_work(
     downloader: DouyinDownloader, redirect_url: str, db: AsyncSession
 ) -> BatchDownloadResponse:
     """处理单个作品链接"""
-    work_data = downloader.get_single_work(redirect_url)
+    work_data = await asyncio.to_thread(downloader.get_single_work, redirect_url)
     work_info = work_data["work"]
     author_info = work_data["author_info"]
     sec_uid = author_info["sec_uid"]
@@ -295,48 +335,28 @@ async def _handle_single_work(
     created_task_ids = []
     reused_task_ids = []
     if work.work_type == "video":
-        existing = await db.execute(
-            select(DownloadTask).where(
-                DownloadTask.work_id == work.id, DownloadTask.file_index == 0
-            )
-        )
-        existing_task = existing.scalar_one_or_none()
-        if existing_task:
-            if existing_task.status in ("failed", "cancelled"):
-                existing_task.status = "pending"
-                existing_task.error_message = None
-                reused_task_ids.append(existing_task.id)
-            # completed/downloading/pending/paused 跳过
-        else:
-            task = DownloadTask(work_id=work.id, file_index=0, status="pending")
-            db.add(task)
-            await db.flush()
+        task, action = await ensure_download_task_async(db, work.id, 0)
+        if action == "created":
             created_task_ids.append(task.id)
+        elif action == "reused":
+            reused_task_ids.append(task.id)
+        if action != "existing":
+            work.is_downloaded = False
     else:
         for img_idx in range(work.image_count):
-            existing = await db.execute(
-                select(DownloadTask).where(
-                    DownloadTask.work_id == work.id,
-                    DownloadTask.file_index == img_idx
-                )
-            )
-            existing_task = existing.scalar_one_or_none()
-            if existing_task:
-                if existing_task.status in ("failed", "cancelled"):
-                    existing_task.status = "pending"
-                    existing_task.error_message = None
-                    reused_task_ids.append(existing_task.id)
-            else:
-                task = DownloadTask(work_id=work.id, file_index=img_idx, status="pending")
-                db.add(task)
-                await db.flush()
+            task, action = await ensure_download_task_async(db, work.id, img_idx)
+            if action == "created":
                 created_task_ids.append(task.id)
+            elif action == "reused":
+                reused_task_ids.append(task.id)
+            if action != "existing":
+                work.is_downloaded = False
 
+    await recalc_author_counts(db, author)
     await db.commit()
 
     all_task_ids = created_task_ids + reused_task_ids
-    for tid in all_task_ids:
-        download_single_file.delay(tid)
+    await asyncio.to_thread(_dispatch_download_tasks, all_task_ids)
 
     return BatchDownloadResponse(
         url_type="work",
@@ -359,7 +379,12 @@ async def list_tasks(
     """获取下载任务列表（带分页）"""
     # 构建基础查询
     base_query = select(DownloadTask).options(
-        selectinload(DownloadTask.work).selectinload(Work.author)
+        selectinload(DownloadTask.work).options(
+            selectinload(Work.author),
+            defer(Work._image_urls),
+            defer(Work._live_photo_urls),
+            defer(Work.video_url),
+        )
     )
     count_query = select(func.count(DownloadTask.id))
     
@@ -371,26 +396,34 @@ async def list_tasks(
         base_query = base_query.join(Work).where(Work.author_id == author_id)
         count_query = count_query.join(Work).where(Work.author_id == author_id)
     
-    # 获取总数
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
-    
-    # 获取分页数据
+    # 窗口计数与当页数据一次返回，避免高频轮询每次额外 COUNT。
     # 批量创建的任务可能共享同一个 created_at。必须用唯一主键打破并列，
     # 否则数据库可在每次分页查询时以不同顺序返回这些任务。
-    query = base_query.order_by(
+    query = base_query.add_columns(
+        func.count(DownloadTask.id).over().label("_total")
+    ).order_by(
         DownloadTask.created_at.desc(),
         DownloadTask.id.desc(),
     )
     query = query.offset((page - 1) * page_size).limit(page_size)
     
     result = await db.execute(query)
-    tasks = result.scalars().all()
+    rows = result.all()
+    tasks = [row[0] for row in rows]
+    if rows:
+        total = int(rows[0][1] or 0)
+    elif page > 1:
+        total = int((await db.execute(count_query)).scalar() or 0)
+    else:
+        total = 0
     
     # 计算总页数
     pages = (total + page_size - 1) // page_size if total > 0 else 1
     
-    items = [_serialize_download_task(task) for task in tasks]
+    items = [
+        _serialize_download_task(task, include_remote_preview=False)
+        for task in tasks
+    ]
     
     return PaginatedTasksResponse(
         items=items,
@@ -417,7 +450,12 @@ async def preview_task_video(task_id: int, db: AsyncSession = Depends(get_async_
         raise HTTPException(status_code=404, detail="任务没有可预览文件")
 
     try:
-        file_path = resolve_media_path(task.file_path, settings.DOWNLOAD_DIR)
+        current_settings = await asyncio.to_thread(settings.snapshot)
+        file_path = await asyncio.to_thread(
+            resolve_media_path,
+            task.file_path,
+            current_settings.DOWNLOAD_DIR,
+        )
         if str(file_path) != task.file_path:
             task.file_path = str(file_path)
             await db.commit()
@@ -426,7 +464,7 @@ async def preview_task_video(task_id: int, db: AsyncSession = Depends(get_async_
 
     if file_path.suffix.lower() not in PREVIEWABLE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="仅支持预览图片或视频文件")
-    if not file_path.is_file():
+    if not await asyncio.to_thread(file_path.is_file):
         raise HTTPException(status_code=404, detail="预览文件不存在")
 
     media_type = mimetypes.guess_type(str(file_path))[0] or "video/mp4"
@@ -458,7 +496,7 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
 async def get_task_progress(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """获取任务实时进度"""
     # 先从 Redis 获取实时进度
-    progress = redis_client.get_progress(task_id)
+    progress = await asyncio.to_thread(redis_client.get_progress, task_id)
     
     if progress:
         eta = None
@@ -515,7 +553,7 @@ async def pause_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
         raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无法暂停")
     
     # 设置暂停信号
-    redis_client.pause_task(task_id)
+    await asyncio.to_thread(redis_client.pause_task, task_id)
     
     return MessageResponse(success=True, message="暂停信号已发送")
 
@@ -539,7 +577,7 @@ async def resume_task_api(task_id: int, db: AsyncSession = Depends(get_async_db)
     await db.commit()
     
     # 触发恢复任务
-    resume_task.delay(task_id)
+    await asyncio.to_thread(resume_task.delay, task_id)
     
     return MessageResponse(success=True, message="任务已恢复")
 
@@ -559,14 +597,14 @@ async def cancel_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
         raise HTTPException(status_code=400, detail="任务已完成，无法取消")
     
     # 设置暂停信号（让正在下载的任务停止）
-    redis_client.pause_task(task_id)
+    await asyncio.to_thread(redis_client.pause_task, task_id)
     
     # 更新状态为取消
     task.status = "cancelled"
     await db.commit()
     
     # 清理 Redis 进度
-    redis_client.delete_progress(task_id)
+    await asyncio.to_thread(redis_client.delete_progress, task_id)
     
     return MessageResponse(success=True, message="任务已取消")
 
@@ -591,7 +629,7 @@ async def retry_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     await db.commit()
     
     # 触发下载任务
-    download_single_file.delay(task_id)
+    await asyncio.to_thread(download_single_file.delay, task_id)
     
     return MessageResponse(success=True, message="任务已重新提交")
 
@@ -611,10 +649,9 @@ async def force_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db
         raise HTTPException(status_code=400, detail="任务已完成，无法重试")
 
     # 清除暂停信号
-    redis_client.resume_task(task_id)
-
-    # 清除 Redis 进度
-    redis_client.delete_progress(task_id)
+    await asyncio.to_thread(
+        _update_task_runtime, [task_id], resume=True, clear_progress=True
+    )
 
     # 重置状态和进度
     task.status = "pending"
@@ -624,7 +661,7 @@ async def force_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db
     await db.commit()
 
     # 触发新的下载任务
-    download_single_file.delay(task_id)
+    await asyncio.to_thread(download_single_file.delay, task_id)
 
     return MessageResponse(success=True, message="任务已强制重新提交")
 
@@ -642,10 +679,11 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
 
     # 如果任务正在下载，先暂停
     if task.status == "downloading":
-        redis_client.pause_task(task_id)
-
-    # 清理 Redis 进度
-    redis_client.delete_progress(task_id)
+        await asyncio.to_thread(
+            _update_task_runtime, [task_id], pause=True, clear_progress=True
+        )
+    else:
+        await asyncio.to_thread(redis_client.delete_progress, task_id)
 
     # 删除任务记录
     await db.delete(task)
@@ -666,9 +704,11 @@ async def force_retry_all_downloading(db: AsyncSession = Depends(get_async_db)):
         return MessageResponse(success=True, message="没有下载中的任务", data={"count": 0})
 
     count = 0
+    task_ids = [task.id for task in stuck_tasks]
+    await asyncio.to_thread(
+        _update_task_runtime, task_ids, resume=True, clear_progress=True
+    )
     for task in stuck_tasks:
-        redis_client.resume_task(task.id)
-        redis_client.delete_progress(task.id)
         task.status = "pending"
         task.error_message = None
         task.downloaded_bytes = 0
@@ -677,8 +717,7 @@ async def force_retry_all_downloading(db: AsyncSession = Depends(get_async_db)):
 
     await db.commit()
 
-    for task in stuck_tasks:
-        download_single_file.delay(task.id)
+    await asyncio.to_thread(_dispatch_download_tasks, task_ids)
 
     return MessageResponse(
         success=True,
@@ -709,8 +748,7 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
     await db.commit()
 
     # 触发所有任务的下载
-    for task in failed_tasks:
-        download_single_file.delay(task.id)
+    await asyncio.to_thread(_dispatch_download_tasks, [task.id for task in failed_tasks])
 
     return MessageResponse(
         success=True,
@@ -758,15 +796,18 @@ async def batch_delete_tasks(
         return MessageResponse(success=True, message="没有可删除的任务", data={"count": 0})
 
     count = len(tasks)
+    await asyncio.to_thread(
+        _update_task_runtime, [task.id for task in tasks], clear_progress=True
+    )
     for task in tasks:
-        # 清理 Redis 进度
-        redis_client.delete_progress(task.id)
         await db.delete(task)
 
     await db.commit()
 
-    redis_client.append_activity_log("info", "api",
-        f"🗑️ 批量删除 {count} 个 {status} 状态的任务", "")
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info", "api", f"🗑️ 批量删除 {count} 个 {status} 状态的任务", "",
+    )
 
     return MessageResponse(
         success=True,
@@ -787,8 +828,10 @@ async def pause_all_tasks(db: AsyncSession = Depends(get_async_db)):
         return MessageResponse(success=True, message="没有需要暂停的任务", data={"count": 0})
 
     count = 0
+    await asyncio.to_thread(
+        _update_task_runtime, [task.id for task in active_tasks], pause=True
+    )
     for task in active_tasks:
-        redis_client.pause_task(task.id)
         if task.status == "pending":
             task.status = "paused"
         count += 1
@@ -833,7 +876,8 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
 
     # 刷新下载链接
     try:
-        cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+        current_settings = await asyncio.to_thread(settings.snapshot)
+        cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
         if not cookie:
             raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
 
@@ -841,7 +885,7 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
         runtime_config = await get_runtime_config(db)
 
         def _refresh():
-            downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+            downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
             return downloader.refresh_work_urls(work.aweme_id)
 
         fresh = await asyncio.to_thread(_refresh)
@@ -866,11 +910,11 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
     # 重置任务状态
     task.status = "pending"
     task.error_message = None
-    redis_client.delete_progress(task_id)
+    await asyncio.to_thread(redis_client.delete_progress, task_id)
 
     await db.commit()
 
-    download_single_file.delay(task_id)
+    await asyncio.to_thread(download_single_file.delay, task_id)
 
     return MessageResponse(success=True, message=f"已刷新下载链接并重新提交任务（作品: {work.aweme_id}）")
 
@@ -886,7 +930,8 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
     if not failed_tasks:
         return MessageResponse(success=True, message="没有失败的任务需要重试", data={"count": 0})
 
-    cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
     if not cookie:
         raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
 
@@ -894,7 +939,7 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
     runtime_config = await get_runtime_config(db)
 
     def _create_downloader():
-        return DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        return DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
     downloader = await asyncio.to_thread(_create_downloader)
 
     # 按 work_id 分组，避免同一个作品重复刷新
@@ -927,16 +972,18 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
             refreshed_works[wid] = False
 
     count = 0
+    failed_task_ids = [task.id for task in failed_tasks]
+    await asyncio.to_thread(
+        _update_task_runtime, failed_task_ids, clear_progress=True
+    )
     for task in failed_tasks:
         task.status = "pending"
         task.error_message = None
-        redis_client.delete_progress(task.id)
         count += 1
 
     await db.commit()
 
-    for task in failed_tasks:
-        download_single_file.delay(task.id)
+    await asyncio.to_thread(_dispatch_download_tasks, failed_task_ids)
 
     refreshed_count = sum(1 for v in refreshed_works.values() if v)
     return MessageResponse(
@@ -965,12 +1012,14 @@ async def redispatch_pending_tasks(db: AsyncSession = Depends(get_async_db)):
         return MessageResponse(success=True, message="没有待处理任务", data={"count": 0})
 
     count = len(pending_tasks)
-    for task in pending_tasks:
-        download_single_file.delay(task.id)
+    await asyncio.to_thread(_dispatch_download_tasks, [task.id for task in pending_tasks])
 
-    redis_client.append_activity_log("info", "api",
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info", "api",
         f"🔄 重新分发 {count} 个 pending 任务到队列",
-        f"task_ids={[t.id for t in pending_tasks[:20]]}{'...' if count > 20 else ''}")
+        f"task_ids={[t.id for t in pending_tasks[:20]]}{'...' if count > 20 else ''}",
+    )
 
     return MessageResponse(
         success=True,

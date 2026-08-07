@@ -220,6 +220,8 @@ class SystemStatus(BaseModel):
     total_authors: int
     subscribed_authors: int
     total_downloads: int
+    worker_process_running: bool = False
+    beat_process_running: bool = False
 
 
 # ============ 通用响应 ============

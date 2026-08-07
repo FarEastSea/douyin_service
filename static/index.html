@@ -7,9 +7,8 @@
     <title>媒体下载管理系统</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23fe2c55'/><path d='M50 20v40m0 0l-16-16m16 16l16-16M30 72h40' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/app.css?v=20260730">
-    <link rel="stylesheet" href="/static/css/error-notice.css?v=20260730">
-    <link rel="stylesheet" href="/static/css/ui-refresh.css?v=20260730-8">
+    <link rel="stylesheet" href="/static/css/app.css?v=20260802">
+    <link rel="stylesheet" href="/static/css/error-notice.css?v=20260802">
 </head>
 
 <body>
@@ -352,7 +351,7 @@
                                 <button class="secondary" onclick="testDbConnection()">测试连接</button>
                                 <button onclick="saveDbConfig()">保存配置</button>
                             </div>
-                            <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">修改数据库配置后需要重启服务才能生效。</p>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">可先使用“测试连接”校验配置；保存成功后，下一次请求自动切换到新数据库连接。</p>
                         </div>
                     </div>
 
@@ -612,8 +611,8 @@
         </button>
     </nav>
 
-    <script src="/static/js/error-notice.js?v=20260729"></script>
-    <script src="/static/js/app.js?v=20260730-4"></script>
+    <script src="/static/js/error-notice.js?v=20260802"></script>
+    <script src="/static/js/app.js?v=20260802"></script>
 </body>
 
 </html>

@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Body, HTTPException, Request
+import asyncio
 
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
+from app.core.diagnostics import get_runtime_errors
 from app.core.env_config import check_download_directory, read_env_file, validate_env, write_env_updates
+from app.core.network_security import validate_database_test_target
 
 
 router = APIRouter(tags=["初始化配置"])
@@ -13,11 +16,16 @@ def _effective_bootstrap_status(request: Request):
     if getattr(request.app.state, "degraded_mode", False):
         status = {**status, "ready": False, "errors": list(status.get("errors", []))}
         startup_status = getattr(request.app.state, "bootstrap_status", {}) or {}
-        startup_errors = startup_status.get("errors", [])
+        startup_errors = [
+            item
+            for item in startup_status.get("errors", [])
+            if item.get("key") in {"APP_STARTUP", "DATABASE_INIT", "DOWNLOAD_DIRECTORY"}
+        ]
+        startup_errors.extend(get_runtime_errors())
         if startup_errors:
             existing = {item.get("key") for item in status["errors"]}
             status["errors"].extend(item for item in startup_errors if item.get("key") not in existing)
-        elif not status["errors"]:
+        elif not status["errors"] and not status.get("missing"):
             status["errors"].append({
                 "key": "RESTART_REQUIRED",
                 "label": "需要重启服务",
@@ -29,7 +37,7 @@ def _effective_bootstrap_status(request: Request):
 
 @router.get("/bootstrap/status")
 async def bootstrap_status(request: Request):
-    return _effective_bootstrap_status(request)
+    return await asyncio.to_thread(_effective_bootstrap_status, request)
 
 
 @router.post("/bootstrap/config")
@@ -37,19 +45,23 @@ async def save_bootstrap_config(request: Request, payload: dict = Body(...)):
     values = payload.get("values", payload)
     if not isinstance(values, dict):
         raise HTTPException(status_code=400, detail="配置内容格式不正确")
-    candidate = {**read_env_file(), **values}
-    download_error = check_download_directory(candidate)
+    current = await asyncio.to_thread(read_env_file)
+    candidate = {**current, **values}
+    download_error = await asyncio.to_thread(check_download_directory, candidate)
     if download_error:
         raise HTTPException(status_code=400, detail=download_error["message"])
     try:
-        persisted = write_env_updates(values)
+        persisted = await asyncio.to_thread(write_env_updates, values)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)[:300]}")
-    status = _effective_bootstrap_status(request)
+    status = await asyncio.to_thread(_effective_bootstrap_status, request)
     return {
         "success": True,
-        "message": "配置已保存，请重启 Web 服务使配置生效。",
+        "message": "配置已保存；维护模式下请重启 Web 服务进入完整功能。",
         "persisted_keys": sorted(persisted),
+        "admin_token": persisted.get("ADMIN_TOKEN"),
         **status,
     }
 
@@ -76,7 +88,7 @@ def _database_url_from_config(cfg: DatabaseConfig):
 
 @router.get("/config/database")
 async def get_database_config():
-    values = read_env_file()
+    values = await asyncio.to_thread(read_env_file)
     return {
         "db_type": values.get("DB_TYPE", "postgresql"),
         "db_host": values.get("DB_HOST", ""),
@@ -91,13 +103,19 @@ async def get_database_config():
 @router.post("/config/database/test")
 async def test_database_connection(cfg: DatabaseConfig):
     try:
-        url, connect_args = _database_url_from_config(cfg)
-        engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-        finally:
-            engine.dispose()
+        effective_port = cfg.db_port or (3306 if cfg.db_type == "mysql" else 5432)
+        await asyncio.to_thread(validate_database_test_target, cfg.db_host, effective_port)
+
+        def _test_connection():
+            url, connect_args = _database_url_from_config(cfg)
+            engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+            finally:
+                engine.dispose()
+
+        await asyncio.to_thread(_test_connection)
         return {"success": True, "message": "数据库连接成功"}
     except Exception as e:
         return {"success": False, "message": f"数据库连接失败: {type(e).__name__}: {str(e)[:300]}"}
@@ -108,16 +126,19 @@ async def save_database_config(cfg: DatabaseConfig):
     if cfg.db_type not in {"postgresql", "mysql"}:
         return {"success": False, "message": f"不支持的数据库类型: {cfg.db_type}"}
     try:
+        current = await asyncio.to_thread(read_env_file)
         updates = {
             "DB_TYPE": cfg.db_type,
             "DB_HOST": cfg.db_host,
             "DB_PORT": str(cfg.db_port or (5432 if cfg.db_type == "postgresql" else 3306)),
             "DB_USER": cfg.db_user,
-            "DB_PASSWORD": cfg.db_password or read_env_file().get("DB_PASSWORD", ""),
+            "DB_PASSWORD": cfg.db_password or current.get("DB_PASSWORD", ""),
             "DB_NAME": cfg.db_name,
         }
-        write_env_updates(updates)
-        return {"success": True, "message": "数据库配置已保存，请重启 Web 服务后生效"}
+        await asyncio.to_thread(write_env_updates, updates)
+        return {"success": True, "message": "数据库配置已保存，下一次请求将自动使用新连接"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存数据库配置失败: {str(e)[:300]}")
 

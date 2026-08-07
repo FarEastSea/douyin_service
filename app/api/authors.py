@@ -228,12 +228,13 @@ async def add_author(
     """
     try:
         # 获取 Cookie
-        cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+        current_settings = await asyncio.to_thread(settings.snapshot)
+        cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
         if not cookie:
             raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
         
         runtime_config = await get_runtime_config(db)
-        downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
         
         # 抖音请求是同步 I/O，放到线程池避免阻塞 FastAPI 事件循环导致网关超时。
         sec_uid = await asyncio.to_thread(downloader.get_sec_uid, request.share_url)
@@ -319,37 +320,31 @@ async def search_authors(
     - 搜索范围：昵称(nickname)、抖音ID(sec_uid)
     - 返回匹配的作者列表以及在完整列表中的位置索引
     """
-    # 搜索匹配的作者
-    search_query = select(Author).where(
-        (Author.nickname.ilike(f"%{q}%")) | (Author.sec_uid.ilike(f"%{q}%"))
-    ).order_by(Author.created_at.desc())
-    
-    result = await db.execute(search_query)
-    matched_authors = result.scalars().all()
-    
+    # 先对完整作者列表计算稳定位置，再在外层搜索。
+    # 这样只需一条 SQL，不再对每个命中作者单独 COUNT。
+    ranked_authors = select(
+        Author.id.label("id"),
+        Author.nickname.label("nickname"),
+        Author.sec_uid.label("sec_uid"),
+        Author.avatar_url.label("avatar_url"),
+        Author.is_subscribed.label("is_subscribed"),
+        (
+            func.row_number().over(
+                order_by=(Author.created_at.desc(), Author.id.desc())
+            ) - 1
+        ).label("position"),
+    ).subquery()
+    search_query = select(ranked_authors).where(
+        (ranked_authors.c.nickname.ilike(f"%{q}%"))
+        | (ranked_authors.c.sec_uid.ilike(f"%{q}%"))
+    ).order_by(ranked_authors.c.position)
+
+    matched_authors = (await db.execute(search_query)).mappings().all()
+
     if not matched_authors:
         return {"items": [], "message": "未找到匹配的作者"}
-    
-    # 获取每个匹配作者在完整列表中的位置
-    authors_with_position = []
-    for author in matched_authors:
-        # 计算该作者在按创建时间降序列表中的位置（从0开始）
-        count_query = select(func.count(Author.id)).where(
-            Author.created_at > author.created_at
-        )
-        count_result = await db.execute(count_query)
-        position = count_result.scalar() or 0
-        
-        authors_with_position.append({
-            "id": author.id,
-            "nickname": author.nickname,
-            "sec_uid": author.sec_uid,
-            "avatar_url": author.avatar_url,
-            "is_subscribed": author.is_subscribed,
-            "position": position  # 在列表中的位置索引
-        })
-    
-    return {"items": authors_with_position, "total": len(authors_with_position)}
+
+    return {"items": [dict(item) for item in matched_authors], "total": len(matched_authors)}
 
 
 @router.get("/", response_model=PaginatedAuthorsResponse)
@@ -376,16 +371,21 @@ async def list_authors(
     base_query = _apply_account_status_filter(base_query, account_status)
     count_query = _apply_account_status_filter(count_query, account_status)
     
-    # 获取总数
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
-    
-    # 获取分页数据
-    query = base_query.order_by(Author.created_at.desc())
+    # 当页数据与总数使用同一条窗口查询返回。
+    query = base_query.add_columns(
+        func.count(Author.id).over().label("_total")
+    ).order_by(Author.created_at.desc(), Author.id.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
-    
+
     result = await db.execute(query)
-    authors = result.scalars().all()
+    rows = result.all()
+    authors = [row[0] for row in rows]
+    if rows:
+        total = int(rows[0][1] or 0)
+    elif page > 1:
+        total = int((await db.execute(count_query)).scalar() or 0)
+    else:
+        total = 0
 
     latest_report_result = await db.execute(
         select(SubscriptionCheckReport)
@@ -411,7 +411,8 @@ async def list_authors(
         )
         history_counts = dict(history_result.all())
     runtime_config = await get_runtime_config(db)
-    global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    global_interval = int(runtime_config.get("subscription_check_interval", current_settings.DEFAULT_CHECK_INTERVAL))
     status_messages = {
         "new_works": "发现新作", "success": "暂未更新", "account_warning": "账号异常",
         "warning": "检查警告", "failed": "检查失败", "deferred": "限流后未执行",
@@ -424,7 +425,7 @@ async def list_authors(
         author.auto_update_message = status_messages.get(status, detail.get("message"))
         next_at = None
         if author.is_subscribed and author.last_auto_update_at:
-            next_at = author.last_auto_update_at + timedelta(seconds=max(author.check_interval or 0, global_interval, settings.MIN_CHECK_INTERVAL))
+            next_at = author.last_auto_update_at + timedelta(seconds=max(author.check_interval or 0, global_interval, current_settings.MIN_CHECK_INTERVAL))
         if author.is_subscribed and status == "deferred" and latest_report and latest_report.started_at:
             cycle_at = latest_report.started_at + timedelta(seconds=global_interval)
             next_at = max(next_at, cycle_at) if next_at else cycle_at
@@ -489,10 +490,11 @@ async def update_author(
         author.is_subscribed = request.is_subscribed
     
     if request.check_interval is not None:
-        if request.check_interval < settings.MIN_CHECK_INTERVAL:
+        current_settings = await asyncio.to_thread(settings.snapshot)
+        if request.check_interval < current_settings.MIN_CHECK_INTERVAL:
             raise HTTPException(
                 status_code=400,
-                detail=f"检查间隔不能小于 {settings.MIN_CHECK_INTERVAL} 秒"
+                detail=f"检查间隔不能小于 {current_settings.MIN_CHECK_INTERVAL} 秒"
             )
         author.check_interval = request.check_interval
     
@@ -513,7 +515,8 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
     if not author:
         raise HTTPException(status_code=404, detail="作者不存在")
 
-    cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
     if not cookie:
         raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
 
@@ -523,7 +526,7 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
         runtime_config = await get_runtime_config(db)
 
         def _sync():
-            downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+            downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
             return sync_author_profile(author, downloader)
 
         profile_result = await asyncio.to_thread(_sync)
@@ -556,17 +559,23 @@ async def get_author_avatar(author_id: int, db: AsyncSession = Depends(get_async
     if not author:
         raise HTTPException(status_code=404, detail="作者不存在")
 
-    cached = find_cached_author_avatar(author.id, settings.DOWNLOAD_DIR, author.avatar_url)
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    cached = await asyncio.to_thread(
+        find_cached_author_avatar,
+        author.id,
+        current_settings.DOWNLOAD_DIR,
+        author.avatar_url,
+    )
     if cached:
         return FileResponse(cached, headers={"Cache-Control": "no-cache"})
     if not author.avatar_url:
         raise HTTPException(status_code=404, detail="作者暂无头像")
 
-    cookie = redis_client.get_cookie() or settings.DOUYIN_COOKIE
+    cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
     runtime_config = await get_runtime_config(db)
 
     def _cache_avatar():
-        downloader = DouyinDownloader(cookie or "", settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        downloader = DouyinDownloader(cookie or "", current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
         return ensure_author_avatar_cached(
             author.id,
             author.avatar_url,
@@ -615,7 +624,8 @@ async def get_author_auto_update(author_id: int, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=404, detail="作者不存在")
 
     runtime_config = await get_runtime_config(db)
-    global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    global_interval = int(runtime_config.get("subscription_check_interval", current_settings.DEFAULT_CHECK_INTERVAL))
     report_result = await db.execute(
         select(SubscriptionCheckReport)
         .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
@@ -649,7 +659,7 @@ async def get_author_auto_update(author_id: int, db: AsyncSession = Depends(get_
     expected_next_at = None
     if author.is_subscribed and author.last_auto_update_at:
         expected_next_at = author.last_auto_update_at + timedelta(
-            seconds=max(author.check_interval or 0, global_interval, settings.MIN_CHECK_INTERVAL)
+            seconds=max(author.check_interval or 0, global_interval, current_settings.MIN_CHECK_INTERVAL)
         )
     if entries and entries[0]["status"] == "deferred" and entries[0]["started_at"]:
         cycle_at = datetime.fromisoformat(entries[0]["started_at"]) + timedelta(seconds=global_interval)
@@ -662,7 +672,7 @@ async def get_author_auto_update(author_id: int, db: AsyncSession = Depends(get_
         },
         "last_auto_update_at": author.last_auto_update_at.isoformat() if author.last_auto_update_at else None,
         "expected_next_auto_update_at": expected_next_at.isoformat() if expected_next_at else None,
-        "check_interval_seconds": max(author.check_interval or 0, global_interval, settings.MIN_CHECK_INTERVAL),
+        "check_interval_seconds": max(author.check_interval or 0, global_interval, current_settings.MIN_CHECK_INTERVAL),
         "latest": entries[0] if entries else None,
         "history": entries,
     }
@@ -771,13 +781,15 @@ async def download_author(
     if not author:
         raise HTTPException(status_code=404, detail="作者不存在")
 
-    if redis_client.is_author_deleting(author_id):
+    if await asyncio.to_thread(redis_client.is_author_deleting, author_id):
         raise HTTPException(status_code=409, detail="作者正在删除，请稍后刷新列表")
     
     try:
-        redis_client.append_activity_log("info", "api",
-            f"触发下载: {author.nickname}(ID:{author_id})",
-            f"sec_uid={author.sec_uid}, share_url={author.share_url}, start_index={start_index}")
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "info", "api", f"触发下载: {author.nickname}(ID:{author_id})",
+            f"sec_uid={author.sec_uid}, share_url={author.share_url}, start_index={start_index}",
+        )
     except Exception:
         pass
     
@@ -800,14 +812,16 @@ async def download_author(
 
     # 提交下载任务到 Celery 队列
     try:
-        celery_result = download_author_works.delay(author_id, start_index)
+        celery_result = await asyncio.to_thread(download_author_works.delay, author_id, start_index)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"无法提交任务到队列: {e}")
     
     try:
-        redis_client.append_activity_log("info", "api",
-            f"任务已提交到队列: {author.nickname}",
-            f"celery_task_id={celery_result.id}")
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "info", "api", f"任务已提交到队列: {author.nickname}",
+            f"celery_task_id={celery_result.id}",
+        )
     except Exception:
         pass
     
@@ -829,14 +843,15 @@ async def check_author_updates(author_id: int, db: AsyncSession = Depends(get_as
     if not author:
         raise HTTPException(status_code=404, detail="作者不存在")
 
-    if redis_client.is_author_deleting(author_id):
+    if await asyncio.to_thread(redis_client.is_author_deleting, author_id):
         raise HTTPException(status_code=409, detail="作者正在删除，请稍后刷新列表")
     
     # 触发后台检查任务（只下载新作品）
-    celery_result = download_author_works.delay(
+    celery_result = await asyncio.to_thread(
+        download_author_works.delay,
         author_id,
         start_index=1,
-        download_new_only=True
+        download_new_only=True,
     )
     
     return MessageResponse(
@@ -849,7 +864,7 @@ async def check_author_updates(author_id: int, db: AsyncSession = Depends(get_as
 @router.post("/check-all", response_model=MessageResponse)
 async def check_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
     """手动触发检查所有订阅"""
-    celery_result = check_subscriptions.delay(True)
+    celery_result = await asyncio.to_thread(check_subscriptions.delay, True)
     
     return MessageResponse(
         success=True,
@@ -865,7 +880,8 @@ async def get_subscription_reports(
 ):
     """获取最近的订阅检查报告，包含每位作者的明确结果。"""
     runtime_config = await get_runtime_config(db)
-    global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    global_interval = int(runtime_config.get("subscription_check_interval", current_settings.DEFAULT_CHECK_INTERVAL))
     result = await db.execute(
         select(SubscriptionCheckReport)
         .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())

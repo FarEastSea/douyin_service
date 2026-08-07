@@ -20,7 +20,7 @@ import traceback
 import json
 
 from app.tasks.celery_app import celery_app
-from app.models.database import get_sync_db, init_db_sync
+from app.models.database import get_sync_db
 from app.models.models import (
     Author, Work, DownloadTask, DownloadHistory, SystemConfig,
     SubscriptionCheckReport,
@@ -39,6 +39,8 @@ from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
 from app.services.avatar_cache import ensure_author_avatar_cached
+from app.services.download_task_factory import ensure_download_task_sync
+from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
 
 # 配置日志
 import os
@@ -367,8 +369,7 @@ def record_author_profile_history(db: Session, author: Author, profile_result: d
     return changes
 
 
-@celery_app.task(bind=True, name="app.tasks.download_tasks.download_single_file",
-                 max_retries=2, default_retry_delay=10)
+@celery_app.task(bind=True, name="app.tasks.download_tasks.download_single_file")
 def download_single_file(self, task_id: int):
     """
     下载单个文件的 Celery 任务
@@ -406,9 +407,6 @@ def _download_single_file_impl(self_task, task_id: int):
     """download_single_file 的实际实现"""
     redis_client.append_activity_log("info", "task",
         f"⭐ download_single_file 启动", f"task_id={task_id}")
-    # 确保数据库表存在
-    init_db_sync()
-    
     db = get_sync_db()
     try:
         # 获取任务信息
@@ -609,11 +607,10 @@ def _download_single_file_impl(self_task, task_id: int):
             )
             db.add(history)
 
-            # 更新作品下载状态
-            work.is_downloaded = True
-
-            # 更新作者统计
-            author.downloaded_works = (author.downloaded_works or 0) + 1
+            # 只有作品的全部文件任务完成后才标记作品完成；作者计数按
+            # 完整作品数重算，重试和多图下载都不会重复累加。
+            refresh_work_download_state_sync(db, work)
+            recalc_author_counts_sync(db, author)
 
             db.commit()
 
@@ -675,7 +672,6 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
         start_index: 起始作品序号
         download_new_only: 是否只下载新作品
     """
-    init_db_sync()
     db = get_sync_db()
     
     try:
@@ -757,7 +753,6 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
         
         # 更新作者信息
         if work_list:
-            author.total_works = len(work_list)
             author.last_check_time = datetime.now()
             latest_work = _select_latest_work(work_list)
             if latest_work:
@@ -810,29 +805,13 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
             
             # 创建或重用下载任务
             if work.work_type == "video":
-                existing_task = db.execute(
-                    select(DownloadTask).where(
-                        DownloadTask.work_id == work.id,
-                        DownloadTask.file_index == 0
-                    )
-                ).scalar_one_or_none()
-                
-                if existing_task:
-                    if existing_task.status in ("failed", "cancelled"):
-                        # 重用失败/取消的任务
-                        existing_task.status = "pending"
-                        existing_task.error_message = None
-                        reused_tasks.append(existing_task.id)
-                    # completed/downloading/pending/paused 状态的任务跳过
-                else:
-                    task = DownloadTask(
-                        work_id=work.id,
-                        file_index=0,
-                        status="pending"
-                    )
-                    db.add(task)
-                    db.flush()
+                task, action = ensure_download_task_sync(db, work.id, 0)
+                if action == "created":
                     created_tasks.append(task.id)
+                elif action == "reused":
+                    reused_tasks.append(task.id)
+                if action != "existing":
+                    work.is_downloaded = False
             else:
                 # 图集：每张图片一个任务
                 excluded_indices = set(work.excluded_file_indices)
@@ -840,27 +819,13 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
                     # 跳过用户单独删除的图集文件，避免重新下载
                     if img_idx in excluded_indices:
                         continue
-                    existing_task = db.execute(
-                        select(DownloadTask).where(
-                            DownloadTask.work_id == work.id,
-                            DownloadTask.file_index == img_idx
-                        )
-                    ).scalar_one_or_none()
-                    
-                    if existing_task:
-                        if existing_task.status in ("failed", "cancelled"):
-                            existing_task.status = "pending"
-                            existing_task.error_message = None
-                            reused_tasks.append(existing_task.id)
-                    else:
-                        task = DownloadTask(
-                            work_id=work.id,
-                            file_index=img_idx,
-                            status="pending"
-                        )
-                        db.add(task)
-                        db.flush()
+                    task, action = ensure_download_task_sync(db, work.id, img_idx)
+                    if action == "created":
                         created_tasks.append(task.id)
+                    elif action == "reused":
+                        reused_tasks.append(task.id)
+                    if action != "existing":
+                        work.is_downloaded = False
             
             # 本地建任务轻微节流，避免一次性写入过猛；不使用反限流请求间隔。
             time.sleep(min(float(runtime_config.get("douyin_request_delay", settings.REQUEST_DELAY)), 1.0))
@@ -869,6 +834,7 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
             db.rollback()
             return {"success": False, "deleted": True, "error": "作者正在删除"}
 
+        recalc_author_counts_sync(db, author)
         db.commit()
         
         # 触发所有下载任务（新建的 + 重用的）
@@ -927,7 +893,6 @@ def check_subscriptions(force: bool = False):
     
     定时任务，由 Celery Beat 调度执行
     """
-    init_db_sync()
     db = get_sync_db()
     report = None
     
@@ -1125,7 +1090,7 @@ def check_subscriptions(force: bool = False):
                 # 更新检查时间
                 author.last_check_time = datetime.now()
                 author.last_auto_update_at = author.last_check_time
-                author.total_works = len(work_list)
+                recalc_author_counts_sync(db, author)
                 latest_work = _select_latest_work(work_list)
                 if latest_work:
                     author.last_aweme_id = latest_work["aweme_id"]
@@ -1321,7 +1286,6 @@ def detect_stuck_tasks():
     检测卡住的下载任务：状态为 downloading 但长时间无进度更新。
     由 Celery Beat 每 5 分钟调度一次。
     """
-    init_db_sync()
     db = get_sync_db()
     try:
         tasks = db.execute(

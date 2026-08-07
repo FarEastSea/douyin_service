@@ -1,9 +1,14 @@
 import os
+import re
+from threading import RLock
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel
+
+from app.core.diagnostics import get_runtime_errors
 
 
 def _find_project_root() -> Path:
@@ -17,6 +22,8 @@ def _find_project_root() -> Path:
 
 # 项目整体迁移时该路径会随 main.py 自动变化。
 ENV_PATH = _find_project_root() / ".env"
+_LOCAL_CONFIG_GENERATION = 0
+_LOCAL_CONFIG_LOCK = RLock()
 
 
 class EnvField(BaseModel):
@@ -32,6 +39,8 @@ class EnvField(BaseModel):
 ENV_FIELDS: List[EnvField] = [
     EnvField(key="APP_NAME", label="应用名称", group="应用", default="媒体下载管理系统", help="显示与识别当前服务的名称"),
     EnvField(key="DEBUG", label="调试模式", group="应用", default="false", help="生产环境建议关闭"),
+    EnvField(key="ADMIN_TOKEN", label="管理 Token", group="安全", default="", required=True, secret=True, help="所有管理 API 的 Bearer Token；修改后当前浏览器会自动更新登录态"),
+    EnvField(key="CORS_ALLOWED_ORIGINS", label="允许的跨域来源", group="安全", default="", help="逗号分隔的完整来源，例如 https://admin.example.com；同源访问无需填写"),
     EnvField(key="DOWNLOAD_ROOT", label="下载根目录", group="下载目录", default="/downloads", required=True, help="两个平台下载文件的共同根目录"),
     EnvField(key="DOUYIN_DOWNLOAD_SUBDIR", label="抖音子目录", group="下载目录", default="douyin", required=True, help="根目录下的相对子目录"),
     EnvField(key="X_DOWNLOAD_SUBDIR", label="X 子目录", group="下载目录", default="X", required=True, help="根目录下的相对子目录"),
@@ -66,6 +75,81 @@ ENV_FIELDS: List[EnvField] = [
 ]
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
+
+
+def get_env_file_signature() -> Tuple[int, int]:
+    """返回可快速比较的配置文件签名。"""
+    try:
+        stat = ENV_PATH.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return 0, 0
+
+
+def get_local_config_generation() -> int:
+    with _LOCAL_CONFIG_LOCK:
+        return _LOCAL_CONFIG_GENERATION
+
+
+def _increment_local_config_generation() -> int:
+    global _LOCAL_CONFIG_GENERATION
+    with _LOCAL_CONFIG_LOCK:
+        _LOCAL_CONFIG_GENERATION += 1
+        return _LOCAL_CONFIG_GENERATION
+
+
+def parse_cors_origins(value: Any) -> List[str]:
+    """解析并规范化显式 CORS 来源；空值表示不开放跨域访问。"""
+    origins: List[str] = []
+    for item in str(value or "").split(","):
+        origin = item.strip().rstrip("/")
+        if not origin:
+            continue
+        if origin == "*":
+            raise ValueError("允许的跨域来源不能使用通配符 *")
+        try:
+            parsed = urlsplit(origin)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"跨域来源格式不正确：{origin}") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError(f"跨域来源必须是完整的 http/https 来源且不能包含路径：{origin}")
+        hostname = parsed.hostname.lower()
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        default_port = 443 if parsed.scheme.lower() == "https" else 80
+        if port is not None and port != default_port:
+            host = f"{host}:{port}"
+        normalized = f"{parsed.scheme.lower()}://{host}"
+        if normalized not in origins:
+            origins.append(normalized)
+    return origins
+
+
+def _validate_env_value(key: str, value: str) -> None:
+    field = FIELD_MAP[key]
+    forbidden = []
+    if "\r" in value or "\n" in value:
+        forbidden.append("换行")
+    if "$" in value:
+        forbidden.append("$")
+    if "`" in value:
+        forbidden.append("反引号")
+    if "\\" in value:
+        forbidden.append("反斜杠")
+    if forbidden:
+        raise ValueError(f"{field.label}包含不允许的字符：{'、'.join(forbidden)}")
+    if key == "ADMIN_TOKEN" and value and not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", value):
+        raise ValueError("管理 Token 只能包含英文字母、数字及 . _ ~ + / = -")
+    if key == "CORS_ALLOWED_ORIGINS":
+        parse_cors_origins(value)
 
 def _build_database_url(values: Dict[str, str]) -> Tuple[str, Dict[str, int]]:
     db_type = (values.get("DB_TYPE") or "postgresql").strip().lower()
@@ -212,6 +296,9 @@ def validate_env(values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         if redis_error:
             errors.append(redis_error)
 
+    existing_error_keys = {item.get("key") for item in errors}
+    errors.extend(item for item in get_runtime_errors() if item.get("key") not in existing_error_keys)
+
     return {
         "ready": not missing and not errors,
         "env_exists": ENV_PATH.exists(),
@@ -224,13 +311,23 @@ def validate_env(values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
 
 def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
     current = read_env_file()
+    version_client = None
+    try:
+        from app.core import redis_client as redis_runtime
+
+        version_client = redis_runtime.capture_config_version_client()
+    except Exception:
+        pass
     clean_updates = {}
     for key, value in updates.items():
         if key not in FIELD_MAP:
             continue
         if value == "********" and FIELD_MAP[key].secret and current.get(key):
             continue
-        clean_updates[key] = "" if value is None else str(value).strip()
+        raw_value = "" if value is None else str(value)
+        _validate_env_value(key, raw_value)
+        clean_value = raw_value.strip()
+        clean_updates[key] = clean_value
 
     lines = ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines() if ENV_PATH.exists() else []
     seen = set()
@@ -284,4 +381,22 @@ def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
     }
     if mismatched:
         raise OSError(f".env 写入校验失败: {', '.join(sorted(mismatched))}")
+
+    _increment_local_config_generation()
+    try:
+        from app.core import redis_client as redis_runtime
+
+        redis_runtime.bump_config_version(client=version_client)
+    except Exception:
+        # .env 是权威来源；Redis 版本只负责跨进程加速失效，失败不能回滚
+        # 已经完成且校验通过的持久化写入。
+        pass
+    try:
+        from app.core.config import settings
+
+        settings.invalidate()
+        settings.snapshot()
+    except Exception:
+        # 配置降级错误会由 WebSettings 自身登记；持久化结果仍然有效。
+        pass
     return {key: persisted[key] for key in clean_updates}

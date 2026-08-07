@@ -1,31 +1,66 @@
 #!/bin/bash
-# 抖音下载管理系统启动脚本
-# Worker 和 Beat 由 FastAPI 应用自动管理，无需手动启动
+set -euo pipefail
 
-# 进入项目目录
-cd "$(dirname "$0")"
+# 生产同构启动脚本：Gunicorn 托管单个 Uvicorn worker，Celery Worker/Beat
+# 继续由 FastAPI lifespan 自动管理。路径从脚本位置推导，不写入部署目标信息。
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/venv}"
+APP_PORT="${APP_PORT:-15000}"
+LOG_DIR="${PROJECT_DIR}/logs"
+PID_FILE="${LOG_DIR}/gunicorn.pid"
 
-# 激活虚拟环境
-source venv/bin/activate
+cd "$PROJECT_DIR"
+mkdir -p "$LOG_DIR"
 
-# 先杀掉旧进程
-echo "Stopping old processes..."
-pkill -f "celery -A app.tasks.celery_app" 2>/dev/null || true
-pkill -f "uvicorn main:app" 2>/dev/null || true
-sleep 2
+if [ -f "${VENV_DIR}/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+fi
 
-# 确保日志目录存在
-mkdir -p logs
+if ! command -v gunicorn >/dev/null 2>&1; then
+    echo "Start failed: gunicorn is not available in ${VENV_DIR}." >&2
+    exit 1
+fi
 
-# 启动 FastAPI（Worker 和 Beat 会在应用启动时自动拉起）
-echo "Starting FastAPI server..."
-uvicorn main:app --host 0.0.0.0 --port 8000 &
+if [ -f "$PID_FILE" ]; then
+    EXISTING_PID="$(tr -dc '0-9' < "$PID_FILE")"
+    if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+        echo "Service is already running (PID=${EXISTING_PID})."
+        exit 0
+    fi
+    rm -f "$PID_FILE"
+fi
 
-echo "Service started!"
-echo "Web UI: http://localhost:8000"
-echo "API Docs: http://localhost:8000/docs"
-echo "Worker & Beat are managed by the app automatically."
+GUNICORN_USER_ARGS=()
+if [ "$(id -u)" -eq 0 ] && id www >/dev/null 2>&1; then
+    GUNICORN_USER_ARGS=(--user www)
+fi
 
-# 等待所有后台进程
-wait
+echo "Starting media download service on port ${APP_PORT}..."
+nohup gunicorn main:app \
+    --bind "0.0.0.0:${APP_PORT}" \
+    --workers 1 \
+    --threads 1 \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --chdir "$PROJECT_DIR" \
+    --pid "$PID_FILE" \
+    "${GUNICORN_USER_ARGS[@]}" \
+    --access-logfile "$LOG_DIR/gunicorn-access.log" \
+    --error-logfile "$LOG_DIR/gunicorn-error.log" \
+    > "$LOG_DIR/gunicorn.log" 2>&1 &
 
+for _ in $(seq 1 20); do
+    if [ -s "$PID_FILE" ]; then
+        GUNICORN_PID="$(tr -dc '0-9' < "$PID_FILE")"
+        if [ -n "$GUNICORN_PID" ] && kill -0 "$GUNICORN_PID" 2>/dev/null; then
+            echo "Service started (PID=${GUNICORN_PID})."
+            echo "Web UI: http://127.0.0.1:${APP_PORT}"
+            echo "API Docs: http://127.0.0.1:${APP_PORT}/docs"
+            exit 0
+        fi
+    fi
+    sleep 0.5
+done
+
+echo "Start failed. Check ${LOG_DIR}/gunicorn-error.log." >&2
+exit 1
