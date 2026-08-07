@@ -13,7 +13,7 @@ from app.core.env_config import parse_cors_origins, read_env_file
 
 
 AUTH_COOKIE_NAME = "douyin_admin_media"
-_PUBLIC_PAGE_PATHS = {"/", "/docs", "/redoc", "/docs/oauth2-redirect"}
+_PUBLIC_PAGE_PATHS = {"/", "/legacy", "/docs", "/redoc", "/docs/oauth2-redirect"}
 _MEDIA_PATH_PATTERNS = (
     re.compile(r"^/api/tasks/\d+/preview$"),
     re.compile(r"^/api/authors/\d+/avatar$"),

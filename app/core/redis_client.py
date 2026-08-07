@@ -225,6 +225,7 @@ COOKIE_KEY = "douyin:cookie"  # Cookie 存储
 STATS_KEY = "douyin:stats"  # 统计数据缓存
 STATS_TTL = 60  # 统计缓存60秒
 RUNTIME_CONFIG_KEY = "douyin:runtime_config"  # 运行期配置缓存
+DOUYIN_RISK_STATE_KEY = "douyin:risk:cooldown"  # 抖音接口全局风控冷却
 
 # X/Twitter 相关键名
 X_COOKIE_KEY = "x:cookie_file"
@@ -582,6 +583,45 @@ def _deserialize_x_task_state(raw_state: Dict[str, str]) -> Optional[Dict[str, A
             result[field_name] = value
 
     return result
+
+
+def set_douyin_risk_state(error_type: str, reason: str, cooldown_seconds: int) -> Dict[str, Any]:
+    """记录跨 Web/Worker 进程共享的抖音接口冷却状态。"""
+    ttl = max(1, int(cooldown_seconds))
+    payload = {
+        "active": True,
+        "error_type": str(error_type or "argus_blocked"),
+        "reason": str(reason or "")[:500],
+        "last_seen_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    redis_client.setex(DOUYIN_RISK_STATE_KEY, ttl, json.dumps(payload, ensure_ascii=False))
+    return {**payload, "retry_after": ttl}
+
+
+def get_douyin_risk_state() -> Dict[str, Any]:
+    """返回当前风控状态及 Redis 剩余 TTL。"""
+    raw = redis_client.get(DOUYIN_RISK_STATE_KEY)
+    ttl = int(redis_client.ttl(DOUYIN_RISK_STATE_KEY)) if raw else -2
+    if not raw or ttl <= 0:
+        return {
+            "active": False, "error_type": None, "reason": None,
+            "last_seen_at": None, "retry_after": 0,
+        }
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        payload = {}
+    return {
+        "active": True,
+        "error_type": payload.get("error_type") or "argus_blocked",
+        "reason": payload.get("reason"),
+        "last_seen_at": payload.get("last_seen_at"),
+        "retry_after": ttl,
+    }
+
+
+def clear_douyin_risk_state() -> bool:
+    return bool(redis_client.delete(DOUYIN_RISK_STATE_KEY))
 
 
 def get_x_task_state(task_id: int) -> Optional[Dict[str, Any]]:

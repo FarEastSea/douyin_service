@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>媒体下载管理系统</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23fe2c55'/><path d='M50 20v40m0 0l-16-16m16 16l16-16M30 72h40' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/app.css?v=20260807">
+    <link rel="stylesheet" href="/static/css/error-notice.css?v=20260807">
+</head>
+
+<body>
+    <div class="container">
+        <aside class="app-sidebar">
+            <div class="logo sidebar-brand">
+                <div class="logo-icon">📥</div>
+                <div class="logo-copy">
+                    <div class="logo-kicker">媒体控制台</div>
+                    <h1>媒体下载管理系统</h1>
+                </div>
+            </div>
+
+            <!-- 平台标签栏 -->
+            <nav class="platform-tabs">
+                <button class="platform-tab active" data-platform="douyin" onclick="switchPlatform('douyin')">
+                    <span>抖音</span>
+                </button>
+                <button class="platform-tab" data-platform="x" onclick="switchPlatform('x')">
+                    <span style="font-weight:bold;">𝕏</span>
+                </button>
+            </nav>
+
+            <!-- 区段导航 -->
+            <nav class="sidebar-nav">
+                <button class="sub-tab active" data-sub="tasks" onclick="switchSubTab('tasks')"><span class="nav-glyph">🎬</span>下载任务</button>
+                <button class="sub-tab" data-sub="authors" onclick="switchSubTab('authors')"><span class="nav-glyph">👤</span>作者管理</button>
+                <button class="sub-tab douyin-only-nav" data-sub="updates" onclick="switchSubTab('updates')"><span class="nav-glyph">↻</span>自动更新</button>
+                <button class="sub-tab" data-sub="settings" onclick="switchSubTab('settings')"><span class="nav-glyph">⚙️</span>设置</button>
+            </nav>
+
+            <div class="sidebar-foot">
+                <div class="status-badge">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">检查中...</span>
+                </div>
+                <button class="theme-toggle" id="themeToggle" onclick="cycleTheme()" title="切换主题">🌙</button>
+            </div>
+        </aside>
+
+        <main class="app-main">
+
+        <section class="dashboard-heading" aria-labelledby="dashboardTitle">
+            <div>
+                <div class="dashboard-eyebrow"><span></span> MEDIA OPERATIONS</div>
+                <h2 id="dashboardTitle">下载运营总览</h2>
+                <p>集中管理任务、作者订阅与媒体资源</p>
+            </div>
+            <div class="dashboard-context" aria-label="服务运行状态">
+                <span class="context-pulse"></span>
+                <span>服务在线</span>
+            </div>
+        </section>
+
+        <!-- 统计卡片 -->
+        <div class="stats-grid" id="statsGrid" style="margin-bottom: 24px;">
+            <div class="stat-card"><div class="stat-value" id="statAuthors">0</div><div class="stat-label">作者数量</div></div>
+            <div class="stat-card"><div class="stat-value" id="statSubscribed">0</div><div class="stat-label">已订阅</div></div>
+            <div class="stat-card"><div class="stat-value" id="statPending">0</div><div class="stat-label">待处理</div></div>
+            <div class="stat-card"><div class="stat-value" id="statDownloading">0</div><div class="stat-label">下载中</div></div>
+            <div class="stat-card"><div class="stat-value" id="statTotal">0</div><div class="stat-label">总下载</div></div>
+        </div>
+
+        <!-- 子标签栏 -->
+        <div class="sub-tabs" id="subTabs">
+            <button class="sub-tab active" data-sub="tasks" onclick="switchSubTab('tasks')">下载任务</button>
+            <button class="sub-tab" data-sub="authors" onclick="switchSubTab('authors')">作者管理</button>
+            <button class="sub-tab douyin-only-nav" data-sub="updates" onclick="switchSubTab('updates')">自动更新</button>
+            <button class="sub-tab" data-sub="settings" onclick="switchSubTab('settings')">设置</button>
+        </div>
+
+        <!-- ==================== 抖音面板 ==================== -->
+        <div class="platform-container" data-platform="douyin">
+            <div class="two-col-grid">
+                <div class="card panel-visible" data-sub="tasks">
+                    <div class="card-header">
+                        <div class="card-title"><div class="card-icon">🎬</div>下载任务</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="secondary" onclick="refreshTasks()">刷新</button>
+                            <details class="action-menu card-action-menu" id="batchTaskMenu">
+                                <summary class="secondary">批量操作</summary>
+                                <div class="action-menu-popover">
+                                    <button class="secondary" id="btnPauseAll" onclick="pauseAllTasks()" title="暂停所有下载中和等待中的任务">⏸ 全部暂停</button>
+                                    <button class="secondary" id="btnRedispatch" onclick="redispatchPending()" title="重新分发所有待处理任务到Worker">分发待处理</button>
+                                    <button class="secondary" id="btnForceRetryAll" onclick="forceRetryAllDownloading()" title="强制重试所有卡住的下载中任务">强制重试卡住</button>
+                                    <button class="secondary" id="btnRetryAllFailed" onclick="retryAllFailed()" title="重试所有失败的任务">批量重试</button>
+                                    <button class="secondary" id="btnRefreshRetryAll" onclick="refreshRetryAllFailed()" title="重新获取所有失败任务的下载链接后重试" style="display:none;">🔄 刷新链接重试</button>
+                                    <button class="secondary danger-action" id="btnDeleteAllStatus" onclick="deleteAllByStatus()" title="删除当前筛选状态的所有任务" style="display:none;">🗑️ 全部删除</button>
+                                </div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="shareUrl" placeholder="粘贴抖音分享链接（作者主页或单个作品）..." autocomplete="off">
+                        <button onclick="startDownload()">开始下载</button>
+                    </div>
+                    <div class="tab-bar" id="dyTaskTabBar">
+                        <button class="tab active" data-status="">全部</button>
+                        <button class="tab" data-status="downloading">下载中</button>
+                        <button class="tab" data-status="paused">已暂停</button>
+                        <button class="tab" data-status="completed">已完成</button>
+                        <button class="tab" data-status="failed">失败</button>
+                    </div>
+                    <div class="task-filter-banner" id="taskAuthorFilterBanner">
+                        <div id="taskAuthorFilterText"></div>
+                        <button class="secondary" onclick="clearTaskAuthorFilter()">清除筛选</button>
+                    </div>
+                    <div class="task-list" id="taskList">
+                        <div class="empty-state"><div class="empty-state-icon">📭</div><p>暂无下载任务</p></div>
+                    </div>
+                    <div class="pagination" id="tasksPagination"></div>
+                </div>
+
+                <div class="card" data-sub="authors">
+                    <div class="card-header author-management-header">
+                        <div class="card-title"><div class="card-icon">👤</div>作者管理</div>
+                        <div class="author-filter-bar">
+                        <span style="color:var(--text-secondary);font-size:12px;">筛选</span>
+
+                        <div class="filter-select" data-filter-select data-filter-onchange="onAuthorFilterChange">
+                            <button type="button" class="filter-select-trigger" data-filter-trigger aria-haspopup="listbox" aria-expanded="false">
+                                <span data-filter-label>全部订阅状态</span>
+                                <span class="filter-select-caret">⌄</span>
+                            </button>
+                            <div class="filter-select-menu" data-filter-menu role="listbox">
+                                <button type="button" class="filter-select-option active" data-value="" data-label="全部订阅状态" data-compact-label="订阅">全部订阅状态</button>
+                                <button type="button" class="filter-select-option" data-value="true" data-label="已订阅" data-compact-label="已订阅">已订阅</button>
+                                <button type="button" class="filter-select-option" data-value="false" data-label="未订阅" data-compact-label="未订阅">未订阅</button>
+                            </div>
+                            <input type="hidden" id="authorSubscribeFilter" value="">
+                        </div>
+
+                        <div class="filter-select" data-filter-select data-filter-onchange="onAuthorFilterChange">
+                            <button type="button" class="filter-select-trigger" data-filter-trigger aria-haspopup="listbox" aria-expanded="false">
+                                <span data-filter-label>全部账号状态</span>
+                                <span class="filter-select-caret">⌄</span>
+                            </button>
+                            <div class="filter-select-menu" data-filter-menu role="listbox">
+                                <button type="button" class="filter-select-option active" data-value="all" data-label="全部账号状态" data-compact-label="账号">全部账号状态</button>
+                                <button type="button" class="filter-select-option" data-value="abnormal" data-label="仅异常账号" data-compact-label="异常">仅异常账号</button>
+                                <button type="button" class="filter-select-option" data-value="normal" data-label="仅正常账号" data-compact-label="正常">仅正常账号</button>
+                                <button type="button" class="filter-select-option" data-value="banned" data-label="已封号/禁言" data-compact-label="封禁">已封号/禁言</button>
+                                <button type="button" class="filter-select-option" data-value="deleted" data-label="已销号" data-compact-label="销号">已销号</button>
+                                <button type="button" class="filter-select-option" data-value="restricted" data-label="不可访问" data-compact-label="受限">不可访问</button>
+                                <button type="button" class="filter-select-option" data-value="unavailable" data-label="状态异常" data-compact-label="异常">状态异常</button>
+                            </div>
+                            <input type="hidden" id="authorStatusFilter" value="all">
+                        </div>
+                        </div>
+                        <button class="secondary author-check-update" onclick="checkAllSubscriptions()">检查更新</button>
+                    </div>
+                    <div class="input-group search-input-group">
+                        <input type="text" id="authorUrl" placeholder="添加作者（链接）或搜索作者（昵称/ID）..." oninput="handleAuthorInput(this.value)" autocomplete="off">
+                        <button onclick="handleAuthorAction()">添加/搜索</button>
+                        <div class="search-results" id="authorSearchResults" style="display:none;"></div>
+                    </div>
+                    <div class="author-list" id="authorList">
+                        <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无作者</p></div>
+                    </div>
+                    <div class="pagination" id="authorsPagination"></div>
+                </div>
+            </div>
+
+            <div class="card auto-update-page" data-sub="updates">
+                <div class="card-header">
+                    <div class="card-title"><div class="card-icon">↻</div>自动更新中心</div>
+                    <div style="display:flex;gap:8px;"><button class="secondary" onclick="fetchSubscriptionReports()">刷新</button><button onclick="checkAllSubscriptions()">立即检查全部</button></div>
+                </div>
+                <div class="auto-update-metrics">
+                    <div><strong id="autoMetricSubscribed">0</strong><span>订阅作者</span></div>
+                    <div><strong id="autoMetricChecked">0</strong><span>本轮已检查</span></div>
+                    <div><strong id="autoMetricSuccess">0</strong><span>检查成功</span></div>
+                    <div><strong id="autoMetricNewWorks">0</strong><span>发现新作</span></div>
+                    <div><strong id="autoMetricWarnings">0</strong><span>警告/失败</span></div>
+                    <div><strong id="autoMetricRemaining">0</strong><span>等待续检</span></div>
+                </div>
+                <div class="auto-update-cycle" id="autoUpdateCycle">尚无自动更新周期记录</div>
+                <div class="subscription-report-body auto-update-report-list" id="subscriptionReportBody"></div>
+            </div>
+
+            <div class="card" data-sub="settings">
+                <div class="card-header">
+                    <div class="card-title"><div class="card-icon">⚙️</div>系统设置中心</div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span id="cookieStatus" class="status-tag status-pending">未配置</span>
+                        <button class="secondary settings-toggle" id="dySettingsToggle" onclick="toggleSettings('douyin')" title="展开/折叠设置">▶ 展开设置</button>
+                    </div>
+                </div>
+                <div class="settings-body collapsed" id="dySettingsBody">
+                    <!-- 设置子标签 -->
+                    <div class="settings-sub-tabs" id="dySettingsSubTabs">
+                        <button class="settings-sub-tab active" data-stab="all" onclick="switchSettingsTab('douyin','all')">全部配置</button>
+                        <button class="settings-sub-tab" data-stab="account" onclick="switchSettingsTab('douyin','account')">抖音与订阅</button>
+                        <button class="settings-sub-tab" data-stab="download" onclick="switchSettingsTab('douyin','download')">下载与任务</button>
+                        <button class="settings-sub-tab" data-stab="database" onclick="switchSettingsTab('douyin','database')">数据连接</button>
+                        <button class="settings-sub-tab" data-stab="service" onclick="switchSettingsTab('douyin','service')">服务进程</button>
+                        <button class="settings-sub-tab" data-stab="logs" onclick="switchSettingsTab('douyin','logs')">活动日志</button>
+                        <button class="settings-sub-tab" data-stab="diag" onclick="switchSettingsTab('douyin','diag')">诊断工具</button>
+                        <button class="settings-sub-tab" data-stab="about" onclick="openAboutTab()">关于</button>
+                    </div>
+                    <div class="settings-tab-panel" data-stab="all" id="dySettingsAll">
+                        <div class="settings-overview">
+                            <div>
+                                <h3>统一配置中心</h3>
+                                <p>所有生产配置按功能域集中管理。带“立即生效”的项目会同步到运行时，其余项目保存后需重启相关服务。</p>
+                            </div>
+                            <span class="status-tag status-pending" id="completeConfigStatus">读取中</span>
+                        </div>
+                        <div class="config-domain-nav" id="completeConfigNav"></div>
+                        <div class="complete-config-grid" id="completeConfigGrid">
+                            <div class="empty-state"><p>正在读取完整配置...</p></div>
+                        </div>
+                        <div class="settings-actions complete-config-actions">
+                            <button class="secondary" onclick="loadCompleteConfig()">放弃修改</button>
+                            <button onclick="saveCompleteConfig()">保存全部配置</button>
+                        </div>
+                        <p class="form-hint">敏感字段以 ******** 显示，保留该值不会覆盖现有密钥。数据库与 Redis 可在“数据连接”页单独测试。</p>
+                    </div>
+
+                    <!-- 账号与风控面板 -->
+                    <div class="settings-tab-panel" data-stab="account" id="dySettingsAccount" style="display:none;">
+                        <div class="settings-grid">
+                            <div class="settings-section full-width">
+                                <h4>抖音 Cookie</h4>
+                                <div class="input-group">
+                                    <textarea id="cookieInput" placeholder="粘贴抖音 Cookie..." style="min-height:80px;resize:vertical;" autocomplete="off"></textarea>
+                                    <button onclick="saveCookie()" style="align-self:flex-start;">保存</button>
+                                </div>
+                                <p class="form-hint">在浏览器登录抖音后，从开发者工具 Network 请求头中复制 Cookie。保存后会写入 Redis 和数据库。</p>
+                            </div>
+
+                            <div class="settings-section full-width">
+                                <h4>自动检查与限流保护</h4>
+                                <div class="settings-form-grid">
+                                    <div class="form-item full-width">
+                                        <label>自动检查订阅作者</label>
+                                        <div class="inline-switch">
+                                            <span style="color:var(--text-secondary);font-size:13px;">关闭后 Beat 仍运行，但不会自动拉取抖音作者作品。</span>
+                                            <label class="toggle-switch" for="autoCheckEnabled" title="切换自动检查订阅作者">
+                                                <input type="checkbox" id="autoCheckEnabled" autocomplete="off">
+                                                <span class="toggle-track" aria-hidden="true">
+                                                    <span class="toggle-thumb"></span>
+                                                </span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="form-item">
+                                        <label>订阅检查间隔（小时）</label>
+                                        <input type="number" id="subscriptionCheckHours" min="1" max="168" step="1" autocomplete="off">
+                                    </div>
+                                    <div class="form-item">
+                                        <label>分页请求间隔（秒）</label>
+                                        <input type="number" id="douyinRequestDelay" min="1" max="120" step="0.5" autocomplete="off">
+                                    </div>
+                                    <div class="form-item">
+                                        <label>作者之间间隔（秒）</label>
+                                        <input type="number" id="authorCheckDelay" min="5" max="600" step="1" autocomplete="off">
+                                    </div>
+                                </div>
+                                <div class="settings-actions">
+                                    <button class="secondary" onclick="loadRuntimeConfig()">恢复当前值</button>
+                                    <button onclick="saveRuntimeConfig()">保存风控设置</button>
+                                </div>
+                                <p class="form-hint">默认订阅检查间隔为 6 小时。已有作者的 1 小时间隔会被全局间隔兜底，不需要迁移数据。</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 下载参数面板 -->
+                    <div class="settings-tab-panel" data-stab="download" id="dySettingsDownload" style="display:none;">
+                        <div class="settings-section">
+                            <h4>下载与重试</h4>
+                            <div class="settings-form-grid">
+                                <div class="form-item">
+                                    <label>请求超时（秒）</label>
+                                    <input type="number" id="downloadTimeout" min="5" max="300" step="1" autocomplete="off">
+                                </div>
+                                <div class="form-item">
+                                    <label>重试次数</label>
+                                    <input type="number" id="downloadRetryCount" min="0" max="10" step="1" autocomplete="off">
+                                </div>
+                                <div class="form-item">
+                                    <label>重试延迟（秒）</label>
+                                    <input type="number" id="downloadRetryDelay" min="0" max="300" step="1" autocomplete="off">
+                                </div>
+                                <div class="form-item">
+                                    <label>卡住任务超时（秒）</label>
+                                    <input type="number" id="stuckTaskTimeout" min="300" max="86400" step="60" autocomplete="off">
+                                </div>
+                            </div>
+                            <div class="settings-actions">
+                                <button class="secondary" onclick="loadRuntimeConfig()">恢复当前值</button>
+                                <button onclick="saveRuntimeConfig()">保存下载参数</button>
+                            </div>
+                            <p class="form-hint">这些参数会被新创建的下载器和卡住任务检测使用；正在执行中的请求不会被中途打断。</p>
+                        </div>
+                    </div>
+
+                    <!-- 数据库配置面板 -->
+                    <div class="settings-tab-panel" data-stab="database" id="dySettingsDatabase" style="display:none;">
+                        <div class="db-config-section" style="margin-top:0;padding-top:0;border-top:none;">
+                            <h3><span style="font-size:18px;">🗄️</span> 数据库配置</h3>
+                            <div class="db-form-grid">
+                                <div class="form-item full-width">
+                                    <label>数据库类型</label>
+                                    <div class="filter-select filter-select--full" data-filter-select data-filter-onchange="onDbTypeChange">
+                                        <button type="button" class="filter-select-trigger" data-filter-trigger aria-haspopup="listbox" aria-expanded="false">
+                                            <span data-filter-label>PostgreSQL</span>
+                                            <span class="filter-select-caret">⌄</span>
+                                        </button>
+                                        <div class="filter-select-menu" data-filter-menu role="listbox">
+                                            <button type="button" class="filter-select-option active" data-value="postgresql" data-label="PostgreSQL">PostgreSQL</button>
+                                            <button type="button" class="filter-select-option" data-value="mysql" data-label="MySQL / MariaDB">MySQL / MariaDB</button>
+                                        </div>
+                                        <input type="hidden" id="dbType" value="postgresql">
+                                    </div>
+                                </div>
+                                <div class="form-item" id="dbHostWrap">
+                                    <label>主机地址</label>
+                                    <input type="text" id="dbHost" placeholder="localhost" autocomplete="off">
+                                </div>
+                                <div class="form-item" id="dbPortWrap">
+                                    <label>端口</label>
+                                    <input type="text" id="dbPort" placeholder="5432" autocomplete="off">
+                                </div>
+                                <div class="form-item" id="dbUserWrap">
+                                    <label>用户名</label>
+                                    <input type="text" id="dbUser" placeholder="postgres" autocomplete="off">
+                                </div>
+                                <div class="form-item" id="dbPasswordWrap">
+                                    <label>密码</label>
+                                    <input type="password" id="dbPassword" placeholder="数据库密码" autocomplete="new-password">
+                                </div>
+                                <div class="form-item full-width" id="dbNameWrap">
+                                    <label>数据库名</label>
+                                    <input type="text" id="dbName" placeholder="douyin_service" autocomplete="off">
+                                </div>
+                            </div>
+                            <div class="db-actions">
+                                <button class="secondary" onclick="testDbConnection()">测试连接</button>
+                                <button onclick="saveDbConfig()">保存配置</button>
+                            </div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">可先使用“测试连接”校验配置；保存成功后，下一次请求自动切换到新数据库连接。</p>
+                        </div>
+                    </div>
+
+                    <!-- 服务管理面板 -->
+                    <div class="settings-tab-panel" data-stab="service" id="dySettingsService" style="display:none;">
+                        <div style="display:grid;gap:20px;">
+                            <!-- 并发下载数 -->
+                            <div>
+                                <h4 style="font-size:14px;margin-bottom:12px;color:var(--text-secondary);">📥 最大同时下载数</h4>
+                                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                                    <input type="range" id="concurrencySlider" min="1" max="20" value="3" style="flex:1;min-width:120px;"
+                                           oninput="document.getElementById('concurrencyValue').textContent=this.value">
+                                    <span id="concurrencyValue" style="font-size:20px;font-weight:600;min-width:30px;text-align:center;">3</span>
+                                    <button onclick="saveConcurrency()" style="padding:6px 16px;font-size:13px;">应用</button>
+                                </div>
+                                <p style="font-size:12px;color:var(--text-secondary);margin-top:6px;">修改后会自动重启 Worker 生效，范围 1～20</p>
+                            </div>
+
+                            <!-- Worker 控制 -->
+                            <div>
+                                <h4 style="font-size:14px;margin-bottom:12px;color:var(--text-secondary);">⚡ Worker（执行下载任务）</h4>
+                                <div style="display:flex;align-items:center;gap:12px;">
+                                    <span id="workerStatusDot" style="width:10px;height:10px;border-radius:50%;background:var(--text-secondary);display:inline-block;"></span>
+                                    <span id="workerStatusText" style="font-size:14px;">检测中...</span>
+                                    <span id="workerPidText" style="font-size:12px;color:var(--text-secondary);"></span>
+                                    <div style="margin-left:auto;display:flex;gap:8px;">
+                                        <button class="secondary" id="workerStartBtn" onclick="controlProcess('worker','start')" style="padding:6px 14px;font-size:13px;">启动</button>
+                                        <button class="secondary" id="workerStopBtn" onclick="controlProcess('worker','stop')" style="padding:6px 14px;font-size:13px;">停止</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Beat 控制 -->
+                            <div>
+                                <h4 style="font-size:14px;margin-bottom:12px;color:var(--text-secondary);">⏰ Beat（定时任务调度）</h4>
+                                <div style="display:flex;align-items:center;gap:12px;">
+                                    <span id="beatStatusDot" style="width:10px;height:10px;border-radius:50%;background:var(--text-secondary);display:inline-block;"></span>
+                                    <span id="beatStatusText" style="font-size:14px;">检测中...</span>
+                                    <span id="beatPidText" style="font-size:12px;color:var(--text-secondary);"></span>
+                                    <div style="margin-left:auto;display:flex;gap:8px;">
+                                        <button class="secondary" id="beatStartBtn" onclick="controlProcess('beat','start')" style="padding:6px 14px;font-size:13px;">启动</button>
+                                        <button class="secondary" id="beatStopBtn" onclick="controlProcess('beat','stop')" style="padding:6px 14px;font-size:13px;">停止</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+                                Worker 负责执行下载任务，Beat 负责定时检查订阅和清理卡住任务。<br>
+                                服务启动时会自动拉起 Worker 和 Beat，无需依赖宝塔面板计划任务。
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- 活动日志面板 -->
+                    <div class="settings-tab-panel" data-stab="logs" id="dySettingsLogs" style="display:none;">
+                        <div class="log-viewer-header">
+                            <h3><span style="font-size:18px;">📋</span> 活动日志</h3>
+                            <div class="log-actions">
+                                <div class="log-toggle" onclick="document.getElementById('logEnabled').checked=!document.getElementById('logEnabled').checked;toggleLogViewer();">
+                                    <span style="font-size:13px;color:var(--text-secondary);cursor:pointer;user-select:none;">实时刷新</span>
+                                    <input type="checkbox" id="logEnabled" style="display:none;">
+                                    <div class="switch-track">
+                                        <div class="switch-thumb"></div>
+                                    </div>
+                                </div>
+                                <button class="secondary" onclick="copyLogs()" style="padding:4px 10px;font-size:12px;" title="复制当前日志">📋 复制</button>
+                                <button class="secondary" onclick="clearLogs()" style="padding:4px 10px;font-size:12px;">清空</button>
+                                <button class="secondary" onclick="fetchLogs()" style="padding:4px 10px;font-size:12px;">刷新</button>
+                            </div>
+                        </div>
+                        <div class="log-filter-bar">
+                            <label class="level-debug"><input type="checkbox" data-log-level="debug" onchange="onLogFilterChange()"> DEBUG</label>
+                            <label class="level-info"><input type="checkbox" data-log-level="info" checked onchange="onLogFilterChange()"> INFO</label>
+                            <label class="level-warning"><input type="checkbox" data-log-level="warning" checked onchange="onLogFilterChange()"> WARNING</label>
+                            <label class="level-error"><input type="checkbox" data-log-level="error" checked onchange="onLogFilterChange()"> 错误</label>
+                        </div>
+                        <div class="log-list" id="logList">
+                            <div style="color:var(--text-secondary);text-align:center;padding:24px;">点击「刷新」或开启「实时刷新」查看日志</div>
+                        </div>
+                    </div>
+
+                    <!-- 诊断面板 -->
+                    <div class="settings-tab-panel" data-stab="diag" id="dySettingsDiag" style="display:none;">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+                            <h3 style="margin:0;"><span style="font-size:18px;">🔧</span> Celery 任务链诊断</h3>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="secondary" onclick="runCeleryTest()" id="celeryTestBtn" style="padding:6px 14px;font-size:13px;">🧪 运行测试任务</button>
+                                <button class="secondary" onclick="runCeleryDebug()" id="celeryDebugBtn" style="padding:6px 14px;font-size:13px;">🔍 深度诊断</button>
+                                <button class="secondary" onclick="purgeOldQueues()" style="padding:6px 14px;font-size:13px;">🗑️ 清除旧队列</button>
+                                <button class="secondary" onclick="viewWorkerLog()" style="padding:6px 14px;font-size:13px;">📄 Worker日志</button>
+                            </div>
+                        </div>
+                        <div id="diagResult" style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:16px;max-height:500px;overflow-y:auto;">
+                            <p style="color:var(--text-secondary);text-align:center;margin:0;">点击上方按钮开始诊断</p>
+                        </div>
+                    </div>
+
+                    <!-- 关于 / 版本更新面板 -->
+                    <div class="settings-tab-panel" data-stab="about" id="dySettingsAbout" style="display:none;">
+                        <div class="settings-section full-width">
+                            <h4>版本与更新</h4>
+                            <div id="updateVersionInfo" class="update-info-box">
+                                <p class="form-hint" style="margin:0;">正在读取当前版本...</p>
+                            </div>
+                            <div class="settings-actions">
+                                <button class="secondary" id="checkUpdateBtn" onclick="checkForUpdate()">检查更新</button>
+                                <button id="applyUpdateBtn" onclick="applyUpdate()" style="display:none;">⬇ 更新到最新</button>
+                                <button class="secondary" id="restartServiceBtn" onclick="restartWebService()">🔄 重启 Web 服务</button>
+                                <button class="secondary" id="diagnoseUpdateBtn" onclick="diagnoseUpdate()">🩺 诊断</button>
+                            </div>
+                            <div id="updateResult" class="update-result" style="display:none;"></div>
+                            <p class="form-hint">「检查更新」通过 GitHub API 比较版本；「更新」以快进方式拉取远程最新代码（纯 Python，无需服务器 shell 权限，适配宝塔安全限制）并自动重启后台 Worker/Beat。前端改动刷新页面即可生效；涉及 Web/接口代码的更新，点击「重启 Web 服务」触发 gunicorn 热重载即可完全生效（如配置了 --preload 则需在宝塔面板重启本项目）。更新需服务器已安装 <code>dulwich</code> 且运行用户对项目目录有写权限。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== X 平台面板 ==================== -->
+        <div class="platform-container" data-platform="x" style="display:none;">
+            <div class="two-col-grid">
+                <div class="card x-panel-card panel-visible" data-sub="tasks">
+                    <div class="card-header">
+                        <div class="card-title"><div class="card-icon x-brand-icon">𝕏</div>下载任务</div>
+                        <button class="secondary" onclick="refreshXTasks()">刷新</button>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="xProfileUrl" placeholder="输入 X/Twitter 用户主页链接或用户名..." autocomplete="off">
+                        <button onclick="startXDownload()">开始下载</button>
+                    </div>
+                    <div class="tab-bar" id="xTabBar">
+                        <button class="tab active" data-x-status="">全部</button>
+                        <button class="tab" data-x-status="downloading">下载中</button>
+                        <button class="tab" data-x-status="completed">已完成</button>
+                        <button class="tab" data-x-status="failed">失败</button>
+                    </div>
+                    <div class="task-list" id="xTaskList">
+                        <div class="empty-state"><div class="empty-state-icon">🐦</div><p>暂无 X 下载任务</p></div>
+                    </div>
+                    <div class="pagination" id="xTasksPagination"></div>
+                </div>
+
+                <div class="card x-panel-card" data-sub="authors">
+                    <div class="card-header">
+                        <div class="card-title"><div class="card-icon x-brand-icon">𝕏</div>用户管理</div>
+                        <button class="secondary" onclick="checkAllXSubscriptions()">检查更新</button>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="xAuthorUrl" placeholder="输入 X 用户主页链接或用户名..." autocomplete="off">
+                        <button onclick="addXAuthor()">添加用户</button>
+                    </div>
+                    <div class="author-list" id="xAuthorList">
+                        <div class="empty-state"><div class="empty-state-icon">👥</div><p>暂无 X 用户</p></div>
+                    </div>
+                    <div class="pagination" id="xAuthorsPagination"></div>
+                </div>
+            </div>
+
+            <div class="card x-panel-card" data-sub="settings">
+                <div class="card-header">
+                    <div class="card-title"><div class="card-icon x-brand-icon">𝕏</div>设置</div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span id="xCookieStatus" class="status-tag status-pending">未配置</span>
+                        <button class="secondary settings-toggle" id="xSettingsToggle" onclick="toggleSettings('x')" title="展开/折叠设置">▶ 展开设置</button>
+                    </div>
+                </div>
+                <div class="settings-body collapsed x-settings-shell" id="xSettingsBody">
+                    <h4 style="font-size:14px;margin-bottom:12px;color:var(--text-secondary);">X Cookie</h4>
+                    <div class="input-group">
+                        <textarea id="xCookieInput" placeholder="粘贴 X/Twitter Cookie 内容..." style="min-height:80px;resize:vertical;" autocomplete="off"></textarea>
+                        <button onclick="saveXCookie()" style="align-self:flex-start;">保存</button>
+                    </div>
+                    <p class="x-settings-note">提示：在浏览器中登录 x.com，按 F12 打开开发者工具，在 Network 标签中找到任意请求，复制请求头中的 Cookie 值粘贴到上方。</p>
+                    <div class="settings-actions">
+                        <button class="secondary" onclick="switchPlatform('douyin');switchSubTab('settings');switchSettingsTab('douyin','all');">打开统一配置中心</button>
+                    </div>
+                    <p class="form-hint">X 下载目录、引擎、Cookie 文件及任务留存策略均可在统一配置中心调整。</p>
+                </div>
+            </div>
+        </div>
+        </main>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <div class="preview-modal" id="mediaPreviewModal" aria-hidden="true" onclick="onPreviewBackdropClick(event)">
+        <div class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="mediaPreviewTitle">
+            <div class="preview-header">
+                <div class="preview-title">
+                    <strong id="mediaPreviewTitle">媒体预览</strong>
+                    <span id="mediaPreviewMeta"></span>
+                </div>
+                <button class="secondary preview-close" onclick="closeMediaPreview()" title="关闭预览">×</button>
+            </div>
+            <div class="preview-body">
+                <video id="mediaPreviewPlayer" class="preview-video" controls preload="metadata" style="display:none;"></video>
+                <img id="imagePreviewPlayer" class="preview-image" alt="图片预览" loading="lazy" referrerpolicy="no-referrer" style="display:none;">
+                <div class="preview-gallery-controls" id="previewGalleryControls">
+                    <button class="secondary" id="previewPrevBtn" onclick="changePreviewImage(-1)">上一张</button>
+                    <span class="preview-counter" id="previewCounter"></span>
+                    <button class="secondary" id="previewNextBtn" onclick="changePreviewImage(1)">下一张</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="preview-modal" id="authorWorksModal" aria-hidden="true" onclick="onAuthorWorksBackdropClick(event)">
+        <div class="preview-dialog author-works-dialog" role="dialog" aria-modal="true" aria-labelledby="authorWorksTitle">
+            <div class="preview-header">
+                <div class="preview-title">
+                    <strong id="authorWorksTitle">作品管理</strong>
+                    <span id="authorWorksMeta"></span>
+                </div>
+                <button class="secondary preview-close" onclick="closeAuthorWorksPreview()" title="关闭作品管理">×</button>
+            </div>
+            <div class="preview-body author-works-body">
+                <div class="author-works-toolbar">
+                    <div class="author-works-summary" id="authorWorksSummary">正在加载作品...</div>
+                    <div class="author-works-tools">
+                        <label class="works-select-all">
+                            <input type="checkbox" id="worksSelectAll" onchange="toggleSelectAllWorks(this.checked)">
+                            <span>全选</span>
+                        </label>
+                        <span class="works-selected-count" id="worksSelectedCount">已选 0</span>
+                        <button class="secondary works-batch-delete" id="worksBatchDeleteBtn" onclick="batchDeleteWorks()" disabled>批量删除</button>
+                        <button class="secondary" id="authorWorksTasksBtn" onclick="viewCurrentAuthorTasks()" style="display:none;">查看关联任务</button>
+                    </div>
+                </div>
+                <div class="author-works-grid" id="authorWorksGrid"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="preview-modal" id="authorHistoryModal" aria-hidden="true" onclick="if(event.target.id==='authorHistoryModal') closeAuthorHistory()">
+        <div class="preview-dialog author-history-dialog" role="dialog" aria-modal="true">
+            <div class="preview-header"><div class="preview-title"><strong id="authorHistoryTitle">作者资料历史</strong><span id="authorHistoryMeta"></span></div><button class="secondary preview-close" onclick="closeAuthorHistory()">×</button></div>
+            <div class="preview-body" id="authorHistoryBody"></div>
+        </div>
+    </div>
+
+    <div class="preview-modal" id="authorAutoUpdateModal" aria-hidden="true" onclick="if(event.target.id==='authorAutoUpdateModal') closeAuthorAutoUpdate()">
+        <div class="preview-dialog author-auto-dialog" role="dialog" aria-modal="true">
+            <div class="preview-header"><div class="preview-title"><strong id="authorAutoUpdateTitle">作者自动更新</strong><span id="authorAutoUpdateMeta"></span></div><button class="secondary preview-close" onclick="closeAuthorAutoUpdate()">×</button></div>
+            <div class="preview-body" id="authorAutoUpdateBody"></div>
+        </div>
+    </div>
+
+    <!-- 底部平台标签栏（移动端） -->
+    <nav class="mobile-tab-bar">
+        <button class="mobile-tab active" data-platform="douyin" onclick="switchPlatform('douyin')">
+            <span class="tab-icon">抖</span>
+            <span class="tab-label">抖音</span>
+        </button>
+        <button class="mobile-tab" data-platform="x" onclick="switchPlatform('x')">
+            <span class="tab-icon">X</span>
+            <span class="tab-label">X</span>
+        </button>
+    </nav>
+
+    <script src="/static/js/error-notice.js?v=20260807"></script>
+    <script src="/static/js/app.js?v=20260807"></script>
+</body>
+
+</html>

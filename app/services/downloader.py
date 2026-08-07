@@ -25,6 +25,12 @@ from app.core.config import settings
 from app.core import redis_client
 from app.core.network_security import get_douyin_response, validate_douyin_url
 from app.core.runtime_config import get_cached_runtime_config
+from app.services.douyin_errors import (
+    DouyinCooldownError,
+    DouyinRequestError,
+    classify_douyin_error,
+    parse_douyin_json_response,
+)
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -325,6 +331,9 @@ class DouyinDownloader:
         self.download_timeout = int(self.runtime_config.get("download_timeout", settings.DOWNLOAD_TIMEOUT))
         self.download_retry_count = int(self.runtime_config.get("download_retry_count", settings.DOWNLOAD_RETRY_COUNT))
         self.request_delay = float(self.runtime_config.get("douyin_request_delay", settings.REQUEST_DELAY))
+        self.risk_cooldown_seconds = int(self.runtime_config.get(
+            "douyin_risk_cooldown_seconds", settings.DOUYIN_RISK_COOLDOWN_SECONDS
+        ))
         self.filepath = filepath or settings.DOWNLOAD_DIR
         self.session = requests.Session()
         self.session.headers.update(self.headers)
@@ -334,6 +343,64 @@ class DouyinDownloader:
         )
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
+
+    def _check_risk_gate(self) -> None:
+        """冷却期间不访问抖音业务接口，避免重复扩大风控。"""
+        try:
+            state = redis_client.get_douyin_risk_state()
+        except Exception:
+            return
+        if state.get("active"):
+            raise DouyinCooldownError(
+                retry_after=int(state.get("retry_after") or 1),
+                reason=state.get("error_type") or "argus_blocked",
+            )
+
+    def _record_risk_error(self, exc: DouyinRequestError) -> None:
+        if exc.code not in {"argus_blocked", "rate_limited"}:
+            return
+        try:
+            redis_client.set_douyin_risk_state(
+                exc.code,
+                exc.detail or exc.user_message,
+                self.risk_cooldown_seconds,
+            )
+            exc.retry_after = self.risk_cooldown_seconds
+        except Exception as redis_exc:
+            logger.warning("写入抖音风控冷却状态失败: %s", redis_exc)
+
+    def _parse_json_response(self, response, *, expected_keys=()) -> Dict[str, Any]:
+        try:
+            return parse_douyin_json_response(response, expected_keys=expected_keys)
+        except DouyinRequestError as exc:
+            self._record_risk_error(exc)
+            logger.warning(
+                "抖音接口请求被分类为 %s: HTTP=%s detail=%s",
+                exc.code, exc.status_code, exc.detail[:300],
+            )
+            raise
+
+    def _check_response_error(self, response) -> None:
+        status_code = getattr(response, "status_code", None)
+        error = classify_douyin_error(
+            status_code=status_code,
+            body=getattr(response, "text", ""),
+        )
+        # 分享页本身可能包含安全组件相关脚本文字；HTTP 成功时只接受精确
+        # Argus 判定，其他分类必须由真实错误状态码触发。
+        if error and (error.code == "argus_blocked" or (status_code or 0) >= 400):
+            self._record_risk_error(error)
+            raise error
+
+    def _get_douyin_response(self, url: str):
+        """统一执行抖音业务请求，并将网络异常转成结构化错误。"""
+        self._check_risk_gate()
+        try:
+            return get_douyin_response(self.session, url, timeout=self.download_timeout)
+        except DouyinRequestError:
+            raise
+        except requests.RequestException as exc:
+            raise DouyinRequestError("network_error", detail=str(exc)) from exc
 
     def _normalize_work_item(self, item: Dict[str, Any], fallback_sec_uid: str = '') -> Dict[str, Any]:
         author = item.get('author') or {}
@@ -380,11 +447,8 @@ class DouyinDownloader:
             raise ValueError("无效的分享链接")
 
         raw_url = url_match.group(1).strip()
-        res, redirect_url = get_douyin_response(
-            self.session,
-            raw_url,
-            timeout=self.download_timeout,
-        )
+        res, redirect_url = self._get_douyin_response(raw_url)
+        self._check_response_error(res)
 
         if re.search(r'/video/(\d+)', redirect_url) or re.search(r'/note/(\d+)', redirect_url):
             return {"type": "work", "redirect_url": redirect_url}
@@ -411,14 +475,8 @@ class DouyinDownloader:
         aweme_id = aweme_id_match.group(1)
         api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}&device_platform=webapp&aid=6383"
 
-        res, _ = get_douyin_response(self.session, api_url, timeout=self.download_timeout)
-        if res.status_code != 200:
-            raise ValueError(f"抖音 API 请求失败 (HTTP {res.status_code})，请检查 Cookie 是否有效")
-        try:
-            data = res.json()
-        except (json.JSONDecodeError, ValueError):
-            body_preview = res.text[:200] if res.text else '(空响应)'
-            raise ValueError(f"抖音 API 返回了非 JSON 内容，可能是 Cookie 过期或被限流。响应内容: {body_preview}")
+        res, _ = self._get_douyin_response(api_url)
+        data = self._parse_json_response(res, expected_keys=("aweme_detail",))
         item = data.get('aweme_detail')
         if not item:
             raise ValueError("获取作品详情失败，可能作品已被删除或链接无效")
@@ -457,11 +515,8 @@ class DouyinDownloader:
         url = url_match.group(1).strip()
         
         # 逐跳校验重定向，禁止离开受信任抖音域名或解析到内网地址。
-        res, redirects_url = get_douyin_response(
-            self.session,
-            url,
-            timeout=self.download_timeout,
-        )
+        res, redirects_url = self._get_douyin_response(url)
+        self._check_response_error(res)
         
         # 从URL中提取 sec_uid
         sec_uid_match = re.search(r'user/([^/?]+)', redirects_url)
@@ -508,6 +563,8 @@ class DouyinDownloader:
         ) -> Dict[str, Any]:
             try:
                 data = self.get_work_list(sec_uid, count=3)
+            except DouyinRequestError:
+                raise
             except Exception as fallback_exc:
                 if account_status_detail:
                     account_status_detail = f"{account_status_detail}; works_fallback={fallback_exc}"
@@ -557,25 +614,8 @@ class DouyinDownloader:
             )
         
         try:
-            res, _ = get_douyin_response(self.session, url, timeout=self.download_timeout)
-            if res.status_code != 200:
-                body_preview = res.text[:200] if res.text else '(空响应)'
-                status_code, status_label = _classify_author_account_status(body_preview, res.status_code)
-                if status_code == "unavailable":
-                    status_code, status_label = "transient_error", "资料获取失败"
-                logger.warning(f"获取作者信息失败 HTTP {res.status_code}, sec_uid={sec_uid}, detail={body_preview}")
-                return _fallback_to_work_list(status_code, status_label, body_preview)
-
-            if not res.text.strip():
-                logger.warning("获取作者信息返回空响应, sec_uid=%s", sec_uid)
-                return _fallback_to_work_list('transient_error', '资料获取失败', '抖音资料接口返回空响应')
-
-            try:
-                data = res.json()
-            except (json.JSONDecodeError, ValueError):
-                body_preview = res.text[:200] if res.text else '(空响应)'
-                logger.warning("获取作者信息返回非 JSON 内容, sec_uid=%s, detail=%s", sec_uid, body_preview)
-                return _fallback_to_work_list('transient_error', '资料获取失败', body_preview)
+            res, _ = self._get_douyin_response(url)
+            data = self._parse_json_response(res, expected_keys=("user",))
 
             user = data.get('user') or {}
             status_text = ' '.join(
@@ -612,6 +652,8 @@ class DouyinDownloader:
                 '资料获取失败',
                 '抖音返回的作者资料不完整',
             )
+        except DouyinRequestError:
+            raise
         except Exception as exc:
             return _fallback_to_work_list('transient_error', '资料获取失败', str(exc))
     
@@ -630,32 +672,8 @@ class DouyinDownloader:
         encoded_sec_uid = quote(str(sec_uid), safe='')
         url = f"https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id={encoded_sec_uid}&max_cursor={max_cursor}&locate_query=false&show_live_replay_strategy=1&need_time_list=1&time_list_query=0&count={count}&publish_video_strategy_type=2&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Edge"
         
-        res, _ = get_douyin_response(self.session, url, timeout=self.download_timeout)
-        if res.status_code != 200:
-            body_preview = res.text[:500] if res.text else '(空响应)'
-            logger.error(
-                f"获取作品列表失败 HTTP {res.status_code}, sec_uid={sec_uid}, "
-                f"cursor={max_cursor}, 响应内容: {body_preview}"
-            )
-            raise ValueError(
-                f"获取作品列表失败 (HTTP {res.status_code})，请检查 Cookie 是否有效。"
-                f"响应内容: {body_preview}"
-            )
-        try:
-            data = res.json()
-        except (json.JSONDecodeError, ValueError):
-            body_preview = res.text[:500] if res.text else '(空响应)'
-            content_type = res.headers.get('Content-Type', '未知')
-            logger.error(
-                f"获取作品列表失败，抖音返回了非 JSON 内容, sec_uid={sec_uid}, "
-                f"cursor={max_cursor}, Content-Type={content_type}, "
-                f"HTTP {res.status_code}, 响应内容: {body_preview}"
-            )
-            raise ValueError(
-                f"获取作品列表失败，抖音返回了非 JSON 内容，可能是 Cookie 过期或被限流。"
-                f"HTTP 状态码: {res.status_code}, Content-Type: {content_type}, "
-                f"响应内容: {body_preview}"
-            )
+        res, _ = self._get_douyin_response(url)
+        data = self._parse_json_response(res, expected_keys=("aweme_list",))
         
         # 校验 API 业务状态码（非致命，部分接口非0也有数据）
         api_status = data.get('status_code', 0)
@@ -891,13 +909,8 @@ class DouyinDownloader:
         """
         api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}&device_platform=webapp&aid=6383"
         
-        res, _ = get_douyin_response(self.session, api_url, timeout=self.download_timeout)
-        if res.status_code != 200:
-            raise ValueError(f"刷新URL失败 (HTTP {res.status_code})")
-        try:
-            data = res.json()
-        except (json.JSONDecodeError, ValueError):
-            raise ValueError("刷新URL失败，返回非JSON内容")
+        res, _ = self._get_douyin_response(api_url)
+        data = self._parse_json_response(res, expected_keys=("aweme_detail",))
         
         item = data.get('aweme_detail')
         if not item:

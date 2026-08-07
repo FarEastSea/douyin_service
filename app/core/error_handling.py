@@ -240,13 +240,15 @@ def register_exception_handlers(app: FastAPI) -> None:
             _request_context(request),
             sanitize_text(exc.detail),
         )
+        structured_detail = exc.detail if isinstance(exc.detail, dict) else None
         payload = _payload(
             request,
             status_code=status_code,
-            code=f"HTTP_{status_code}",
+            code=(structured_detail or {}).get("code") or f"HTTP_{status_code}",
             message=message,
-            suggestion=_suggestion(status_code, exc),
+            suggestion=(structured_detail or {}).get("action") or _suggestion(status_code, exc),
             error_id=error_id,
+            details=structured_detail,
             error_type=type(exc).__name__,
         )
         return _response(payload, status_code, error_id)

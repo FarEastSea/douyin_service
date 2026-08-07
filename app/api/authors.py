@@ -66,8 +66,23 @@ from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
 from app.services.work_manager import delete_author_hard
+from app.services.douyin_errors import (
+    DouyinCooldownError,
+    DouyinRequestError,
+    http_status_for_douyin_error,
+)
 
 router = APIRouter(prefix="/authors", tags=["作者管理"])
+
+
+async def _raise_if_douyin_cooling() -> None:
+    state = await asyncio.to_thread(redis_client.get_douyin_risk_state)
+    if state.get("active"):
+        exc = DouyinCooldownError(
+            retry_after=int(state.get("retry_after") or 1),
+            reason=state.get("error_type") or "argus_blocked",
+        )
+        raise HTTPException(status_code=429, detail=exc.as_dict())
 
 
 def _normalize_author_profile_url(author: Author) -> bool:
@@ -227,6 +242,7 @@ async def add_author(
     - 可选择是否订阅
     """
     try:
+        await _raise_if_douyin_cooling()
         # 获取 Cookie
         current_settings = await asyncio.to_thread(settings.snapshot)
         cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
@@ -301,6 +317,8 @@ async def add_author(
         
         return author
     
+    except DouyinRequestError as e:
+        raise HTTPException(status_code=http_status_for_douyin_error(e), detail=e.as_dict())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -773,6 +791,7 @@ async def download_author(
     db: AsyncSession = Depends(get_async_db)
 ):
     """下载作者所有作品"""
+    await _raise_if_douyin_cooling()
     result = await db.execute(
         select(Author).where(Author.id == author_id)
     )
@@ -835,6 +854,7 @@ async def download_author(
 @router.post("/{author_id}/check", response_model=MessageResponse)
 async def check_author_updates(author_id: int, db: AsyncSession = Depends(get_async_db)):
     """手动检查作者是否有新作品"""
+    await _raise_if_douyin_cooling()
     result = await db.execute(
         select(Author).where(Author.id == author_id)
     )
@@ -864,6 +884,7 @@ async def check_author_updates(author_id: int, db: AsyncSession = Depends(get_as
 @router.post("/check-all", response_model=MessageResponse)
 async def check_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
     """手动触发检查所有订阅"""
+    await _raise_if_douyin_cooling()
     celery_result = await asyncio.to_thread(check_subscriptions.delay, True)
     
     return MessageResponse(

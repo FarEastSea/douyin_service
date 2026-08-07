@@ -21,6 +21,8 @@ RUNTIME_CONFIG_ENV_KEYS = {
     "auto_check_enabled": "AUTO_CHECK_ENABLED",
     "subscription_check_interval": "DEFAULT_CHECK_INTERVAL",
     "douyin_request_delay": "REQUEST_DELAY",
+    "douyin_risk_cooldown_seconds": "DOUYIN_RISK_COOLDOWN_SECONDS",
+    "douyin_risk_auto_retry": "DOUYIN_RISK_AUTO_RETRY",
     "author_check_delay": "AUTHOR_CHECK_DELAY",
     "download_timeout": "DOWNLOAD_TIMEOUT",
     "download_retry_count": "DOWNLOAD_RETRY_COUNT",
@@ -50,6 +52,19 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
         "max": 120.0,
         "label": "抖音分页请求间隔",
         "unit": "秒",
+    },
+    "douyin_risk_cooldown_seconds": {
+        "type": "int",
+        "default": settings.DOUYIN_RISK_COOLDOWN_SECONDS,
+        "min": 60,
+        "max": 3600,
+        "label": "抖音风控冷却时长",
+        "unit": "秒",
+    },
+    "douyin_risk_auto_retry": {
+        "type": "bool",
+        "default": settings.DOUYIN_RISK_AUTO_RETRY,
+        "label": "风控冷却后自动恢复一次",
     },
     "author_check_delay": {
         "type": "float",

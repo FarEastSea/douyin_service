@@ -64,6 +64,8 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="AUTO_CHECK_ENABLED", label="启用自动订阅检查", group="订阅", default="true"),
     EnvField(key="REQUEST_DELAY", label="抖音分页请求间隔（秒）", group="抖音", default="3.0"),
     EnvField(key="AUTHOR_CHECK_DELAY", label="作者检查间隔（秒）", group="抖音", default="30.0"),
+    EnvField(key="DOUYIN_RISK_COOLDOWN_SECONDS", label="抖音风控冷却时长（秒）", group="抖音", default="300"),
+    EnvField(key="DOUYIN_RISK_AUTO_RETRY", label="风控冷却后自动恢复一次", group="抖音", default="true"),
     EnvField(key="STUCK_TASK_TIMEOUT", label="任务卡住判定时间（秒）", group="任务", default="600"),
     EnvField(key="DOUYIN_COOKIE", label="抖音 Cookie", group="账号", default="", secret=True),
     EnvField(key="X_DOWNLOAD_ENGINE", label="X 下载引擎", group="X", default="gallery-dl"),

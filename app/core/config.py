@@ -107,6 +107,8 @@ class Settings(BaseModel):
     # 抖音请求配置
     REQUEST_DELAY: float = 3.0  # 分页请求间隔，避免频繁请求
     AUTHOR_CHECK_DELAY: float = 30.0  # 自动检查不同作者之间的间隔
+    DOUYIN_RISK_COOLDOWN_SECONDS: int = 300  # 命中抖音风控后的全局冷却
+    DOUYIN_RISK_AUTO_RETRY: bool = True  # 冷却结束后自动恢复一次
     
     # Cookie 配置（可通过环境变量或API设置）
     DOUYIN_COOKIE: Optional[str] = None

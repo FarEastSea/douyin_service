@@ -243,8 +243,10 @@ async def redoc_redirect():
 
 @app.get("/")
 async def root():
-    """根路径 - 返回前端页面或 API 信息"""
-    index_path = os.path.join(static_dir, "index.html")
+    """根路径 - 优先返回 Vue 3 生产界面。"""
+    index_path = os.path.join(static_dir, "app", "index.html")
+    if not os.path.exists(index_path):
+        index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
     
@@ -254,6 +256,17 @@ async def root():
         "docs": "/docs",
         "api": "/api"
     }
+
+
+@app.get("/legacy", include_in_schema=False)
+async def legacy_frontend():
+    """新界面验收期间保留的旧版回退入口。"""
+    legacy_path = os.path.join(static_dir, "legacy.html")
+    if not os.path.exists(legacy_path):
+        legacy_path = os.path.join(static_dir, "index.html")
+    if not os.path.exists(legacy_path):
+        return RedirectResponse(url="/", status_code=307)
+    return FileResponse(legacy_path)
 
 
 # 用于宝塔面板运行

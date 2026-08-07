@@ -134,6 +134,10 @@ class DownloadTaskResponse(BaseModel):
     progress_percent: float
     file_path: Optional[str]
     error_message: Optional[str]
+    error_code: Optional[str] = None
+    error_category: Optional[str] = None
+    error_action: Optional[str] = None
+    retry_after: int = 0
     retry_count: int
     created_at: datetime
     started_at: Optional[datetime]

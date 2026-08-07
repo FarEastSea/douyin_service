@@ -18,6 +18,7 @@ import time
 import logging
 import traceback
 import json
+import random
 
 from app.tasks.celery_app import celery_app
 from app.models.database import get_sync_db
@@ -41,6 +42,7 @@ from app.core.runtime_config import get_runtime_config_sync
 from app.services.avatar_cache import ensure_author_avatar_cached
 from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
+from app.services.douyin_errors import DouyinRequestError
 
 # 配置日志
 import os
@@ -105,7 +107,7 @@ def _is_probable_rate_limit_error(value: str | None) -> bool:
     """识别抖音常见的限流、验证码和网关伪成功响应。"""
     text = str(value or "").lower()
     return any(token in text for token in (
-        "限流", "风控", "反爬", "验证码", "验证失败", "错误状态码", "非 json", "空响应", "服务异常",
+        "限流", "风控", "反爬", "验证码", "验证失败", "安全校验", "argussecurityplugin", "错误状态码", "非 json", "空响应", "服务异常",
         "too many requests", "rate limit", "status 429", "http 429",
         "status 403", "http 403", "captcha", "verify",
     ))
@@ -370,7 +372,7 @@ def record_author_profile_history(db: Session, author: Author, profile_result: d
 
 
 @celery_app.task(bind=True, name="app.tasks.download_tasks.download_single_file")
-def download_single_file(self, task_id: int):
+def download_single_file(self, task_id: int, risk_retry_attempt: int = 0):
     """
     下载单个文件的 Celery 任务
     
@@ -379,7 +381,7 @@ def download_single_file(self, task_id: int):
     """
     # ---- 顶层安全防护：任何异常都不能让 Worker 进程崩溃 ----
     try:
-        _download_single_file_impl(self, task_id)
+        _download_single_file_impl(self, task_id, risk_retry_attempt=risk_retry_attempt)
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)[:300]}"
         logger.error(f"任务 {task_id} 顶层异常: {error_msg}\n{traceback.format_exc()}")
@@ -403,7 +405,7 @@ def download_single_file(self, task_id: int):
             pass
 
 
-def _download_single_file_impl(self_task, task_id: int):
+def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int = 0):
     """download_single_file 的实际实现"""
     redis_client.append_activity_log("info", "task",
         f"⭐ download_single_file 启动", f"task_id={task_id}")
@@ -542,6 +544,10 @@ def _download_single_file_impl(self_task, task_id: int):
                         )
                 db.commit()
                 logger.info(f"任务 {task_id} - URL 已刷新")
+        except DouyinRequestError:
+            # 已确认直链失效且刷新接口命中风控时，交给外层统一延期；不能继续
+            # 使用已失效地址，否则会把可恢复的风控错误降级成普通 403 失败。
+            raise
         except Exception as e:
             logger.warning(f"任务 {task_id} - URL 有效性检测失败: {e}，使用原 URL 继续")
 
@@ -633,7 +639,37 @@ def _download_single_file_impl(self_task, task_id: int):
                 f"下载失败: task_id={task_id}",
                 f"error={error_msg}, retry={task.retry_count}")
             return {"success": False, "error": error_msg}
-    
+
+    except DouyinRequestError as e:
+        db.rollback()
+        runtime_config = get_runtime_config_sync(db)
+        auto_retry = bool(runtime_config.get("douyin_risk_auto_retry", settings.DOUYIN_RISK_AUTO_RETRY))
+        retry_after = int(e.retry_after or runtime_config.get(
+            "douyin_risk_cooldown_seconds", settings.DOUYIN_RISK_COOLDOWN_SECONDS
+        )) + random.randint(3, 25)
+        task = db.execute(select(DownloadTask).where(DownloadTask.id == task_id)).scalar_one_or_none()
+        if task and e.code in {"argus_blocked", "rate_limited"} and auto_retry and risk_retry_attempt < 1:
+            task.status = "pending"
+            task.error_message = f"{e.user_message} 系统将在约 {retry_after} 秒后自动恢复一次。"
+            db.commit()
+            download_single_file.apply_async(
+                args=[task_id], kwargs={"risk_retry_attempt": 1}, countdown=retry_after,
+            )
+            redis_client.append_activity_log(
+                "warning", "task", "下载任务因抖音风控延期",
+                f"task_id={task_id}, code={e.code}, retry_after={retry_after}",
+            )
+            return {"success": False, "deferred": True, "retry_after": retry_after, "error": e.user_message}
+        if task:
+            task.status = "failed"
+            task.error_message = f"{e.user_message} {e.action}"
+            task.retry_count = (task.retry_count or 0) + 1
+            db.commit()
+        redis_client.append_activity_log(
+            "error", "task", "抖音请求失败，已停止自动恢复",
+            f"task_id={task_id}, code={e.code}, action={e.action}",
+        )
+        return {"success": False, "error": e.user_message, "error_code": e.code}
     except Exception as e:
         # 记录详细的错误信息和堆栈跟踪
         error_trace = traceback.format_exc()
@@ -663,7 +699,8 @@ def _download_single_file_impl(self_task, task_id: int):
 
 
 @celery_app.task(bind=True, name="app.tasks.download_tasks.download_author_works")
-def download_author_works(self, author_id: int, start_index: int = 1, download_new_only: bool = False):
+def download_author_works(self, author_id: int, start_index: int = 1,
+                          download_new_only: bool = False, risk_retry_attempt: int = 0):
     """
     下载作者所有作品
     
@@ -862,7 +899,36 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
             "reused_tasks": len(reused_tasks),
             "task_ids": all_task_ids
         }
-    
+
+    except DouyinRequestError as e:
+        db.rollback()
+        runtime_config = get_runtime_config_sync(db)
+        auto_retry = bool(runtime_config.get("douyin_risk_auto_retry", settings.DOUYIN_RISK_AUTO_RETRY))
+        retry_after = int(e.retry_after or runtime_config.get(
+            "douyin_risk_cooldown_seconds", settings.DOUYIN_RISK_COOLDOWN_SECONDS
+        )) + random.randint(3, 25)
+        author = db.execute(select(Author).where(Author.id == author_id)).scalar_one_or_none()
+        if e.code in {"argus_blocked", "rate_limited"} and auto_retry and risk_retry_attempt < 1:
+            if author:
+                author.last_error = f"{e.user_message} 系统将在约 {retry_after} 秒后自动恢复一次。"
+                db.commit()
+            download_author_works.apply_async(
+                args=[author_id, start_index, download_new_only],
+                kwargs={"risk_retry_attempt": 1}, countdown=retry_after,
+            )
+            redis_client.append_activity_log(
+                "warning", "task", "作者作品拉取因抖音风控延期",
+                f"author_id={author_id}, code={e.code}, retry_after={retry_after}",
+            )
+            return {"success": False, "deferred": True, "retry_after": retry_after, "error": e.user_message}
+        if author:
+            author.last_error = f"{e.user_message} {e.action}"
+            db.commit()
+        redis_client.append_activity_log(
+            "error", "task", "作者作品拉取已停止自动恢复",
+            f"author_id={author_id}, code={e.code}, action={e.action}",
+        )
+        return {"success": False, "error": e.user_message, "error_code": e.code}
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)[:200]}"
         logger.error(f"下载作者 {author_id} 作品时出错: {error_msg}\n{traceback.format_exc()}")
@@ -886,8 +952,9 @@ def download_author_works(self, author_id: int, start_index: int = 1, download_n
         db.close()
 
 
-@celery_app.task(name="app.tasks.download_tasks.check_subscriptions")
-def check_subscriptions(force: bool = False):
+@celery_app.task(bind=True, name="app.tasks.download_tasks.check_subscriptions")
+def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
+                        author_ids: list[int] | None = None):
     """
     检查所有订阅的作者是否有新作品
     
@@ -910,7 +977,7 @@ def check_subscriptions(force: bool = False):
         global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
         author_delay = float(runtime_config.get("author_check_delay", settings.AUTHOR_CHECK_DELAY))
 
-        if not force:
+        if not force and not author_ids:
             last_check_time = _get_last_subscription_check_time(db)
             if last_check_time:
                 elapsed = (datetime.now() - last_check_time).total_seconds()
@@ -952,9 +1019,11 @@ def check_subscriptions(force: bool = False):
         # 获取所有订阅的作者：按"最久未检查优先"排序（从未检查过的排最前）。
         # 这样即使本轮因超时/限流提前结束，靠后的作者也会在下一轮优先被检查，
         # 避免固定顺序导致列表末尾的作者长期被漏检。
+        authors_query = select(Author).where(Author.is_subscribed == True)
+        if author_ids:
+            authors_query = authors_query.where(Author.id.in_(author_ids))
         authors = db.execute(
-            select(Author)
-            .where(Author.is_subscribed == True)
+            authors_query
             .order_by(
                 Author.last_check_time.is_(None).desc(),
                 Author.last_check_time.asc(),
@@ -970,6 +1039,7 @@ def check_subscriptions(force: bool = False):
         consecutive_rate_limited = 0
         stopped_for_timeout = False
         stopped_for_rate_limit = False
+        risk_author_id = None
         RATE_LIMIT_STOP_THRESHOLD = 3
         
         for author in authors:
@@ -1112,6 +1182,24 @@ def check_subscriptions(force: bool = False):
             except Exception as e:
                 error_msg = str(e)
 
+                if isinstance(e, DouyinRequestError) and e.code in {"argus_blocked", "rate_limited"}:
+                    author.last_error = f"{e.user_message} {e.action}"
+                    db.commit()
+                    stopped_for_rate_limit = True
+                    risk_author_id = author.id
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "status": "failed",
+                        "error_code": e.code,
+                        "message": e.user_message,
+                    })
+                    redis_client.append_activity_log(
+                        "warning", "task", "抖音风控触发，本轮订阅检查立即停止",
+                        f"author_id={author.id}, code={e.code}, retry_after={e.retry_after}",
+                    )
+                    break
+
                 # 优先判断是否为"作者账号异常"（禁言/封号/注销/不可访问等）。
                 # 这类是作者账号自身的问题，不是我方被限流：应打标记并自动取消订阅，
                 # 保留历史数据，且不计入限流中断、不停止本轮其余作者的检查。
@@ -1199,6 +1287,9 @@ def check_subscriptions(force: bool = False):
             _reset_subscription_check_cooldown(db)
 
         completed_author_ids = {item.get("author_id") for item in results}
+        resume_author_ids = [author.id for author in authors if author.id not in completed_author_ids]
+        if risk_author_id is not None:
+            resume_author_ids.insert(0, risk_author_id)
         if stopped_for_timeout or stopped_for_rate_limit:
             deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
             for author in authors:
@@ -1216,6 +1307,10 @@ def check_subscriptions(force: bool = False):
             key = item.get("status", "unknown")
             status_counts[key] = status_counts.get(key, 0) + 1
         remaining_count = max(0, len(authors) - checked_count - skipped_count)
+        if stopped_for_rate_limit:
+            # 当前命中风控的作者也需要在冷却后重试；checked_count 表示已尝试，
+            # 不能因此把它从恢复任务的剩余数量中排除。
+            remaining_count += 1
         report.due_authors = due_count
         report.checked_authors = checked_count
         report.success_authors = status_counts.get("success", 0) + status_counts.get("new_works", 0)
@@ -1247,6 +1342,29 @@ def check_subscriptions(force: bool = False):
                 )
             except Exception as continuation_error:
                 logger.warning(f"订阅检查续检任务提交失败，将等待下一次 Beat: {continuation_error}")
+        elif stopped_for_rate_limit and remaining_count > 0:
+            auto_retry = bool(runtime_config.get("douyin_risk_auto_retry", settings.DOUYIN_RISK_AUTO_RETRY))
+            if auto_retry and risk_retry_attempt < 1:
+                state = redis_client.get_douyin_risk_state()
+                countdown = int(state.get("retry_after") or runtime_config.get(
+                    "douyin_risk_cooldown_seconds", settings.DOUYIN_RISK_COOLDOWN_SECONDS
+                )) + random.randint(3, 25)
+                try:
+                    continuation = check_subscriptions.apply_async(
+                        kwargs={
+                            "force": force,
+                            "risk_retry_attempt": 1,
+                            "author_ids": resume_author_ids,
+                        },
+                        countdown=countdown,
+                    )
+                    continuation_task_id = continuation.id
+                    redis_client.append_activity_log(
+                        "warning", "task", "订阅检查已安排一次风控恢复",
+                        f"{countdown} 秒后继续，剩余={remaining_count}, celery_task_id={continuation_task_id}",
+                    )
+                except Exception as continuation_error:
+                    logger.warning(f"订阅检查风控恢复任务提交失败，将等待下一次 Beat: {continuation_error}")
         
         return {
             "success": True,

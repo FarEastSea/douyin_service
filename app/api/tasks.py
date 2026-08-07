@@ -42,12 +42,28 @@ from app.core.runtime_config import get_runtime_config
 from app.services.media_paths import resolve_media_path
 from app.services.download_task_factory import ensure_download_task_async
 from app.services.work_manager import recalc_author_counts
+from app.services.douyin_errors import (
+    DouyinCooldownError,
+    DouyinRequestError,
+    classify_stored_task_error,
+    http_status_for_douyin_error,
+)
 
 router = APIRouter(prefix="/tasks", tags=["下载任务"])
 
 VIDEO_PREVIEW_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 IMAGE_PREVIEW_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 PREVIEWABLE_EXTENSIONS = VIDEO_PREVIEW_EXTENSIONS | IMAGE_PREVIEW_EXTENSIONS
+
+
+async def _raise_if_douyin_cooling() -> None:
+    state = await asyncio.to_thread(redis_client.get_douyin_risk_state)
+    if state.get("active"):
+        exc = DouyinCooldownError(
+            retry_after=int(state.get("retry_after") or 1),
+            reason=state.get("error_type") or "argus_blocked",
+        )
+        raise HTTPException(status_code=429, detail=exc.as_dict())
 
 
 def _update_task_runtime(
@@ -179,6 +195,15 @@ def _serialize_download_task(
     item.preview_media_type = preview_data["preview_media_type"]
     item.preview_url = preview_data["preview_url"]
     item.local_preview_available = preview_data["local_preview_available"]
+    error_meta = classify_stored_task_error(task.error_message)
+    item.error_code = error_meta["error_code"]
+    item.error_category = error_meta["error_category"]
+    item.error_action = error_meta["error_action"]
+    if item.error_category == "risk_control":
+        try:
+            item.retry_after = int(redis_client.get_douyin_risk_state().get("retry_after") or 0)
+        except Exception:
+            item.retry_after = 0
     return item
 
 
@@ -191,6 +216,7 @@ async def create_download_task(
     创建下载任务 - 自动识别作者主页链接或单个作品链接
     """
     try:
+        await _raise_if_douyin_cooling()
         current_settings = await asyncio.to_thread(settings.snapshot)
         cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
         if not cookie:
@@ -222,6 +248,8 @@ async def create_download_task(
         else:
             return await _handle_author_download(downloader, request.share_url, db)
     
+    except DouyinRequestError as e:
+        raise HTTPException(status_code=http_status_for_douyin_error(e), detail=e.as_dict())
     except (ValueError, json.JSONDecodeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -432,6 +460,12 @@ async def list_tasks(
         page_size=page_size,
         pages=pages
     )
+
+
+@router.get("/failed/errors", response_model=MessageResponse)
+async def get_failed_errors_for_toolbar(db: AsyncSession = Depends(get_async_db)):
+    """静态路径别名，避免与 /{task_id} 动态路由发生匹配冲突。"""
+    return await get_all_failed_errors(db)
 
 
 @router.get("/{task_id}/preview")
@@ -729,6 +763,13 @@ async def force_retry_all_downloading(db: AsyncSession = Depends(get_async_db)):
 @router.post("/retry-all-failed", response_model=MessageResponse)
 async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
     """一键重试所有失败的任务"""
+    state = await asyncio.to_thread(redis_client.get_douyin_risk_state)
+    if state.get("active"):
+        return MessageResponse(
+            success=True,
+            message=f"抖音接口正在冷却，已跳过失败任务；约 {state.get('retry_after', 0)} 秒后再试",
+            data={"count": 0, "skipped": "risk_cooldown", "retry_after": state.get("retry_after", 0)},
+        )
     # 查询所有失败的任务
     result = await db.execute(
         select(DownloadTask).where(DownloadTask.status.in_(["failed", "cancelled"]))
@@ -848,6 +889,7 @@ async def pause_all_tasks(db: AsyncSession = Depends(get_async_db)):
 @router.post("/refresh-retry/{task_id}", response_model=MessageResponse)
 async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """重新获取下载链接后重试失败的任务"""
+    await _raise_if_douyin_cooling()
     result = await db.execute(
         select(DownloadTask).where(DownloadTask.id == task_id)
     )
@@ -881,7 +923,6 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
         if not cookie:
             raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
 
-        import asyncio
         runtime_config = await get_runtime_config(db)
 
         def _refresh():
@@ -902,6 +943,8 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
                 work.image_count = len(image_urls)
                 work.live_photo_urls = live_photo_urls
 
+    except DouyinRequestError as e:
+        raise HTTPException(status_code=http_status_for_douyin_error(e), detail=e.as_dict())
     except HTTPException:
         raise
     except Exception as e:
@@ -922,6 +965,7 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
 @router.post("/refresh-retry-all-failed", response_model=MessageResponse)
 async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
     """重新获取所有失败任务的下载链接后重试"""
+    await _raise_if_douyin_cooling()
     result = await db.execute(
         select(DownloadTask).where(DownloadTask.status.in_(["failed", "cancelled"]))
     )
@@ -935,7 +979,6 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
     if not cookie:
         raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
 
-    import asyncio
     runtime_config = await get_runtime_config(db)
 
     def _create_downloader():
@@ -968,6 +1011,10 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
                     work.image_count = len(image_urls)
                     work.live_photo_urls = live_photo_urls
             refreshed_works[wid] = True
+        except DouyinRequestError as exc:
+            if exc.code in {"argus_blocked", "rate_limited"}:
+                raise HTTPException(status_code=http_status_for_douyin_error(exc), detail=exc.as_dict())
+            refreshed_works[wid] = False
         except Exception:
             refreshed_works[wid] = False
 

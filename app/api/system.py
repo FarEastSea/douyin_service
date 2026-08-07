@@ -49,6 +49,8 @@ class RuntimeConfigUpdate(BaseModel):
     auto_check_enabled: Optional[bool] = None
     subscription_check_interval: Optional[int] = None
     douyin_request_delay: Optional[float] = None
+    douyin_risk_cooldown_seconds: Optional[int] = None
+    douyin_risk_auto_retry: Optional[bool] = None
     author_check_delay: Optional[float] = None
     download_timeout: Optional[int] = None
     download_retry_count: Optional[int] = None
@@ -141,6 +143,13 @@ async def get_runtime_settings(db: AsyncSession = Depends(get_async_db)):
         "limits": limits,
         "service": await asyncio.to_thread(process_manager.get_status),
     }
+
+
+@router.get("/system/douyin-risk-state")
+async def get_douyin_risk_state():
+    """供前端展示全局抖音风控冷却倒计时。"""
+    state = await asyncio.to_thread(redis_client.get_douyin_risk_state)
+    return {"success": True, **state}
 
 
 @router.post("/config/runtime", response_model=MessageResponse)

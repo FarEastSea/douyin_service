@@ -287,6 +287,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Frontend local dependencies and package cache
+frontend/node_modules/
+frontend/.npm-cache/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
