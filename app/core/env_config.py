@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 from threading import RLock
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -24,6 +25,10 @@ def _find_project_root() -> Path:
 ENV_PATH = _find_project_root() / ".env"
 _LOCAL_CONFIG_GENERATION = 0
 _LOCAL_CONFIG_LOCK = RLock()
+_DOWNLOAD_PATH_ENV_KEYS = {
+    "DOWNLOAD_ROOT", "DOWNLOAD_DIR", "X_DOWNLOAD_DIR",
+    "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR",
+}
 
 
 class EnvField(BaseModel):
@@ -262,8 +267,25 @@ def read_env_file() -> Dict[str, str]:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        values[key.strip()] = value.strip()
+        values[key.strip()] = _decode_env_value(value)
     return values
+
+
+def _decode_env_value(value: str) -> str:
+    """读取由 shell 安全引号包裹的值，同时兼容历史未加引号的 .env。"""
+    raw = str(value or "").strip()
+    if not raw or raw[0] not in {"'", '"'}:
+        return raw
+    try:
+        parts = shlex.split(raw, comments=False, posix=True)
+    except ValueError:
+        return raw
+    return parts[0] if len(parts) == 1 else raw
+
+
+def serialize_env_value(value: Any) -> str:
+    """生成可被 Bash ``source`` 安全读取且可无损还原的单行值。"""
+    return shlex.quote("" if value is None else str(value))
 
 
 def get_env_values(mask_secret: bool = True) -> Dict[str, Any]:
@@ -339,8 +361,14 @@ def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
             if key in clean_updates:
-                new_lines.append(f"{key}={clean_updates[key]}")
+                new_lines.append(f"{key}={serialize_env_value(clean_updates[key])}")
                 seen.add(key)
+                continue
+            if key in _DOWNLOAD_PATH_ENV_KEYS:
+                # 同步修复历史版本遗留的 DOWNLOAD_DIR/X_DOWNLOAD_DIR。虽然新配置
+                # 已改用根目录 + 子目录，它们仍会在 ``source .env`` 时被 Bash 解析。
+                _, existing_value = stripped.split("=", 1)
+                new_lines.append(f"{key}={serialize_env_value(_decode_env_value(existing_value))}")
                 continue
         new_lines.append(line)
 
@@ -348,7 +376,7 @@ def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
         new_lines.append("# 媒体下载管理系统环境配置")
     for field in ENV_FIELDS:
         if field.key in clean_updates and field.key not in seen:
-            new_lines.append(f"{field.key}={clean_updates[field.key]}")
+            new_lines.append(f"{field.key}={serialize_env_value(clean_updates[field.key])}")
 
     content = "\n".join(new_lines).rstrip() + "\n"
     ENV_PATH.parent.mkdir(parents=True, exist_ok=True)

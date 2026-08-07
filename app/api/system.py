@@ -907,28 +907,8 @@ async def set_concurrency(body: ConcurrencyUpdate):
 
 
 def _update_env_key(key: str, value: str):
-    """更新 .env 文件中的键值"""
-    env_path = Path(".env")
-    lines = []
-    if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-
-    found = False
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k = stripped.split("=", 1)[0].strip()
-            if k == key:
-                new_lines.append(f"{key}={value}")
-                found = True
-                continue
-        new_lines.append(line)
-
-    if not found:
-        new_lines.append(f"{key}={value}")
-
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    """通过统一配置写入器更新 .env，确保带空格值可被 Bash source。"""
+    write_env_updates({key: value})
 
 
 # ============ 版本更新（Git） ============

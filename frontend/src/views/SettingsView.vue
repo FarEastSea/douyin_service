@@ -13,10 +13,13 @@ const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>(
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
+const accountOnlyKeys = new Set(['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE'])
+const generalFields = computed(() => allFields.value.filter(field => !accountOnlyKeys.has(field.key)))
+const xCookieFile = ref('')
 const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
 
 async function loadRuntime() { const data = await api<any>('/config/runtime'); runtime.value = data.config; limits.value = data.limits }
-async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values }
+async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || '' }
 async function loadLogs(silent: boolean | Event = false) { try { logs.value = (await api<any>('/logs?start=0&count=500')).logs || [] } catch (e: any) { if (silent !== true) store.notify(e.message, 'error') } }
 async function loadProcess() { process.value = await api('/process/status') }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
@@ -45,6 +48,10 @@ async function saveCookie(platform: 'douyin' | 'x') {
   try { const result = await api<any>(platform === 'douyin' ? '/config/cookie' : '/x/config/cookie', { method: 'POST', ...jsonBody({ cookie: value.trim() }) }); store.notify(result.message); if (platform === 'douyin') cookieValue.value = ''; else xCookieValue.value = '' }
   catch (error: any) { store.notify(error.message || '保存 Cookie 失败', 'error') }
 }
+async function saveXCookieFile() {
+  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values: { X_COOKIE_FILE: xCookieFile.value.trim() } }) }); store.notify(result.message || 'X Cookie 文件路径已保存'); await loadAll() }
+  catch (error: any) { store.notify(error.message || '保存 X Cookie 文件路径失败', 'error') }
+}
 async function processAction(target: 'worker' | 'beat', action: 'start' | 'stop') { try { const result = await api<any>(`/process/${target}/${action}`, { method: 'POST' }); store.notify(result.message || '操作完成'); await loadProcess() } catch (e: any) { store.notify(e.message, 'error') } }
 async function clearLogs() { if (!confirm('确定清空活动日志？')) return; await api('/logs', { method: 'DELETE' }); logs.value = []; store.notify('日志已清空') }
 async function copyLogs() { await navigator.clipboard.writeText(filteredLogs.value.map(item => `${new Date(item.ts * 1000).toLocaleString()} [${item.level}] [${item.source}] ${item.msg}\n${item.detail || ''}`).join('\n')); store.notify('日志已复制') }
@@ -61,13 +68,13 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
     <nav class="settings-tabs"><button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" @click="tab = item[0]">{{ item[1] }}</button></nav>
 
     <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>应用、安全、目录、数据库与后台任务配置</p></div><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></header><div class="form-grid">
-      <label v-for="field in allFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
+      <label v-for="field in generalFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
     </div></div>
 
-    <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>敏感内容不会回显，保存后立即同步运行缓存</p></div></header><div class="credential-grid"><article><strong>抖音 Cookie</strong><p>用于作者资料、作品列表和链接刷新。</p><textarea v-model="cookieValue" placeholder="粘贴最新抖音 Cookie" /><button class="btn primary" @click="saveCookie('douyin')"><Save :size="16" />更新抖音 Cookie</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><button class="btn primary" @click="saveCookie('x')"><Save :size="16" />更新 X Cookie</button></article></div></div>
+    <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>Cookie 相关配置统一在此管理，敏感内容不会回显</p></div></header><div class="credential-grid"><article><strong>抖音 Cookie</strong><p>用于作者资料、作品列表和链接刷新。</p><textarea v-model="cookieValue" placeholder="粘贴最新抖音 Cookie" /><button class="btn primary" @click="saveCookie('douyin')"><Save :size="16" />更新抖音 Cookie</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><button class="btn primary" @click="saveCookie('x')"><Save :size="16" />更新 X Cookie</button></article><article class="credential-path"><strong>X Cookie 文件</strong><p>可选：填写服务器上的 Cookie 文件路径，留空则使用上方保存的 Cookie。</p><div><input v-model="xCookieFile" placeholder="例如：/data/cookies/x.txt" /><button class="btn ghost" @click="saveXCookieFile"><Save :size="16" />保存路径</button></div></article></div></div>
 
     <div v-else-if="tab === 'runtime'" class="settings-panel"><header><Activity /><div><h3>下载、订阅与风控</h3><p>修改后下一次请求或调度周期生效</p></div><button class="btn primary" @click="saveRuntime"><Save :size="16" />保存运行配置</button></header><div class="form-grid">
-      <label v-for="(spec, key) in limits" :key="key"><span>{{ spec.label }}</span><input v-if="spec.type !== 'bool'" v-model.number="runtime[key]" type="number" :min="spec.min" :max="spec.max" /><button v-else class="switch labeled" :class="{ on: runtime[key] }" @click="runtime[key] = !runtime[key]"><i />{{ runtime[key] ? '已开启' : '已关闭' }}</button><small>{{ spec.min != null ? `${spec.min}–${spec.max} ${spec.unit || ''}` : '开关配置' }}</small></label>
+      <label v-for="(spec, key) in limits" :key="key"><span>{{ spec.label }}</span><input v-if="spec.type !== 'bool'" v-model.number="runtime[key]" type="number" :min="spec.min" :max="spec.max" /><button v-else type="button" class="setting-switch" :class="{ on: runtime[key] }" role="switch" :aria-checked="Boolean(runtime[key])" @click="runtime[key] = !runtime[key]"><span class="switch-track"><i /></span><span>{{ runtime[key] ? '已开启' : '已关闭' }}</span></button><small>{{ spec.min != null ? `${spec.min}–${spec.max} ${spec.unit || ''}` : '向右为开启，向左为关闭' }}</small></label>
     </div></div>
 
     <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div></header><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
