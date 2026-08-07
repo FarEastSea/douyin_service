@@ -1792,6 +1792,9 @@
         }
 
         function loadPlatformData(platform, sub) {
+            // 初始化维护模式只允许 bootstrap 接口。避免切换到设置页后继续
+            // 请求 Cookie、运行时配置或进程状态，触发登录遮罩覆盖初始化面板。
+            if (bootstrapMode) return false;
             const key = `${platform}_${sub}`;
             if (loadedPanels[key]) return false;
             loadedPanels[key] = true;
