@@ -1166,6 +1166,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         stopped_for_timeout = False
         stopped_for_rate_limit = False
         risk_author_id = None
+        risk_error_code = None
         RATE_LIMIT_STOP_THRESHOLD = 3
 
         def _result_sets() -> tuple[set[int], set[int]]:
@@ -1177,7 +1178,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     continue
                 status = item.get("status")
                 risk_failure = item.get("error_code") in {
-                    "argus_blocked", "rate_limited", "suspected_rate_limit",
+                    "browser_identity_missing", "argus_blocked", "rate_limited",
+                    "suspected_rate_limit",
                 }
                 if status != "deferred" and not risk_failure:
                     settled_ids.add(int(author_id))
@@ -1360,11 +1362,14 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             except Exception as e:
                 error_msg = str(e)
 
-                if isinstance(e, DouyinRequestError) and e.code in {"argus_blocked", "rate_limited"}:
+                if isinstance(e, DouyinRequestError) and e.code in {
+                    "browser_identity_missing", "argus_blocked", "rate_limited",
+                }:
                     author.last_error = f"{e.user_message} {e.action}"
                     db.commit()
                     stopped_for_rate_limit = True
                     risk_author_id = author.id
+                    risk_error_code = e.code
                     results.append({
                         "author_id": author.id,
                         "nickname": author.nickname,
@@ -1373,8 +1378,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "message": e.user_message,
                     })
                     redis_client.append_activity_log(
-                        "warning", "task", "抖音风控触发，本轮订阅检查立即停止",
-                        f"author_id={author.id}, code={e.code}, retry_after={e.retry_after}",
+                        "warning", "task", "抖音请求保护已触发，本轮订阅检查立即停止",
+                        f"author_id={author.id}, 原因={e.user_message}, 后续操作={e.action}",
                     )
                     break
 
@@ -1443,6 +1448,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     if consecutive_rate_limited >= RATE_LIMIT_STOP_THRESHOLD:
                         stopped_for_rate_limit = True
                         risk_author_id = author.id
+                        risk_error_code = "suspected_rate_limit"
                         redis_client.append_activity_log(
                             "warning",
                             "task",
@@ -1476,7 +1482,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         if risk_author_id is not None and risk_author_id not in resume_author_ids:
             resume_author_ids.insert(0, risk_author_id)
         if stopped_for_timeout or stopped_for_rate_limit:
-            deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
+            if risk_error_code == "browser_identity_missing":
+                deferred_reason = "Cookie 缺少浏览器身份标识，更新 Cookie 后优先续检"
+            else:
+                deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
             for author in authors:
                 if author.id in resume_author_ids:
                     results.append({
@@ -1504,7 +1513,11 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         report.failed_authors = status_counts.get("failed", 0)
         report.skipped_authors = skipped_count
         report.remaining_authors = remaining_count
-        report.status = "partial_rate_limited" if stopped_for_rate_limit else ("partial_timeout" if stopped_for_timeout else "completed")
+        report.status = (
+            "partial_authentication" if risk_error_code == "browser_identity_missing"
+            else ("partial_rate_limited" if stopped_for_rate_limit
+                  else ("partial_timeout" if stopped_for_timeout else "completed"))
+        )
         report.summary = (
             f"本轮已检查 {round_checked} 位，累计已检查 {cumulative_checked}/{cycle_total} 位，"
             f"等待续检 {remaining_count} 位，发现新作品 {report.new_works} 个"
@@ -1547,7 +1560,9 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 )
             except Exception as continuation_error:
                 logger.warning(f"订阅检查续检任务提交失败，将等待下一次 Beat: {continuation_error}")
-        elif stopped_for_rate_limit and remaining_count > 0:
+        elif stopped_for_rate_limit and remaining_count > 0 and risk_error_code in {
+            "argus_blocked", "rate_limited", "suspected_rate_limit",
+        }:
             auto_retry = bool(runtime_config.get("douyin_risk_auto_retry", settings.DOUYIN_RISK_AUTO_RETRY))
             if auto_retry and risk_retry_attempt < 1:
                 state = redis_client.get_douyin_risk_state()

@@ -6,7 +6,7 @@ type Theme = 'auto' | 'light' | 'dark'
 export const useAppStore = defineStore('app', {
   state: () => ({
     stats: { total_authors: 0, subscribed_authors: 0, pending_tasks: 0, downloading_tasks: 0, total_downloads: 0 },
-    risk: { active: false, retry_after: 0, error_type: null as string | null, reason: null as string | null, last_seen_at: null as string | null },
+    risk: { active: false, retry_after: 0, error_type: null as string | null, reason: null as string | null, last_seen_at: null as string | null, error_type_label: null as string | null, reason_label: null as string | null, requires_cookie_update: false },
     theme: (localStorage.getItem('media-theme') || 'auto') as Theme,
     toast: null as null | { message: string; tone: 'success' | 'error' | 'info' },
     sidebarOpen: false,
@@ -25,8 +25,10 @@ export const useAppStore = defineStore('app', {
     startRiskClock() {
       if (this.riskTimer != null) return
       this.riskTimer = window.setInterval(() => {
-        if (this.risk.active && this.risk.retry_after > 0) this.risk.retry_after--
-        if (this.risk.active && this.risk.retry_after <= 0) void this.refreshRisk()
+        if (this.risk.active && this.risk.retry_after > 0) {
+          this.risk.retry_after--
+          if (this.risk.retry_after <= 0) void this.refreshRisk()
+        }
       }, 1000)
     },
     stopRiskClock() {

@@ -17,6 +17,12 @@ class DouyinErrorInfo:
 
 
 ERROR_INFO = {
+    "browser_identity_missing": DouyinErrorInfo(
+        "browser_identity_missing", "authentication",
+        "抖音请求缺少浏览器身份标识，系统已停止继续请求。",
+        "请在设置中心更新包含 UIFID 的完整抖音 Cookie 后重试。",
+        False,
+    ),
     "argus_blocked": DouyinErrorInfo(
         "argus_blocked", "risk_control",
         "抖音安全校验未通过，系统已暂停新的抖音接口请求。",
@@ -72,7 +78,9 @@ class DouyinRequestError(ValueError):
 
 class DouyinCooldownError(DouyinRequestError):
     def __init__(self, *, retry_after: int, reason: str = "argus_blocked") -> None:
-        code = reason if reason in {"argus_blocked", "rate_limited"} else "argus_blocked"
+        code = reason if reason in {
+            "browser_identity_missing", "argus_blocked", "rate_limited",
+        } else "argus_blocked"
         super().__init__(code, detail="global cooldown active", retry_after=retry_after)
 
 
@@ -92,6 +100,10 @@ def classify_douyin_error(*, status_code: Optional[int], body: Any = None,
     """从状态码、正文和 JSON 业务字段中识别抖音错误。"""
     text = " ".join((_flatten_text(body), _flatten_text(data))).strip()
     lowered = text.lower()
+    if "uifid not found" in lowered:
+        return DouyinRequestError(
+            "browser_identity_missing", detail=text, status_code=status_code
+        )
     if "argussecurityplugin" in lowered or (
         "blocked by argus" in lowered and "validate error" in lowered
     ):
@@ -179,10 +191,30 @@ def classify_stored_task_error(value: Optional[str]) -> dict[str, Any]:
 def http_status_for_douyin_error(exc: DouyinRequestError) -> int:
     if exc.code in {"argus_blocked", "rate_limited"}:
         return 429
-    if exc.code == "cookie_invalid":
+    if exc.code in {"browser_identity_missing", "cookie_invalid"}:
         return 401
     if exc.code == "content_unavailable":
         return 404
     if exc.code == "network_error":
         return 503
     return 502
+
+
+def douyin_error_type_label(code: Optional[str]) -> str:
+    return {
+        "browser_identity_missing": "浏览器身份信息缺失",
+        "argus_blocked": "抖音安全校验拦截",
+        "rate_limited": "抖音请求频率受限",
+        "cookie_invalid": "抖音登录状态失效",
+    }.get(str(code or ""), "抖音请求保护")
+
+
+def localize_douyin_reason(code: Optional[str], reason: Optional[str]) -> str:
+    lowered = str(reason or "").lower()
+    if code == "browser_identity_missing" or "uifid not found" in lowered:
+        return "请求缺少或未识别 UIFID 浏览器身份标识，抖音安全校验拒绝了本次请求。"
+    if code == "argus_blocked" or "argussecurityplugin" in lowered:
+        return "抖音安全校验拒绝了本次请求。"
+    if code == "rate_limited":
+        return "抖音判定请求过于频繁，系统已暂停新的业务请求。"
+    return str(reason or "抖音上游安全校验拒绝了本次请求。")

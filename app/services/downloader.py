@@ -32,6 +32,7 @@ from app.services.douyin_errors import (
     classify_douyin_error,
     parse_douyin_json_response,
 )
+from app.services.douyin_cookie import add_uifid_to_douyin_api_url
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -358,15 +359,16 @@ class DouyinDownloader:
             )
 
     def _record_risk_error(self, exc: DouyinRequestError) -> None:
-        if exc.code not in {"argus_blocked", "rate_limited"}:
+        if exc.code not in {"browser_identity_missing", "argus_blocked", "rate_limited"}:
             return
         try:
+            cooldown_seconds = 0 if exc.code == "browser_identity_missing" else self.risk_cooldown_seconds
             redis_client.set_douyin_risk_state(
                 exc.code,
                 exc.detail or exc.user_message,
-                self.risk_cooldown_seconds,
+                cooldown_seconds,
             )
-            exc.retry_after = self.risk_cooldown_seconds
+            exc.retry_after = cooldown_seconds
         except Exception as redis_exc:
             logger.warning("写入抖音风控冷却状态失败: %s", redis_exc)
 
@@ -396,6 +398,14 @@ class DouyinDownloader:
     def _get_douyin_response(self, url: str):
         """统一执行抖音业务请求，并将网络异常转成结构化错误。"""
         self._check_risk_gate()
+        try:
+            url = add_uifid_to_douyin_api_url(url, self.headers.get("cookie", ""))
+        except ValueError as validation_error:
+            error = DouyinRequestError(
+                "browser_identity_missing", detail=str(validation_error)
+            )
+            self._record_risk_error(error)
+            raise error from validation_error
         # 分页、资料、作品详情和短链解析过去只在各自循环内休眠，多个
         # Celery 进程仍可在同一秒集中请求。这里使用 Redis 统一排队。
         wait_for_douyin_request_slot(self.request_delay)

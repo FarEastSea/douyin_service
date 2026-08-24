@@ -23,6 +23,8 @@ from app.models.schemas import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core import updater
+from app.services.douyin_cookie import get_cookie_value, require_douyin_uifid
+from app.services.douyin_errors import douyin_error_type_label, localize_douyin_reason
 from app.core.env_config import (
     ENV_FIELDS,
     FIELD_MAP,
@@ -70,6 +72,10 @@ async def update_cookie(
     db: AsyncSession = Depends(get_async_db)
 ):
     """更新抖音 Cookie"""
+    try:
+        require_douyin_uifid(request.cookie)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     # 存储到数据库（持久化）
     result = await db.execute(
         select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
@@ -95,8 +101,9 @@ async def update_cookie(
 
     # 网页保存值优先，并同步到快速缓存。
     await asyncio.to_thread(redis_client.set_cookie, request.cookie)
+    await asyncio.to_thread(redis_client.clear_douyin_risk_state)
 
-    return MessageResponse(success=True, message="Cookie 已更新并同步到 .env")
+    return MessageResponse(success=True, message="Cookie 已更新，浏览器身份标识校验通过")
 
 
 @router.get("/config/cookie", response_model=MessageResponse)
@@ -113,10 +120,13 @@ async def get_cookie_status(db: AsyncSession = Depends(get_async_db)):
     if not cookie:
         cookie = (await asyncio.to_thread(settings.snapshot)).DOUYIN_COOKIE
     
+    has_uifid = bool(get_cookie_value(cookie or "", "UIFID"))
     return MessageResponse(
-        success=bool(cookie),
-        message="Cookie 已配置" if cookie else "Cookie 未配置",
-        data={"configured": bool(cookie)}
+        success=bool(cookie) and has_uifid,
+        message=("Cookie 已配置且包含 UIFID" if has_uifid else (
+            "Cookie 已配置，但缺少 UIFID" if cookie else "Cookie 未配置"
+        )),
+        data={"configured": bool(cookie), "has_uifid": has_uifid}
     )
 
 
@@ -149,7 +159,18 @@ async def get_runtime_settings(db: AsyncSession = Depends(get_async_db)):
 async def get_douyin_risk_state():
     """供前端展示全局抖音风控冷却倒计时。"""
     state = await asyncio.to_thread(redis_client.get_douyin_risk_state)
-    return {"success": True, **state}
+    normalized_error_type = state.get("error_type")
+    if "uifid not found" in str(state.get("reason") or "").lower():
+        normalized_error_type = "browser_identity_missing"
+    return {
+        "success": True,
+        **state,
+        "error_type_label": douyin_error_type_label(normalized_error_type),
+        "reason_label": localize_douyin_reason(
+            normalized_error_type, state.get("reason")
+        ),
+        "requires_cookie_update": normalized_error_type == "browser_identity_missing",
+    }
 
 
 @router.post("/config/runtime", response_model=MessageResponse)
@@ -200,6 +221,12 @@ async def save_complete_settings(
     updates = {key: value for key, value in request.values.items() if key in FIELD_MAP}
     if not updates:
         raise HTTPException(status_code=400, detail="没有可保存的配置")
+    douyin_cookie_update = updates.get("DOUYIN_COOKIE")
+    if douyin_cookie_update not in {None, "", "********"}:
+        try:
+            require_douyin_uifid(str(douyin_cookie_update).strip())
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     current = await asyncio.to_thread(read_env_file)
     for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR"):
@@ -291,6 +318,7 @@ async def save_complete_settings(
     douyin_cookie = updates.get("DOUYIN_COOKIE")
     if douyin_cookie and douyin_cookie != "********":
         await asyncio.to_thread(redis_client.set_cookie, str(douyin_cookie).strip())
+        await asyncio.to_thread(redis_client.clear_douyin_risk_state)
     x_cookie = updates.get("X_COOKIE")
     if x_cookie and x_cookie != "********":
         await asyncio.to_thread(redis_client.set_x_cookie, str(x_cookie).strip())

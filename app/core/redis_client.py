@@ -587,14 +587,19 @@ def _deserialize_x_task_state(raw_state: Dict[str, str]) -> Optional[Dict[str, A
 
 def set_douyin_risk_state(error_type: str, reason: str, cooldown_seconds: int) -> Dict[str, Any]:
     """记录跨 Web/Worker 进程共享的抖音接口冷却状态。"""
-    ttl = max(1, int(cooldown_seconds))
+    ttl = max(0, int(cooldown_seconds))
     payload = {
         "active": True,
         "error_type": str(error_type or "argus_blocked"),
         "reason": str(reason or "")[:500],
         "last_seen_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
-    redis_client.setex(DOUYIN_RISK_STATE_KEY, ttl, json.dumps(payload, ensure_ascii=False))
+    serialized = json.dumps(payload, ensure_ascii=False)
+    if ttl > 0:
+        redis_client.setex(DOUYIN_RISK_STATE_KEY, ttl, serialized)
+    else:
+        # Cookie 身份信息缺失不会随时间自行恢复，保持拦截直到用户更新 Cookie。
+        redis_client.set(DOUYIN_RISK_STATE_KEY, serialized)
     return {**payload, "retry_after": ttl}
 
 
@@ -602,7 +607,7 @@ def get_douyin_risk_state() -> Dict[str, Any]:
     """返回当前风控状态及 Redis 剩余 TTL。"""
     raw = redis_client.get(DOUYIN_RISK_STATE_KEY)
     ttl = int(redis_client.ttl(DOUYIN_RISK_STATE_KEY)) if raw else -2
-    if not raw or ttl <= 0:
+    if not raw or ttl == -2 or ttl == 0:
         return {
             "active": False, "error_type": None, "reason": None,
             "last_seen_at": None, "retry_after": 0,
@@ -616,7 +621,7 @@ def get_douyin_risk_state() -> Dict[str, Any]:
         "error_type": payload.get("error_type") or "argus_blocked",
         "reason": payload.get("reason"),
         "last_seen_at": payload.get("last_seen_at"),
-        "retry_after": ttl,
+        "retry_after": max(0, ttl),
     }
 
 
