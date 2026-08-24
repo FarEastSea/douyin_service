@@ -38,7 +38,7 @@ async function init() {
   if (bootstrap.value.ready) { await store.refreshStatus(); store.startRiskClock() }
 }
 onMounted(() => { init(); window.addEventListener('app:auth-required', () => authOpen.value = true); window.addEventListener('app:preview', preview) })
-onBeforeUnmount(() => window.removeEventListener('app:preview', preview))
+onBeforeUnmount(() => { window.removeEventListener('app:preview', preview); store.stopStatusClock() })
 </script>
 
 <template>

@@ -7,8 +7,8 @@
 3. 使用依赖注入获取数据库会话
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
@@ -54,6 +54,39 @@ router = APIRouter(prefix="/tasks", tags=["下载任务"])
 VIDEO_PREVIEW_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 IMAGE_PREVIEW_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 PREVIEWABLE_EXTENSIONS = VIDEO_PREVIEW_EXTENSIONS | IMAGE_PREVIEW_EXTENSIONS
+
+
+def _parse_preview_range(value: str, file_size: int) -> tuple[int, int]:
+    """解析单段 HTTP bytes Range；移动端视频预览依赖 206 响应。"""
+    if not value.startswith("bytes=") or "," in value:
+        raise ValueError("unsupported range")
+    start_text, separator, end_text = value[6:].partition("-")
+    if not separator:
+        raise ValueError("invalid range")
+    if not start_text:
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            raise ValueError("invalid suffix")
+        start = max(0, file_size - suffix_length)
+        end = file_size - 1
+    else:
+        start = int(start_text)
+        end = int(end_text) if end_text else file_size - 1
+    if start < 0 or start >= file_size or end < start:
+        raise ValueError("range outside file")
+    return start, min(end, file_size - 1)
+
+
+def _iter_preview_range(file_path: Path, start: int, end: int):
+    remaining = end - start + 1
+    with file_path.open("rb") as file:
+        file.seek(start)
+        while remaining > 0:
+            chunk = file.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
 
 
 async def _raise_if_douyin_cooling() -> None:
@@ -469,7 +502,11 @@ async def get_failed_errors_for_toolbar(db: AsyncSession = Depends(get_async_db)
 
 
 @router.get("/{task_id}/preview")
-async def preview_task_video(task_id: int, db: AsyncSession = Depends(get_async_db)):
+async def preview_task_video(
+    task_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
     """预览已完成的本地媒体文件。"""
     result = await db.execute(
         select(DownloadTask).where(DownloadTask.id == task_id)
@@ -502,11 +539,36 @@ async def preview_task_video(task_id: int, db: AsyncSession = Depends(get_async_
         raise HTTPException(status_code=404, detail="预览文件不存在")
 
     media_type = mimetypes.guess_type(str(file_path))[0] or "video/mp4"
+    if file_path.suffix.lower() in VIDEO_PREVIEW_EXTENSIONS:
+        file_size = (await asyncio.to_thread(file_path.stat)).st_size
+        range_header = request.headers.get("range")
+        if range_header:
+            try:
+                start, end = _parse_preview_range(range_header, file_size)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=416,
+                    detail="请求的视频范围无效",
+                    headers={"Content-Range": f"bytes */{file_size}"},
+                )
+            return StreamingResponse(
+                _iter_preview_range(file_path, start, end),
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(end - start + 1),
+                    "Content-Disposition": "inline",
+                    "Cache-Control": "private, max-age=60",
+                },
+            )
     return FileResponse(
         path=str(file_path),
         media_type=media_type,
         filename=file_path.name,
-        headers={"Cache-Control": "private, max-age=60"},
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=60", "Accept-Ranges": "bytes"},
     )
 
 

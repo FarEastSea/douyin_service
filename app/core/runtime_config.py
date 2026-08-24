@@ -50,7 +50,7 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
         "default": settings.REQUEST_DELAY,
         "min": 1.0,
         "max": 120.0,
-        "label": "抖音分页请求间隔",
+        "label": "抖音接口最小请求间隔",
         "unit": "秒",
     },
     "douyin_risk_cooldown_seconds": {

@@ -15,11 +15,14 @@ const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(f
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
 const accountOnlyKeys = new Set(['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE'])
 const generalFields = computed(() => allFields.value.filter(field => !accountOnlyKeys.has(field.key)))
+const generalGroup = ref('')
+const generalGroups = computed(() => [...new Set(generalFields.value.map(field => String(field.group || '其他')))])
+const visibleGeneralFields = computed(() => generalFields.value.filter(field => String(field.group || '其他') === generalGroup.value))
 const xCookieFile = ref('')
 const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
 
 async function loadRuntime() { const data = await api<any>('/config/runtime'); runtime.value = data.config; limits.value = data.limits }
-async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || '' }
+async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || ''; if (!generalGroups.value.includes(generalGroup.value)) generalGroup.value = generalGroups.value[0] || '' }
 async function loadLogs(silent: boolean | Event = false) { try { logs.value = (await api<any>('/logs?start=0&count=500')).logs || [] } catch (e: any) { if (silent !== true) store.notify(e.message, 'error') } }
 async function loadProcess() { process.value = await api('/process/status') }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
@@ -67,8 +70,8 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
     <header class="workspace-header"><div><p class="eyebrow">SYSTEM CONTROL</p><h2>设置与诊断</h2><span>所有网页配置在保存后动态生效</span></div><button class="btn ghost" @click="init"><RefreshCw :size="16" />刷新状态</button></header>
     <nav class="settings-tabs"><button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" @click="tab = item[0]">{{ item[1] }}</button></nav>
 
-    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>应用、安全、目录、数据库与后台任务配置</p></div><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></header><div class="form-grid">
-      <label v-for="field in generalFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
+    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库与后台任务配置</p></div><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></header><nav class="settings-subtabs"><button v-for="group in generalGroups" :key="group" :class="{ active: generalGroup === group }" @click="generalGroup = group">{{ group }}</button></nav><div class="form-grid">
+      <label v-for="field in visibleGeneralFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
     </div></div>
 
     <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>Cookie 相关配置统一在此管理，敏感内容不会回显</p></div></header><div class="credential-grid"><article><strong>抖音 Cookie</strong><p>用于作者资料、作品列表和链接刷新。</p><textarea v-model="cookieValue" placeholder="粘贴最新抖音 Cookie" /><small class="cookie-format-hint">格式要求：Cookie Header String（例如 name=value; name2=value2），不支持 JSON 或 Netscape 格式。</small><button class="btn primary" @click="saveCookie('douyin')"><Save :size="16" />更新抖音 Cookie</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><small class="cookie-format-hint">格式要求：支持 Cookie Header String（例如 name=value; name2=value2）或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="saveCookie('x')"><Save :size="16" />更新 X Cookie</button></article><article class="credential-path"><strong>X Cookie 文件</strong><p>可选：填写服务器上的 Cookie 文件路径，留空则使用上方保存的 Cookie。</p><div><input v-model="xCookieFile" placeholder="例如：/data/cookies/x.txt" /><button class="btn ghost" @click="saveXCookieFile"><Save :size="16" />保存路径</button></div></article></div></div>
@@ -84,3 +87,9 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
     <div v-else class="settings-panel"><header><Database /><div><h3>诊断与关于</h3><p>版本检查、更新诊断与运维入口</p></div></header><div class="about-grid"><article><strong>当前版本 {{ updateInfo.current?.short || '—' }}</strong><p>{{ updateInfo.message || '正在读取本地版本信息' }}<br />分支：{{ updateInfo.branch || '—' }}</p><div class="header-actions"><button class="btn ghost" :disabled="updateBusy" @click="checkUpdate">检查更新</button><button class="btn ghost" @click="diagnoseUpdate">复制诊断</button><button v-if="updateInfo.has_update" class="btn primary" :disabled="updateBusy || !updateInfo.update_supported" @click="applyUpdate">安装更新</button></div></article><article><strong>媒体下载管理系统</strong><p>FastAPI · PostgreSQL · Redis · Celery · Vue 3</p><div class="header-actions"><a class="btn ghost" href="/docs" target="_blank">API 文档</a><a class="btn ghost" href="/legacy">旧版界面</a></div></article></div><pre v-if="diagnostic" class="diagnostic-preview">{{ JSON.stringify(diagnostic, null, 2) }}</pre></div>
   </section>
 </template>
+
+<style scoped>
+.settings-subtabs { margin: -4px 0 16px; padding-bottom: 12px; display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--line); }
+.settings-subtabs button { padding: 7px 11px; white-space: nowrap; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); cursor: pointer; }
+.settings-subtabs button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+</style>

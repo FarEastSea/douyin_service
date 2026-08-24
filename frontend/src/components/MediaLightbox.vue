@@ -47,7 +47,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); document
         </header>
         <main class="lightbox-stage">
           <div v-if="failed || !current" class="media-fallback">媒体加载失败，请关闭后重试</div>
-          <video v-else-if="current.type === 'video'" :key="current.url" controls autoplay preload="metadata" :src="current.url" @error="failed = true" />
+          <video v-else-if="current.type === 'video'" :key="current.url" controls playsinline preload="metadata" :src="current.url" @error="failed = true" />
           <img v-else :key="current.url" :src="current.url" :alt="current.title || '图片预览'" @error="failed = true" />
           <button v-if="items.length > 1" class="lightbox-nav prev" aria-label="上一项" @click="move(-1)"><ChevronLeft /></button>
           <button v-if="items.length > 1" class="lightbox-nav next" aria-label="下一项" @click="move(1)"><ChevronRight /></button>

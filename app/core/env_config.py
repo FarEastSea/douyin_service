@@ -67,7 +67,7 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="DEFAULT_CHECK_INTERVAL", label="默认订阅检查间隔（秒）", group="订阅", default="21600"),
     EnvField(key="MIN_CHECK_INTERVAL", label="最小订阅检查间隔（秒）", group="订阅", default="3600"),
     EnvField(key="AUTO_CHECK_ENABLED", label="启用自动订阅检查", group="订阅", default="true"),
-    EnvField(key="REQUEST_DELAY", label="抖音分页请求间隔（秒）", group="抖音", default="3.0"),
+    EnvField(key="REQUEST_DELAY", label="抖音接口最小请求间隔（秒）", group="抖音", default="3.0", help="所有 Worker 共享，避免多个任务在同一秒集中请求抖音"),
     EnvField(key="AUTHOR_CHECK_DELAY", label="作者检查间隔（秒）", group="抖音", default="30.0"),
     EnvField(key="DOUYIN_RISK_COOLDOWN_SECONDS", label="抖音风控冷却时长（秒）", group="抖音", default="300"),
     EnvField(key="DOUYIN_RISK_AUTO_RETRY", label="风控冷却后自动恢复一次", group="抖音", default="true"),

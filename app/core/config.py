@@ -101,11 +101,11 @@ class Settings(BaseModel):
     # 卡住任务检测
     STUCK_TASK_TIMEOUT: int = 600  # 下载任务无进度变化超过此时间(秒)视为卡住，默认10分钟
     
-    # Celery Worker 并发数（同时下载任务数）
+    # 下载全局并发上限；Celery 本地进程数只是第一层保护。
     MAX_CONCURRENT_DOWNLOADS: int = 3
     
     # 抖音请求配置
-    REQUEST_DELAY: float = 3.0  # 分页请求间隔，避免频繁请求
+    REQUEST_DELAY: float = 3.0  # 所有 Worker 共享的抖音业务请求最小间隔
     AUTHOR_CHECK_DELAY: float = 30.0  # 自动检查不同作者之间的间隔
     DOUYIN_RISK_COOLDOWN_SECONDS: int = 300  # 命中抖音风控后的全局冷却
     DOUYIN_RISK_AUTO_RETRY: bool = True  # 冷却结束后自动恢复一次

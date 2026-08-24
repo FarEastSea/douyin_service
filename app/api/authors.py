@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 
 from app.models.database import get_async_db
 from app.models.models import (
-    Author, Work, DownloadTask, SubscriptionCheckReport, AuthorProfileHistory,
+    Author, Work, DownloadTask, SubscriptionCheckReport, AuthorProfileHistory, SystemConfig,
 )
 from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
@@ -30,6 +30,7 @@ from app.services.downloader import DouyinDownloader, author_profile_has_identit
 from app.services.avatar_cache import ensure_author_avatar_cached, find_cached_author_avatar
 from app.tasks.download_tasks import (
     AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX,
+    SUBSCRIPTION_CYCLE_STATE_KEY,
     TERMINAL_AUTHOR_ACCOUNT_STATUSES,
     build_author_account_status_marker,
     check_subscriptions,
@@ -943,5 +944,22 @@ async def get_subscription_reports(
                 if report.started_at and report.trigger_type == "auto" else None
             ),
         })
-    return {"items": reports}
+    cycle_result = await db.execute(
+        select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CYCLE_STATE_KEY)
+    )
+    cycle_row = cycle_result.scalar_one_or_none()
+    try:
+        cycle = json.loads(cycle_row.value or "{}") if cycle_row else {}
+    except (TypeError, ValueError):
+        cycle = {}
+    if not cycle and reports:
+        latest = reports[0]
+        cycle = {
+            "active": latest["status"] == "running",
+            "total_authors": latest["total_authors"],
+            "checked_authors": latest["checked_authors"],
+            "remaining_authors": latest["remaining_authors"],
+            "new_works": latest["new_works"],
+        }
+    return {"items": reports, "cycle": cycle}
 

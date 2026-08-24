@@ -413,18 +413,10 @@ async def get_download_stats(db: AsyncSession = Depends(get_async_db)):
 @router.get("/status", response_model=SystemStatus)
 async def get_system_status(db: AsyncSession = Depends(get_async_db)):
     """获取统计、Redis、Celery 与本地进程的合并状态。"""
-    def _redis_snapshot():
-        try:
-            connected = redis_client.check_connection()
-        except Exception:
-            connected = False
-        try:
-            cached = redis_client.get_stats_cached()
-        except Exception:
-            cached = None
-        return connected, cached
-
-    redis_connected, cached_stats = await asyncio.to_thread(_redis_snapshot)
+    try:
+        redis_connected = await asyncio.to_thread(redis_client.check_connection)
+    except Exception:
+        redis_connected = False
     stat_keys = {
         "total_authors",
         "subscribed_authors",
@@ -432,19 +424,16 @@ async def get_system_status(db: AsyncSession = Depends(get_async_db)):
         "downloading_tasks",
         "total_downloads",
     }
-    if cached_stats and stat_keys.issubset(cached_stats):
-        stats = {key: int(cached_stats.get(key) or 0) for key in stat_keys}
-    else:
-        stats_row = (await db.execute(select(
-            select(func.count(Author.id)).scalar_subquery().label("total_authors"),
-            select(func.count(Author.id)).where(Author.is_subscribed.is_(True)).scalar_subquery().label("subscribed_authors"),
-            select(func.count(DownloadTask.id)).where(DownloadTask.status == "pending").scalar_subquery().label("pending_tasks"),
-            select(func.count(DownloadTask.id)).where(DownloadTask.status == "downloading").scalar_subquery().label("downloading_tasks"),
-            select(func.count(DownloadHistory.id)).scalar_subquery().label("total_downloads"),
-        ))).mappings().one()
-        stats = {key: int(stats_row[key] or 0) for key in stat_keys}
-        if redis_connected:
-            await asyncio.to_thread(redis_client.set_stats_cached, stats)
+    # 这五个计数变化频繁，60 秒 Redis 缓存会让页面长期显示旧值。
+    # 单条 SQL 直接读取当前数据库快照，前端轮询即可及时反映任务变化。
+    stats_row = (await db.execute(select(
+        select(func.count(Author.id)).scalar_subquery().label("total_authors"),
+        select(func.count(Author.id)).where(Author.is_subscribed.is_(True)).scalar_subquery().label("subscribed_authors"),
+        select(func.count(DownloadTask.id)).where(DownloadTask.status == "pending").scalar_subquery().label("pending_tasks"),
+        select(func.count(DownloadTask.id)).where(DownloadTask.status == "downloading").scalar_subquery().label("downloading_tasks"),
+        select(func.count(DownloadHistory.id)).scalar_subquery().label("total_downloads"),
+    ))).mappings().one()
+    stats = {key: int(stats_row[key] or 0) for key in stat_keys}
 
     # Celery workers (通过 broker ping，带超时)
     celery_workers = 0

@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.core import redis_client
 from app.core.network_security import get_douyin_response, validate_douyin_url
 from app.core.runtime_config import get_cached_runtime_config
+from app.core.traffic_control import wait_for_douyin_request_slot
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -394,6 +395,10 @@ class DouyinDownloader:
 
     def _get_douyin_response(self, url: str):
         """统一执行抖音业务请求，并将网络异常转成结构化错误。"""
+        self._check_risk_gate()
+        # 分页、资料、作品详情和短链解析过去只在各自循环内休眠，多个
+        # Celery 进程仍可在同一秒集中请求。这里使用 Redis 统一排队。
+        wait_for_douyin_request_slot(self.request_delay)
         self._check_risk_gate()
         try:
             return get_douyin_response(self.session, url, timeout=self.download_timeout)

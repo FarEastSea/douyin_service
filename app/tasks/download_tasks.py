@@ -19,6 +19,7 @@ import logging
 import traceback
 import json
 import random
+from uuid import uuid4
 
 from app.tasks.celery_app import celery_app
 from app.models.database import get_sync_db
@@ -39,6 +40,7 @@ from app.services.downloader import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
+from app.core.traffic_control import global_download_slot
 from app.services.avatar_cache import ensure_author_avatar_cached
 from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
@@ -70,6 +72,7 @@ if not logger.handlers:  # 避免重复添加handler
 
 SUBSCRIPTION_CHECK_STATE_KEY = "runtime:last_subscription_check_at"
 SUBSCRIPTION_CHECK_LOCK_KEY = "douyin:subscription_check_lock"
+SUBSCRIPTION_CYCLE_STATE_KEY = "subscription_check_cycle_state"
 AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX = "__ACCOUNT_STATUS__"
 TERMINAL_AUTHOR_ACCOUNT_STATUSES = {"deleted", "banned", "restricted"}
 
@@ -101,6 +104,59 @@ def _parse_datetime(value: str):
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _load_subscription_cycle_state(db: Session) -> dict:
+    row = db.execute(
+        select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CYCLE_STATE_KEY)
+    ).scalar_one_or_none()
+    if not row or not row.value:
+        return {}
+    try:
+        state = json.loads(row.value)
+        return state if isinstance(state, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _save_subscription_cycle_state(db: Session, state: dict) -> None:
+    row = db.execute(
+        select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CYCLE_STATE_KEY)
+    ).scalar_one_or_none()
+    value = json.dumps(state, ensure_ascii=False)
+    if row:
+        row.value = value
+    else:
+        db.add(SystemConfig(key=SUBSCRIPTION_CYCLE_STATE_KEY, value=value))
+
+
+def _clear_subscription_cycle_state(db: Session, cycle_id: str | None = None) -> None:
+    row = db.execute(
+        select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CYCLE_STATE_KEY)
+    ).scalar_one_or_none()
+    if not row:
+        return
+    if cycle_id:
+        try:
+            current = json.loads(row.value or "{}")
+        except (TypeError, ValueError):
+            current = {}
+        if current.get("cycle_id") not in {None, cycle_id}:
+            return
+    db.delete(row)
+
+
+def _release_subscription_lock(token: str) -> None:
+    try:
+        redis_client.redis_client.eval(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "return redis.call('DEL', KEYS[1]) else return 0 end",
+            1,
+            SUBSCRIPTION_CHECK_LOCK_KEY,
+            token,
+        )
+    except Exception:
+        pass
 
 
 def _is_probable_rate_limit_error(value: str | None) -> bool:
@@ -381,7 +437,8 @@ def download_single_file(self, task_id: int, risk_retry_attempt: int = 0):
     """
     # ---- 顶层安全防护：任何异常都不能让 Worker 进程崩溃 ----
     try:
-        _download_single_file_impl(self, task_id, risk_retry_attempt=risk_retry_attempt)
+        with global_download_slot(getattr(self.request, "id", None) or task_id):
+            _download_single_file_impl(self, task_id, risk_retry_attempt=risk_retry_attempt)
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)[:300]}"
         logger.error(f"任务 {task_id} 顶层异常: {error_msg}\n{traceback.format_exc()}")
@@ -954,7 +1011,11 @@ def download_author_works(self, author_id: int, start_index: int = 1,
 
 @celery_app.task(bind=True, name="app.tasks.download_tasks.check_subscriptions")
 def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
-                        author_ids: list[int] | None = None):
+                        author_ids: list[int] | None = None,
+                        cycle_id: str | None = None,
+                        cycle_total: int = 0,
+                        cycle_checked: int = 0,
+                        cycle_new_works: int = 0):
     """
     检查所有订阅的作者是否有新作品
     
@@ -962,6 +1023,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
     """
     db = get_sync_db()
     report = None
+    lock_token = str(getattr(getattr(self, "request", None), "id", None) or uuid4().hex)
+    lock_acquired = False
     
     try:
         runtime_config = get_runtime_config_sync(db)
@@ -977,6 +1040,17 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
         author_delay = float(runtime_config.get("author_check_delay", settings.AUTHOR_CHECK_DELAY))
 
+        # 风控或超时留下的周期由下一次自动调度或手动触发从断点继续，不新开一轮。
+        if not author_ids:
+            saved_cycle = _load_subscription_cycle_state(db)
+            saved_remaining = saved_cycle.get("remaining_author_ids") or []
+            if saved_cycle.get("active") and saved_remaining:
+                author_ids = [int(author_id) for author_id in saved_remaining]
+                cycle_id = str(saved_cycle.get("cycle_id") or cycle_id or uuid4().hex)
+                cycle_total = int(saved_cycle.get("total_authors") or cycle_total or len(author_ids))
+                cycle_checked = int(saved_cycle.get("checked_authors") or cycle_checked or 0)
+                cycle_new_works = int(saved_cycle.get("new_works") or cycle_new_works or 0)
+
         if not force and not author_ids:
             last_check_time = _get_last_subscription_check_time(db)
             if last_check_time:
@@ -989,22 +1063,26 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "next_check_seconds": int(global_interval - elapsed),
                     }
 
-            try:
-                acquired = redis_client.redis_client.set(
-                    SUBSCRIPTION_CHECK_LOCK_KEY,
-                    datetime.now().isoformat(timespec="seconds"),
-                    nx=True,
-                    ex=max(global_interval, settings.MIN_CHECK_INTERVAL),
-                )
-                if not acquired:
-                    return {
-                        "success": True,
-                        "skipped": True,
-                        "reason": "global_lock",
-                    }
-            except Exception:
-                pass
+        # 手动检查、自动检查和断点续检共用同一互斥锁。过去 force=True
+        # 会完全绕过锁，多次点击可同时扫描全部作者并迅速触发风控。
+        try:
+            lock_acquired = bool(redis_client.redis_client.set(
+                SUBSCRIPTION_CHECK_LOCK_KEY,
+                lock_token,
+                nx=True,
+                ex=2100,
+            ))
+        except Exception:
+            # Redis 故障时由 Celery worker 并发提供退化保护。
+            lock_acquired = True
+        if not lock_acquired:
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "global_lock",
+            }
 
+        if not force and not author_ids:
             # 在真正请求抖音前就标记本轮已开始，失败也进入全局冷却。
             _mark_subscription_check_started(db)
 
@@ -1030,7 +1108,21 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 Author.id.asc(),
             )
         ).scalars().all()
+        cycle_id = cycle_id or uuid4().hex
+        cycle_total = max(int(cycle_total or 0), len(authors))
+        cycle_checked = max(0, int(cycle_checked or 0))
+        cycle_new_works = max(0, int(cycle_new_works or 0))
         report.total_authors = len(authors)
+        _save_subscription_cycle_state(db, {
+            "active": True,
+            "cycle_id": cycle_id,
+            "total_authors": cycle_total,
+            "checked_authors": cycle_checked,
+            "remaining_authors": max(0, cycle_total - cycle_checked),
+            "new_works": cycle_new_works,
+            "remaining_author_ids": [author.id for author in authors],
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        })
         db.commit()
         
         results = []
@@ -1041,6 +1133,57 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         stopped_for_rate_limit = False
         risk_author_id = None
         RATE_LIMIT_STOP_THRESHOLD = 3
+
+        def _result_sets() -> tuple[set[int], set[int]]:
+            settled_ids: set[int] = set()
+            completed_ids: set[int] = set()
+            for item in results:
+                author_id = item.get("author_id")
+                if not author_id:
+                    continue
+                status = item.get("status")
+                risk_failure = item.get("error_code") in {
+                    "argus_blocked", "rate_limited", "suspected_rate_limit",
+                }
+                if status != "deferred" and not risk_failure:
+                    settled_ids.add(int(author_id))
+                if status not in {"deferred", "not_due"} and not risk_failure:
+                    completed_ids.add(int(author_id))
+            return settled_ids, completed_ids
+
+        def _update_running_progress() -> None:
+            settled_ids, completed_ids = _result_sets()
+            status_counts: dict[str, int] = {}
+            for item in results:
+                status = item.get("status", "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+            round_checked = len(completed_ids)
+            round_remaining_ids = [author.id for author in authors if author.id not in settled_ids]
+            current_new_works = sum(int(item.get("new_works", 0) or 0) for item in results)
+            cumulative_checked = min(cycle_total, cycle_checked + round_checked)
+            report.checked_authors = round_checked
+            report.success_authors = status_counts.get("success", 0) + status_counts.get("new_works", 0)
+            report.new_works = current_new_works
+            report.warning_authors = status_counts.get("warning", 0) + status_counts.get("account_warning", 0)
+            report.failed_authors = status_counts.get("failed", 0)
+            report.skipped_authors = status_counts.get("not_due", 0)
+            report.remaining_authors = len(round_remaining_ids)
+            report.summary = (
+                f"正在检查：本轮已检查 {round_checked} 位，"
+                f"累计已检查 {cumulative_checked}/{cycle_total} 位"
+            )
+            report.details_json = json.dumps(results, ensure_ascii=False, default=str)
+            _save_subscription_cycle_state(db, {
+                "active": True,
+                "cycle_id": cycle_id,
+                "total_authors": cycle_total,
+                "checked_authors": cumulative_checked,
+                "remaining_authors": len(round_remaining_ids),
+                "new_works": cycle_new_works + current_new_works,
+                "remaining_author_ids": round_remaining_ids,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            })
+            db.commit()
         
         for author in authors:
             # 检查是否到达检查时间
@@ -1056,6 +1199,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "message": "未到作者检查间隔",
                         "next_check_seconds": int(effective_interval - elapsed),
                     })
+                    _update_running_progress()
                     continue
             
             checked_count += 1
@@ -1233,8 +1377,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         time.sleep(author_delay)
                     continue
 
-                author.last_check_time = datetime.now()
-                author.last_auto_update_at = author.last_check_time
+                probable_rate_limit = _is_probable_rate_limit_error(error_msg)
+                if not probable_rate_limit:
+                    author.last_check_time = datetime.now()
+                    author.last_auto_update_at = author.last_check_time
                 author.last_error = error_msg[:1000]
                 db.commit()
                 logger.warning(
@@ -1256,11 +1402,13 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 
                 # 疑似限流：不再因单个作者的偶发失败中断整轮检查。
                 # 只有连续多次疑似限流才提前停止本轮，避免持续请求扩大限制；
-                # 失败作者的 last_check_time 已更新，下一轮会自动排到后面重试。
-                if _is_probable_rate_limit_error(error_msg):
+                # 疑似限流作者不推进 last_check_time，并保留在本周期续检集合中。
+                if probable_rate_limit:
+                    results[-1]["error_code"] = "suspected_rate_limit"
                     consecutive_rate_limited += 1
                     if consecutive_rate_limited >= RATE_LIMIT_STOP_THRESHOLD:
                         stopped_for_rate_limit = True
+                        risk_author_id = author.id
                         redis_client.append_activity_log(
                             "warning",
                             "task",
@@ -1277,7 +1425,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 else:
                     # 非限流类错误不累计限流计数
                     consecutive_rate_limited = 0
-            
+            finally:
+                # 每位作者完成后即持久化报告和跨轮累计进度，页面无需等整轮结束。
+                _update_running_progress()
+
             # 请求间隔
             if author_delay > 0:
                 time.sleep(author_delay)
@@ -1286,14 +1437,14 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         if stopped_for_timeout and not force:
             _reset_subscription_check_cooldown(db)
 
-        completed_author_ids = {item.get("author_id") for item in results}
-        resume_author_ids = [author.id for author in authors if author.id not in completed_author_ids]
-        if risk_author_id is not None:
+        settled_author_ids, completed_author_ids = _result_sets()
+        resume_author_ids = [author.id for author in authors if author.id not in settled_author_ids]
+        if risk_author_id is not None and risk_author_id not in resume_author_ids:
             resume_author_ids.insert(0, risk_author_id)
         if stopped_for_timeout or stopped_for_rate_limit:
             deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
             for author in authors:
-                if author.id not in completed_author_ids:
+                if author.id in resume_author_ids:
                     results.append({
                         "author_id": author.id,
                         "nickname": author.nickname,
@@ -1301,31 +1452,44 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "message": deferred_reason,
                     })
 
-        due_count = checked_count + max(0, len(authors) - checked_count - skipped_count)
+        round_checked = len(completed_author_ids)
+        remaining_count = len(resume_author_ids) if (stopped_for_timeout or stopped_for_rate_limit) else 0
+        due_count = round_checked + remaining_count
         status_counts = {}
         for item in results:
             key = item.get("status", "unknown")
             status_counts[key] = status_counts.get(key, 0) + 1
-        remaining_count = max(0, len(authors) - checked_count - skipped_count)
-        if stopped_for_rate_limit:
-            # 当前命中风控的作者也需要在冷却后重试；checked_count 表示已尝试，
-            # 不能因此把它从恢复任务的剩余数量中排除。
-            remaining_count += 1
+        current_new_works = sum(int(item.get("new_works", 0) or 0) for item in results)
+        cumulative_checked = min(cycle_total, cycle_checked + round_checked)
+        cumulative_new_works = cycle_new_works + current_new_works
         report.due_authors = due_count
-        report.checked_authors = checked_count
+        report.checked_authors = round_checked
         report.success_authors = status_counts.get("success", 0) + status_counts.get("new_works", 0)
-        report.new_works = sum(int(item.get("new_works", 0) or 0) for item in results)
+        report.new_works = current_new_works
         report.warning_authors = status_counts.get("warning", 0) + status_counts.get("account_warning", 0)
         report.failed_authors = status_counts.get("failed", 0)
         report.skipped_authors = skipped_count
         report.remaining_authors = remaining_count
         report.status = "partial_rate_limited" if stopped_for_rate_limit else ("partial_timeout" if stopped_for_timeout else "completed")
         report.summary = (
-            f"订阅 {len(authors)} 位，到期 {due_count} 位，已检查 {checked_count} 位，"
-            f"发现新作品 {report.new_works} 个，异常/警告 {report.warning_authors + report.failed_authors} 位"
+            f"本轮已检查 {round_checked} 位，累计已检查 {cumulative_checked}/{cycle_total} 位，"
+            f"等待续检 {remaining_count} 位，发现新作品 {report.new_works} 个"
         )
         report.details_json = json.dumps(results, ensure_ascii=False, default=str)
         report.finished_at = datetime.now()
+        if remaining_count > 0:
+            _save_subscription_cycle_state(db, {
+                "active": True,
+                "cycle_id": cycle_id,
+                "total_authors": cycle_total,
+                "checked_authors": cumulative_checked,
+                "remaining_authors": remaining_count,
+                "new_works": cumulative_new_works,
+                "remaining_author_ids": resume_author_ids,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            })
+        else:
+            _clear_subscription_cycle_state(db, cycle_id)
         db.commit()
 
         # 纯执行超时属于容量分片，可短延迟承接；风控中断则严格等待下一个
@@ -1334,7 +1498,14 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         if not force and stopped_for_timeout and remaining_count > 0:
             countdown = 30
             try:
-                continuation = check_subscriptions.apply_async(kwargs={"force": False}, countdown=countdown)
+                continuation = check_subscriptions.apply_async(kwargs={
+                    "force": False,
+                    "author_ids": resume_author_ids,
+                    "cycle_id": cycle_id,
+                    "cycle_total": cycle_total,
+                    "cycle_checked": cumulative_checked,
+                    "cycle_new_works": cumulative_new_works,
+                }, countdown=countdown)
                 continuation_task_id = continuation.id
                 redis_client.append_activity_log(
                     "info", "task", "订阅检查已安排分批续检",
@@ -1355,6 +1526,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                             "force": force,
                             "risk_retry_attempt": 1,
                             "author_ids": resume_author_ids,
+                            "cycle_id": cycle_id,
+                            "cycle_total": cycle_total,
+                            "cycle_checked": cumulative_checked,
+                            "cycle_new_works": cumulative_new_works,
                         },
                         countdown=countdown,
                     )
@@ -1368,7 +1543,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         
         return {
             "success": True,
-            "checked": checked_count,
+            "checked": round_checked,
             "skipped": skipped_count,
             "stopped_for_timeout": stopped_for_timeout,
             "stopped_for_rate_limit": stopped_for_rate_limit,
@@ -1395,6 +1570,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 db.rollback()
         return {"success": False, "error": str(e)}
     finally:
+        if lock_acquired:
+            _release_subscription_lock(lock_token)
         db.close()
 
 

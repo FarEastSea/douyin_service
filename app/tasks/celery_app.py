@@ -39,7 +39,7 @@ celery_app.conf.update(
     
     # 并发控制
     worker_prefetch_multiplier=1,  # 每个 worker 一次只取一个任务
-    worker_concurrency=settings.MAX_CONCURRENT_DOWNLOADS,  # 同时下载任务数
+    worker_concurrency=settings.MAX_CONCURRENT_DOWNLOADS,  # 本地执行槽；真实下载另有跨 Worker 全局配额
     
     # 任务超时保护（防止任务挂死导致 Worker 卡住）
     task_time_limit=1800,           # 30 分钟硬限制（SIGKILL）

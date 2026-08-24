@@ -10,6 +10,8 @@ export const useAppStore = defineStore('app', {
     theme: (localStorage.getItem('media-theme') || 'auto') as Theme,
     toast: null as null | { message: string; tone: 'success' | 'error' | 'info' },
     sidebarOpen: false,
+    statusTimer: null as number | null,
+    statusTicks: 0,
   }),
   actions: {
     async refreshStatus() {
@@ -20,10 +22,20 @@ export const useAppStore = defineStore('app', {
       } catch { /* keep last known state */ }
     },
     startRiskClock() {
-      window.setInterval(() => {
+      if (this.statusTimer != null) return
+      this.statusTimer = window.setInterval(() => {
         if (this.risk.active && this.risk.retry_after > 0) this.risk.retry_after--
-        if (this.risk.active && this.risk.retry_after <= 0) this.refreshStatus()
+        this.statusTicks++
+        if (this.statusTicks >= 5 || (this.risk.active && this.risk.retry_after <= 0)) {
+          this.statusTicks = 0
+          this.refreshStatus()
+        }
       }, 1000)
+    },
+    stopStatusClock() {
+      if (this.statusTimer != null) window.clearInterval(this.statusTimer)
+      this.statusTimer = null
+      this.statusTicks = 0
     },
     notify(message: string, tone: 'success' | 'error' | 'info' = 'success') {
       this.toast = { message, tone }

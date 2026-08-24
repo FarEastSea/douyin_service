@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from app.core import redis_client
 from app.core.config import settings
+from app.core.traffic_control import global_download_slot
 from app.models.database import get_sync_db
 from app.models.models import XAuthor, XDownloadTask, XMediaAsset
 from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_cookie_file
@@ -117,14 +118,15 @@ def download_x_profile(self, task_id: int):
 
         # 每次使用配置时动态读取网页持久化后的值。
         x_download_root = settings.X_DOWNLOAD_DIR
-        result = engine.download_profile(
-            profile_url=task.profile_url,
-            username=task.username,
-            destination=x_download_root,
-            cookie_file=cookie_path,
-            on_line=on_line,
-            task_id=task_id,
-        )
+        with global_download_slot(getattr(self.request, "id", None) or f"x:{task_id}"):
+            result = engine.download_profile(
+                profile_url=task.profile_url,
+                username=task.username,
+                destination=x_download_root,
+                cookie_file=cookie_path,
+                on_line=on_line,
+                task_id=task_id,
+            )
 
         task.download_dir = os.path.join(x_download_root, task.username)
         existing_paths = {
