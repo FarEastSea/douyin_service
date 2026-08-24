@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import os
 from threading import RLock
 import time
 from typing import Optional
@@ -46,6 +47,7 @@ _async_failed_key: Optional[tuple] = None
 _async_retry_after = 0.0
 _sync_engine: Optional[Engine] = None
 _sync_engine_key: Optional[tuple] = None
+_sync_engine_pid: Optional[int] = None
 _sync_failed_key: Optional[tuple] = None
 _sync_retry_after = 0.0
 
@@ -116,7 +118,22 @@ async def get_async_engine() -> AsyncEngine:
 
 
 def get_sync_engine() -> Engine:
-    global _sync_engine, _sync_engine_key, _sync_failed_key, _sync_retry_after
+    global _sync_engine, _sync_engine_key, _sync_engine_pid, _sync_failed_key, _sync_retry_after
+    current_pid = os.getpid()
+    inherited_engine: Optional[Engine] = None
+    with _engine_lock:
+        if _sync_engine is not None and _sync_engine_pid != current_pid:
+            # Celery prefork 子进程不能复用父进程的 libpq 连接。只替换子进程
+            # 持有的连接池引用，不关闭父进程仍可能使用的连接。
+            inherited_engine = _sync_engine
+            _sync_engine = None
+            _sync_engine_key = None
+            _sync_engine_pid = None
+            _sync_failed_key = None
+            _sync_retry_after = 0.0
+    if inherited_engine is not None:
+        inherited_engine.dispose(close=False)
+
     current, config_key = _current_engine_config()
     with _engine_lock:
         if _sync_engine is not None and _sync_engine_key == config_key:
@@ -158,6 +175,7 @@ def get_sync_engine() -> Engine:
             old_engine = _sync_engine
             _sync_engine = candidate
             _sync_engine_key = config_key
+            _sync_engine_pid = current_pid
             _sync_failed_key = None
             _sync_retry_after = 0.0
             selected_engine = candidate
@@ -167,6 +185,20 @@ def get_sync_engine() -> Engine:
     if old_engine is not None and old_engine is not candidate:
         old_engine.dispose()
     return selected_engine
+
+
+def dispose_inherited_sync_engine() -> None:
+    """在 fork 子进程初始化时丢弃继承的同步连接池。"""
+    global _sync_engine, _sync_engine_key, _sync_engine_pid, _sync_failed_key, _sync_retry_after
+    with _engine_lock:
+        inherited_engine = _sync_engine
+        _sync_engine = None
+        _sync_engine_key = None
+        _sync_engine_pid = None
+        _sync_failed_key = None
+        _sync_retry_after = 0.0
+    if inherited_engine is not None:
+        inherited_engine.dispose(close=False)
 
 
 async def get_async_db():

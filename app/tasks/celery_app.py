@@ -92,7 +92,22 @@ def echo_test():
 
 # ============ Worker 生命周期信号 ============
 
-from celery.signals import worker_ready, worker_shutdown, task_prerun, task_postrun, task_failure
+from celery.signals import (
+    worker_process_init,
+    worker_ready,
+    worker_shutdown,
+    task_prerun,
+    task_postrun,
+    task_failure,
+)
+
+
+@worker_process_init.connect
+def on_worker_process_init(**kwargs):
+    """每个 prefork 子进程都必须使用自己的数据库连接池。"""
+    from app.models.database import dispose_inherited_sync_engine
+
+    dispose_inherited_sync_engine()
 
 
 @worker_ready.connect

@@ -13,7 +13,7 @@ const total = ref(0), pages = ref(1), page = ref(1)
 const loading = ref(false), status = ref(''), query = ref(''), shareUrl = ref('')
 const timer = ref<number>()
 const statuses = [
-  ['', '全部'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['failed', '失败'],
+  ['', '全部'], ['pending', '待处理'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['failed', '失败'],
 ]
 const failedCount = computed(() => tasks.value.filter(item => item.status === 'failed').length)
 

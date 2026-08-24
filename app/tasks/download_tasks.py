@@ -11,7 +11,7 @@ Celery 下载任务
 
 from celery import shared_task, current_task
 from celery.exceptions import SoftTimeLimitExceeded
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 import time
@@ -468,10 +468,33 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
         f"⭐ download_single_file 启动", f"task_id={task_id}")
     db = get_sync_db()
     try:
-        # 获取任务信息
+        # 原子认领任务。队列消息被重复投递时，只有第一个进程能把 pending
+        # 改为 downloading，其余消息直接结束，避免同一文件并发下载。
+        claimed = db.execute(
+            update(DownloadTask)
+            .where(DownloadTask.id == task_id, DownloadTask.status == "pending")
+            .values(
+                status="downloading",
+                celery_task_id=self_task.request.id,
+                started_at=datetime.now(),
+            )
+        )
+        if claimed.rowcount != 1:
+            db.rollback()
+            current_status = db.execute(
+                select(DownloadTask.status).where(DownloadTask.id == task_id)
+            ).scalar_one_or_none()
+            if current_status is None:
+                logger.error(f"任务 {task_id} 不存在")
+                redis_client.append_activity_log("error", "task", f"任务不存在: task_id={task_id}")
+                return {"success": False, "error": "任务不存在"}
+            logger.info(f"任务 {task_id} 当前状态为 {current_status}，跳过重复队列消息")
+            return {"success": True, "skipped": True, "status": current_status}
+        db.commit()
+
         task = db.execute(
             select(DownloadTask).where(DownloadTask.id == task_id)
-        ).scalar_one_or_none()
+        ).scalar_one()
 
         if not task:
             logger.error(f"任务 {task_id} 不存在")
@@ -488,6 +511,9 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
 
         if not work:
             logger.error(f"任务 {task_id} 关联的作品 {task.work_id} 不存在")
+            task.status = "failed"
+            task.error_message = "关联的作品不存在"
+            db.commit()
             return {"success": False, "error": "作品不存在"}
         
         # 获取作者信息
@@ -497,16 +523,16 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
 
         if not author:
             logger.error(f"任务 {task_id} 关联的作者 {work.author_id} 不存在")
+            task.status = "failed"
+            task.error_message = "关联的作者不存在"
+            db.commit()
             return {"success": False, "error": "作者不存在"}
 
         if _author_is_being_deleted(author.id, "download_single_file"):
+            task.status = "cancelled"
+            task.error_message = "作者正在删除"
+            db.commit()
             return {"success": False, "deleted": True, "error": "作者正在删除"}
-        
-        # 更新任务状态
-        task.status = "downloading"
-        task.celery_task_id = self_task.request.id
-        task.started_at = datetime.now()
-        db.commit()
         
         runtime_config = get_runtime_config_sync(db)
 
@@ -709,9 +735,11 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             task.status = "pending"
             task.error_message = f"{e.user_message} 系统将在约 {retry_after} 秒后自动恢复一次。"
             db.commit()
-            download_single_file.apply_async(
+            queued = download_single_file.apply_async(
                 args=[task_id], kwargs={"risk_retry_attempt": 1}, countdown=retry_after,
             )
+            task.celery_task_id = queued.id
+            db.commit()
             redis_client.append_activity_log(
                 "warning", "task", "下载任务因抖音风控延期",
                 f"task_id={task_id}, code={e.code}, retry_after={retry_after}",
@@ -941,7 +969,13 @@ def download_author_works(self, author_id: int, start_index: int = 1,
             return {"success": False, "deleted": True, "error": "作者正在删除"}
 
         for tid in all_task_ids:
-            download_single_file.delay(tid)
+            queued = download_single_file.delay(tid)
+            db.execute(
+                update(DownloadTask)
+                .where(DownloadTask.id == tid, DownloadTask.status == "pending")
+                .values(celery_task_id=queued.id)
+            )
+        db.commit()
         
         logger.info(f"作者 {author.nickname}(ID:{author_id}) 作品处理完成: "
                      f"总作品 {len(work_list)}, 新建任务 {len(created_tasks)}, 重用任务 {len(reused_tasks)}")
@@ -1578,26 +1612,28 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 @celery_app.task(name="app.tasks.download_tasks.detect_stuck_tasks")
 def detect_stuck_tasks():
     """
-    检测卡住的下载任务：状态为 downloading 但长时间无进度更新。
+    检测并恢复三类可恢复任务：
+    1. downloading 长时间无进度；
+    2. pending 长时间未被 Worker 认领；
+    3. 因 fork 连接池污染产生的数据库瞬时失败。
     由 Celery Beat 每 5 分钟调度一次。
     """
     db = get_sync_db()
     try:
-        tasks = db.execute(
+        downloading_tasks = db.execute(
             select(DownloadTask).where(DownloadTask.status == "downloading")
         ).scalars().all()
 
-        if not tasks:
-            return {"checked": 0, "stuck": 0}
-
         runtime_config = get_runtime_config_sync(db)
         now = time.time()
+        now_dt = datetime.now()
         timeout = int(runtime_config.get("stuck_task_timeout", settings.STUCK_TASK_TIMEOUT))
         retry_limit = int(runtime_config.get("download_retry_count", settings.DOWNLOAD_RETRY_COUNT))
         retry_delay = int(runtime_config.get("download_retry_delay", settings.DOWNLOAD_RETRY_DELAY))
         stuck_count = 0
+        redispatch_ids = []
 
-        for task in tasks:
+        for task in downloading_tasks:
             progress = redis_client.get_progress(task.id)
             last_updated = progress.get("last_updated", 0) if progress else 0
 
@@ -1619,10 +1655,7 @@ def detect_stuck_tasks():
                         f"任务 {task.id} 卡住 {elapsed_min} 分钟，自动重试 ({task.retry_count}/{retry_limit})"
                     )
                     db.commit()
-                    if retry_delay > 0:
-                        download_single_file.apply_async(args=[task.id], countdown=retry_delay)
-                    else:
-                        download_single_file.delay(task.id)
+                    redispatch_ids.append(task.id)
                 else:
                     task.status = "failed"
                     task.error_message = f"下载超时：任务卡住超过 {elapsed_min} 分钟无进度变化，已达最大重试次数"
@@ -1630,9 +1663,71 @@ def detect_stuck_tasks():
                         f"任务 {task.id} 卡住 {elapsed_min} 分钟，已达最大重试次数，标记为失败"
                     )
 
+        # pending 任务不产生进度，原逻辑永远检测不到。超过同一超时阈值
+        # 仍未被认领就重新投递；原子认领可保证旧消息随后到达时不会重复下载。
+        pending_cutoff = now_dt - timedelta(seconds=timeout)
+        orphaned_pending = db.execute(
+            select(DownloadTask).where(
+                DownloadTask.status == "pending",
+                DownloadTask.updated_at < pending_cutoff,
+            )
+        ).scalars().all()
+        for task in orphaned_pending:
+            task.updated_at = now_dt
+            task.error_message = None
+            redispatch_ids.append(task.id)
+
+        # 连接池跨 fork 导致的失败属于基础设施瞬时故障，应在连接隔离后
+        # 自动恢复；业务错误、风控和无效 URL 不在此处盲目重试。
+        recoverable_failed = db.execute(
+            select(DownloadTask).where(
+                DownloadTask.status == "failed",
+                DownloadTask.retry_count <= retry_limit,
+                DownloadTask.error_message.isnot(None),
+                (
+                    DownloadTask.error_message.startswith("DatabaseError:")
+                    | DownloadTask.error_message.startswith("ResourceClosedError:")
+                ),
+            )
+        ).scalars().all()
+        for task in recoverable_failed:
+            task.status = "pending"
+            task.error_message = None
+            task.updated_at = now_dt
+            redispatch_ids.append(task.id)
+
         db.commit()
-        logger.info(f"卡住任务检测完成: 检查 {len(tasks)} 个, 处理 {stuck_count} 个")
-        return {"checked": len(tasks), "stuck": stuck_count}
+
+        queued_ids = []
+        for task_id in dict.fromkeys(redispatch_ids):
+            if retry_delay > 0:
+                queued = download_single_file.apply_async(args=[task_id], countdown=retry_delay)
+            else:
+                queued = download_single_file.delay(task_id)
+            db.execute(
+                update(DownloadTask)
+                .where(DownloadTask.id == task_id, DownloadTask.status == "pending")
+                .values(celery_task_id=queued.id, updated_at=datetime.now())
+            )
+            queued_ids.append(task_id)
+        db.commit()
+
+        if orphaned_pending or recoverable_failed:
+            redis_client.append_activity_log(
+                "warning", "task", "自动恢复遗留下载任务",
+                f"待处理遗留={len(orphaned_pending)}, 数据库瞬时失败={len(recoverable_failed)}, 已重新分发={len(queued_ids)}",
+            )
+        logger.info(
+            f"卡住任务检测完成: 下载中={len(downloading_tasks)}, 卡住={stuck_count}, "
+            f"待处理遗留={len(orphaned_pending)}, 数据库瞬时失败={len(recoverable_failed)}"
+        )
+        return {
+            "checked": len(downloading_tasks) + len(orphaned_pending) + len(recoverable_failed),
+            "stuck": stuck_count,
+            "orphaned_pending": len(orphaned_pending),
+            "recoverable_failed": len(recoverable_failed),
+            "redispatched": len(queued_ids),
+        }
     except Exception as e:
         logger.error(f"检测卡住任务时出错: {e}")
         return {"error": str(e)}
