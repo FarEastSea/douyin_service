@@ -14,6 +14,7 @@ const initialized = ref(false), bootstrap = ref<any>({ ready: true })
 const collapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
 const authOpen = ref(false), token = ref('')
 const previewOpen = ref(false), previewItems = ref<MediaItem[]>([]), previewStart = ref(0)
+let statsTimer: number | null = null
 const platform = computed(() => route.path.startsWith('/x/') ? 'x' : 'douyin')
 const nav = computed(() => platform.value === 'x' ? [
   { path: '/x/tasks', label: '下载任务', icon: Download },
@@ -31,14 +32,27 @@ function toggleSidebar() { collapsed.value = !collapsed.value; localStorage.setI
 function switchPlatform(next: 'douyin' | 'x') { router.push(next === 'douyin' ? '/douyin/tasks' : '/x/tasks'); store.sidebarOpen = false }
 function login() { if (!token.value.trim()) return; saveToken(token.value); authOpen.value = false; token.value = ''; store.refreshStatus(); router.go(0) }
 function preview(event: Event) { const detail = (event as CustomEvent).detail; previewItems.value = detail.items; previewStart.value = detail.start || 0; previewOpen.value = true }
+function refreshVisibleStats() { if (!document.hidden) void store.refreshStats() }
+function handleVisibilityChange() { if (!document.hidden) void store.refreshStatus() }
 async function init() {
   store.applyTheme()
   try { bootstrap.value = await api('/bootstrap/status') } catch { bootstrap.value = { ready: true } }
   initialized.value = true
-  if (bootstrap.value.ready) { await store.refreshStatus(); store.startRiskClock() }
+  if (bootstrap.value.ready) {
+    store.startRiskClock()
+    statsTimer = window.setInterval(refreshVisibleStats, 5000)
+    void store.refreshStatus()
+  }
 }
-onMounted(() => { init(); window.addEventListener('app:auth-required', () => authOpen.value = true); window.addEventListener('app:preview', preview) })
-onBeforeUnmount(() => { window.removeEventListener('app:preview', preview); store.stopStatusClock() })
+function requireAuth() { authOpen.value = true }
+onMounted(() => { init(); window.addEventListener('app:auth-required', requireAuth); window.addEventListener('app:preview', preview); document.addEventListener('visibilitychange', handleVisibilityChange) })
+onBeforeUnmount(() => {
+  window.removeEventListener('app:auth-required', requireAuth)
+  window.removeEventListener('app:preview', preview)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  if (statsTimer != null) window.clearInterval(statsTimer)
+  store.stopRiskClock()
+})
 </script>
 
 <template>

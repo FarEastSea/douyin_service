@@ -10,32 +10,28 @@ export const useAppStore = defineStore('app', {
     theme: (localStorage.getItem('media-theme') || 'auto') as Theme,
     toast: null as null | { message: string; tone: 'success' | 'error' | 'info' },
     sidebarOpen: false,
-    statusTimer: null as number | null,
-    statusTicks: 0,
+    riskTimer: null as number | null,
   }),
   actions: {
     async refreshStatus() {
-      try { this.stats = await api('/status') } catch { /* auth gate handles it */ }
-      try {
-        const risk = await api<any>('/system/douyin-risk-state')
-        this.risk = risk
-      } catch { /* keep last known state */ }
+      await Promise.allSettled([this.refreshStats(), this.refreshRisk()])
+    },
+    async refreshStats() {
+      try { this.stats = await api('/status/stats') } catch { /* auth gate handles it */ }
+    },
+    async refreshRisk() {
+      try { this.risk = await api<any>('/system/douyin-risk-state') } catch { /* keep last known state */ }
     },
     startRiskClock() {
-      if (this.statusTimer != null) return
-      this.statusTimer = window.setInterval(() => {
+      if (this.riskTimer != null) return
+      this.riskTimer = window.setInterval(() => {
         if (this.risk.active && this.risk.retry_after > 0) this.risk.retry_after--
-        this.statusTicks++
-        if (this.statusTicks >= 5 || (this.risk.active && this.risk.retry_after <= 0)) {
-          this.statusTicks = 0
-          this.refreshStatus()
-        }
+        if (this.risk.active && this.risk.retry_after <= 0) void this.refreshRisk()
       }, 1000)
     },
-    stopStatusClock() {
-      if (this.statusTimer != null) window.clearInterval(this.statusTimer)
-      this.statusTimer = null
-      this.statusTicks = 0
+    stopRiskClock() {
+      if (this.riskTimer != null) window.clearInterval(this.riskTimer)
+      this.riskTimer = null
     },
     notify(message: string, tone: 'success' | 'error' | 'info' = 'success') {
       this.toast = { message, tone }

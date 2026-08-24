@@ -814,7 +814,6 @@ async def download_author(
         pass
     
     # 检查 Celery Worker 是否在线（通过 broker ping）
-    import asyncio
     try:
         def _ping_worker():
             from app.tasks.celery_app import celery_app

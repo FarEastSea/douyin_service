@@ -410,13 +410,8 @@ async def get_download_stats(db: AsyncSession = Depends(get_async_db)):
 
 # ============ 系统状态 ============
 
-@router.get("/status", response_model=SystemStatus)
-async def get_system_status(db: AsyncSession = Depends(get_async_db)):
-    """获取统计、Redis、Celery 与本地进程的合并状态。"""
-    try:
-        redis_connected = await asyncio.to_thread(redis_client.check_connection)
-    except Exception:
-        redis_connected = False
+async def _read_live_stats(db: AsyncSession) -> dict[str, int]:
+    """直接读取会频繁变化的首页统计，不掺杂外部服务健康检查。"""
     stat_keys = {
         "total_authors",
         "subscribed_authors",
@@ -424,8 +419,6 @@ async def get_system_status(db: AsyncSession = Depends(get_async_db)):
         "downloading_tasks",
         "total_downloads",
     }
-    # 这五个计数变化频繁，60 秒 Redis 缓存会让页面长期显示旧值。
-    # 单条 SQL 直接读取当前数据库快照，前端轮询即可及时反映任务变化。
     stats_row = (await db.execute(select(
         select(func.count(Author.id)).scalar_subquery().label("total_authors"),
         select(func.count(Author.id)).where(Author.is_subscribed.is_(True)).scalar_subquery().label("subscribed_authors"),
@@ -433,7 +426,23 @@ async def get_system_status(db: AsyncSession = Depends(get_async_db)):
         select(func.count(DownloadTask.id)).where(DownloadTask.status == "downloading").scalar_subquery().label("downloading_tasks"),
         select(func.count(DownloadHistory.id)).scalar_subquery().label("total_downloads"),
     ))).mappings().one()
-    stats = {key: int(stats_row[key] or 0) for key in stat_keys}
+    return {key: int(stats_row[key] or 0) for key in stat_keys}
+
+
+@router.get("/status/stats")
+async def get_live_stats(db: AsyncSession = Depends(get_async_db)):
+    """供页面轮询的轻量实时统计接口。"""
+    return await _read_live_stats(db)
+
+
+@router.get("/status", response_model=SystemStatus)
+async def get_system_status(db: AsyncSession = Depends(get_async_db)):
+    """获取统计、Redis、Celery 与本地进程的合并状态。"""
+    try:
+        redis_connected = await asyncio.to_thread(redis_client.check_connection)
+    except Exception:
+        redis_connected = False
+    stats = await _read_live_stats(db)
 
     # Celery workers (通过 broker ping，带超时)
     celery_workers = 0
