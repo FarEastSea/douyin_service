@@ -12,10 +12,10 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import select, func, or_
+from sqlalchemy import case, select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime, timedelta
 
 from app.models.database import get_async_db
@@ -754,6 +754,12 @@ async def list_author_works(
     author_id: int,
     is_downloaded: Optional[bool] = Query(None, description="按下载状态筛选"),
     include_excluded: bool = Query(False, description="是否包含已删除（排除）的作品"),
+    sort_by: Literal[
+        "published_desc",
+        "published_asc",
+        "discovered_desc",
+        "discovered_asc",
+    ] = Query("published_desc", description="排序方式"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db)
@@ -776,7 +782,18 @@ async def list_author_works(
     if is_downloaded is not None:
         query = query.where(Work.is_downloaded == is_downloaded)
     
-    query = query.order_by(Work.discovered_at.desc())
+    if sort_by.startswith("published_"):
+        # 旧数据可能没有平台发布时间。将这些记录稳定地排在有发布时间的
+        # 作品之后，避免把发现时间伪装成作品发布时间参与排序。
+        published_at_missing = case((Work.published_at.is_(None), 1), else_=0)
+        published_order = Work.published_at.desc() if sort_by == "published_desc" else Work.published_at.asc()
+        discovered_order = Work.discovered_at.desc() if sort_by == "published_desc" else Work.discovered_at.asc()
+        id_order = Work.id.desc() if sort_by == "published_desc" else Work.id.asc()
+        query = query.order_by(published_at_missing.asc(), published_order, discovered_order, id_order)
+    else:
+        discovered_order = Work.discovered_at.desc() if sort_by == "discovered_desc" else Work.discovered_at.asc()
+        id_order = Work.id.desc() if sort_by == "discovered_desc" else Work.id.asc()
+        query = query.order_by(discovered_order, id_order)
     query = query.offset((page - 1) * page_size).limit(page_size)
     
     result = await db.execute(query)
