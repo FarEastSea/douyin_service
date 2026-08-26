@@ -45,6 +45,8 @@ from app.services.avatar_cache import ensure_author_avatar_cached
 from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
 from app.services.douyin_errors import DouyinRequestError
+from app.services.douyin_source import DouyinTraversalLimitError, build_douyin_source
+from app.services.notifications import send_notification
 
 # 配置日志
 import os
@@ -75,6 +77,13 @@ SUBSCRIPTION_CHECK_LOCK_KEY = "douyin:subscription_check_lock"
 SUBSCRIPTION_CYCLE_STATE_KEY = "subscription_check_cycle_state"
 AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX = "__ACCOUNT_STATUS__"
 TERMINAL_AUTHOR_ACCOUNT_STATUSES = {"deleted", "banned", "restricted"}
+
+
+def _notify_event(event: str, title: str, body: str, *, level: str, dedupe_key: str) -> None:
+    try:
+        send_notification(event, title, body, level=level, dedupe_key=dedupe_key)
+    except Exception as exc:
+        logger.warning(f"通知发送器异常，不影响业务任务: {type(exc).__name__}: {str(exc)[:200]}")
 
 
 def build_author_account_status_marker(status_code: str, status_label: str, detail: str | None = None) -> str:
@@ -215,6 +224,28 @@ def _detect_new_works(db: Session, author_id: int, work_list: list) -> list:
         ).scalars().all()
     )
     return [item for item in work_list if str(item["aweme_id"]) not in existing_ids]
+
+
+def _known_work_ids(db: Session, author_id: int) -> set[str]:
+    return {
+        str(value)
+        for value in db.execute(
+            select(Work.aweme_id).where(Work.author_id == author_id)
+        ).scalars().all()
+        if value is not None
+    }
+
+
+def _collect_author_works(source, author: Author, db: Session, runtime_config: dict, *, incremental: bool) -> list:
+    known_ids = _known_work_ids(db, author.id) if incremental else set()
+    if not known_ids:
+        return source.get_all_works(author.share_url, sec_uid=author.sec_uid)
+    return source.get_incremental_works(
+        author.sec_uid,
+        known_ids,
+        known_streak=int(runtime_config.get("subscription_known_streak", settings.SUBSCRIPTION_KNOWN_STREAK)),
+        max_pages=int(runtime_config.get("subscription_max_pages", settings.SUBSCRIPTION_MAX_PAGES)),
+    )
 
 
 def _mark_author_account_anomaly(
@@ -721,6 +752,13 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             redis_client.append_activity_log("error", "task",
                 f"下载失败: task_id={task_id}",
                 f"error={error_msg}, retry={task.retry_count}")
+            _notify_event(
+                "download_failure",
+                "作品下载失败",
+                f"任务 #{task_id} 下载失败：{str(error_msg)[:500]}",
+                level="error",
+                dedupe_key=f"download:{task_id}:{error_msg}",
+            )
             return {"success": False, "error": error_msg}
 
     except DouyinRequestError as e:
@@ -754,6 +792,13 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             "error", "task", "抖音请求失败，已停止自动恢复",
             f"task_id={task_id}, code={e.code}, action={e.action}",
         )
+        _notify_event(
+            "douyin_risk",
+            "抖音请求保护已触发",
+            f"任务 #{task_id}：{e.user_message} {e.action}",
+            level="warning",
+            dedupe_key=f"risk:{e.code}:{task_id}",
+        )
         return {"success": False, "error": e.user_message, "error_code": e.code}
     except Exception as e:
         # 记录详细的错误信息和堆栈跟踪
@@ -776,6 +821,13 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                 db.commit()
         except Exception as db_error:
             logger.error(f"更新任务 {task_id} 失败状态时出错: {db_error}")
+        _notify_event(
+            "download_failure",
+            "下载任务异常",
+            f"任务 #{task_id}：{type(e).__name__}: {str(e)[:500]}",
+            level="error",
+            dedupe_key=f"download-exception:{task_id}:{type(e).__name__}:{str(e)[:100]}",
+        )
     finally:
         try:
             db.close()
@@ -821,10 +873,10 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         cookie = get_cookie_from_db(db)
         redis_client.append_activity_log("debug", "task",
             f"Cookie 状态: {'\u5df2配置(' + str(len(cookie)) + '字符)' if cookie else '\u672a配置'}")
-        downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        source = build_douyin_source(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
 
         try:
-            profile_result = sync_author_profile(author, downloader)
+            profile_result = sync_author_profile(author, source)
             record_author_profile_history(db, author, profile_result)
             if profile_result.get("changed"):
                 redis_client.append_activity_log(
@@ -858,7 +910,13 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         redis_client.append_activity_log("info", "task",
             f"正在调用抖音 API 获取作品列表...",
             f"sec_uid={author.sec_uid}")
-        work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
+        work_list = _collect_author_works(
+            source,
+            author,
+            db,
+            runtime_config,
+            incremental=download_new_only,
+        )
         redis_client.append_activity_log("info", "task",
             f"获取到 {len(work_list)} 个作品: {author.nickname}",
             f"author_id={author_id}")
@@ -1242,9 +1300,9 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             try:
                 # 获取 Cookie 并创建下载器
                 cookie = get_cookie_from_db(db)
-                downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+                source = build_douyin_source(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
 
-                profile_result = sync_author_profile(author, downloader)
+                profile_result = sync_author_profile(author, source)
                 record_author_profile_history(db, author, profile_result)
 
                 if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
@@ -1276,13 +1334,25 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     continue
                 
                 # 获取最新作品（传入 sec_uid 避免冗余请求）
-                work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
+                work_list = _collect_author_works(
+                    source,
+                    author,
+                    db,
+                    runtime_config,
+                    incremental=True,
+                )
 
                 # 空列表无法区分“确实无作品”和风控伪成功。短暂退避后复查一次，
                 # 两次都为空才记录警告，避免一次瞬时空响应造成整轮漏更。
                 if not work_list:
                     time.sleep(max(3.0, min(author_delay, 10.0)))
-                    work_list = downloader.get_all_works(author.share_url, sec_uid=author.sec_uid)
+                    work_list = _collect_author_works(
+                        source,
+                        author,
+                        db,
+                        runtime_config,
+                        incremental=True,
+                    )
                 
                 if not work_list:
                     author.last_check_time = datetime.now()
@@ -1346,6 +1416,16 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     author.last_aweme_id = latest_work["aweme_id"]
                 author.last_error = None
                 db.commit()
+                if new_works:
+                    _notify_event(
+                        "new_works",
+                        f"{author.nickname or f'作者 {author.id}'} 发布了新作品",
+                        f"发现 {len(new_works)} 个新作品，下载任务已提交。",
+                        level="info",
+                        dedupe_key=f"new-works:{author.id}:" + ",".join(
+                            sorted(str(item["aweme_id"]) for item in new_works)
+                        ),
+                    )
                 
             except SoftTimeLimitExceeded:
                 # 接近 Celery 软超时：优雅退出。已检查作者的进度都已逐个提交，
@@ -1380,6 +1460,13 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     redis_client.append_activity_log(
                         "warning", "task", "抖音请求保护已触发，本轮订阅检查立即停止",
                         f"author_id={author.id}, 原因={e.user_message}, 后续操作={e.action}",
+                    )
+                    _notify_event(
+                        "douyin_risk",
+                        "订阅检查触发抖音请求保护",
+                        f"作者 {author.nickname or author.id}：{e.user_message} {e.action}",
+                        level="warning",
+                        dedupe_key=f"subscription-risk:{e.code}:{author.id}",
                     )
                     break
 
@@ -1417,7 +1504,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     continue
 
                 probable_rate_limit = _is_probable_rate_limit_error(error_msg)
-                if not probable_rate_limit:
+                incomplete_scan = isinstance(e, DouyinTraversalLimitError)
+                if not probable_rate_limit and not incomplete_scan:
                     author.last_check_time = datetime.now()
                     author.last_auto_update_at = author.last_check_time
                 author.last_error = error_msg[:1000]
@@ -1438,6 +1526,15 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     "status": "failed",
                     "message": error_msg[:300],
                 })
+                if incomplete_scan:
+                    results[-1]["error_code"] = "traversal_limit"
+                _notify_event(
+                    "subscription_failure",
+                    "作者订阅检查失败",
+                    f"作者 {author.nickname or author.id}：{error_msg[:500]}",
+                    level="warning",
+                    dedupe_key=f"subscription:{author.id}:{type(e).__name__}:{error_msg[:100]}",
+                )
 
                 # 疑似限流：不再因单个作者的偶发失败中断整轮检查。
                 # 只有连续多次疑似限流才提前停止本轮，避免持续请求扩大限制；
@@ -1609,6 +1706,13 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             redis_client.append_activity_log("error", "task", "订阅检查任务异常终止", error_summary)
         except Exception:
             pass
+        _notify_event(
+            "subscription_failure",
+            "订阅检查任务异常终止",
+            error_summary,
+            level="error",
+            dedupe_key=f"subscription-fatal:{type(e).__name__}:{str(e)[:100]}",
+        )
         if report:
             try:
                 report.status = "failed"

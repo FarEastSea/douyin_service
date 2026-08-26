@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import case, select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Union
 from datetime import datetime, timedelta
 
 from app.models.database import get_async_db
@@ -24,7 +24,7 @@ from app.models.models import (
 )
 from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
-    PaginatedAuthorsResponse
+    PaginatedAuthorsResponse, PaginatedWorksResponse
 )
 from app.services.downloader import DouyinDownloader, author_profile_has_identity, prefer_avatar_url
 from app.services.avatar_cache import ensure_author_avatar_cached, find_cached_author_avatar
@@ -749,10 +749,12 @@ async def unsubscribe_author(author_id: int, db: AsyncSession = Depends(get_asyn
     return MessageResponse(success=True, message="已取消订阅")
 
 
-@router.get("/{author_id}/works", response_model=List[WorkResponse])
+@router.get("/{author_id}/works", response_model=Union[PaginatedWorksResponse, List[WorkResponse]])
 async def list_author_works(
     author_id: int,
     is_downloaded: Optional[bool] = Query(None, description="按下载状态筛选"),
+    q: Optional[str] = Query(None, max_length=200, description="按标题或作品 ID 搜索"),
+    paginated: bool = Query(False, description="返回分页对象；未指定时兼容旧版数组响应"),
     include_excluded: bool = Query(False, description="是否包含已删除（排除）的作品"),
     sort_by: Literal[
         "published_desc",
@@ -774,13 +776,24 @@ async def list_author_works(
     if not author:
         raise HTTPException(status_code=404, detail="作者不存在")
     
-    query = select(Work).options(selectinload(Work.download_tasks)).where(Work.author_id == author_id)
-    
+    filters = [Work.author_id == author_id]
     if not include_excluded:
-        query = query.where(Work.is_excluded == False)  # noqa: E712
+        filters.append(Work.is_excluded == False)  # noqa: E712
     
     if is_downloaded is not None:
-        query = query.where(Work.is_downloaded == is_downloaded)
+        filters.append(Work.is_downloaded == is_downloaded)
+
+    search_text = (q or "").strip()
+    if search_text:
+        escaped = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        filters.append(or_(
+            Work.title.ilike(pattern, escape="\\"),
+            Work.aweme_id.ilike(pattern, escape="\\"),
+        ))
+
+    total = int((await db.execute(select(func.count(Work.id)).where(*filters))).scalar_one())
+    query = select(Work).options(selectinload(Work.download_tasks)).where(*filters)
     
     if sort_by.startswith("published_"):
         # 旧数据可能没有平台发布时间。将这些记录稳定地排在有发布时间的
@@ -799,7 +812,16 @@ async def list_author_works(
     result = await db.execute(query)
     works = result.scalars().all()
     
-    return [_serialize_work_response(work) for work in works]
+    items = [_serialize_work_response(work) for work in works]
+    if not paginated:
+        return items
+    return PaginatedWorksResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        pages=max(1, (total + page_size - 1) // page_size),
+    )
 
 
 @router.post("/{author_id}/download", response_model=MessageResponse)

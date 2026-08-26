@@ -1,26 +1,38 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ArrowLeft, CheckSquare, Download, Eye, Image, RefreshCw, Search, Trash2 } from '@lucide/vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { openMedia } from '../media'
 import { useAppStore } from '../stores/app'
-import type { Author, MediaItem, Work } from '../types'
+import Pager from '../components/Pager.vue'
+import type { Author, MediaItem, PageData, Work } from '../types'
 
 const route = useRoute(), router = useRouter(), store = useAppStore()
 type WorkSort = 'published_desc' | 'published_asc' | 'discovered_desc' | 'discovered_asc'
 const author = ref<Author>(), works = ref<Work[]>([]), loading = ref(false), filter = ref('all'), search = ref(''), selected = ref<number[]>([])
 const sort = ref<WorkSort>('published_desc')
+const page = ref(1), pages = ref(1), total = ref(0), pageSize = 30
+const searchTimer = ref<number>()
 const id = Number(route.params.id)
-const shown = computed(() => works.value.filter(work => {
-  const state = filter.value === 'all' || (filter.value === 'done' ? work.is_downloaded : !work.is_downloaded)
-  return state && (!search.value || `${work.title} ${work.aweme_id}`.toLowerCase().includes(search.value.toLowerCase()))
-}))
 async function load() {
   loading.value = true
-  try { [author.value, works.value] = await Promise.all([api<Author>(`/authors/${id}`), api<Work[]>(`/authors/${id}/works?page=1&page_size=100&sort_by=${sort.value}`)]) }
+  const params = new URLSearchParams({ paginated: 'true', page: String(page.value), page_size: String(pageSize), sort_by: sort.value })
+  if (filter.value !== 'all') params.set('is_downloaded', String(filter.value === 'done'))
+  if (search.value.trim()) params.set('q', search.value.trim())
+  try {
+    const [authorData, data] = await Promise.all([api<Author>(`/authors/${id}`), api<PageData<Work>>(`/authors/${id}/works?${params}`)])
+    author.value = authorData; works.value = data.items; total.value = data.total; pages.value = data.pages; selected.value = []
+  }
   catch (error: any) { store.notify(error.message || '加载作品失败', 'error') }
   finally { loading.value = false }
+}
+function changeFilter(value: string) { filter.value = value; page.value = 1; load() }
+function changeSort() { page.value = 1; load() }
+function changePage(value: number) { page.value = value; load() }
+function queueSearch() {
+  if (searchTimer.value != null) window.clearTimeout(searchTimer.value)
+  searchTimer.value = window.setTimeout(() => { page.value = 1; load() }, 350)
 }
 function formatWorkTime(value?: string) {
   if (!value) return '未知'
@@ -55,20 +67,21 @@ async function batchDelete() {
   try { const result = await api<any>('/works/batch-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ work_ids: selected.value }) }); store.notify(result.message || '批量删除完成'); selected.value = []; await load() }
   catch (error: any) { store.notify(error.message || '批量删除失败', 'error') }
 }
-onMounted(load)
+onMounted(load); onBeforeUnmount(() => { if (searchTimer.value != null) window.clearTimeout(searchTimer.value) })
 </script>
 
 <template>
   <section class="works-workspace">
-    <header class="works-hero"><button class="icon-btn" @click="router.push('/douyin/authors')"><ArrowLeft /></button><span class="avatar large"><img v-if="author?.avatar_url" :src="`/api/authors/${id}/avatar`" alt="" /></span><div><p class="eyebrow">CREATOR WORKSPACE</p><h2>{{ author?.nickname || '作者作品' }}</h2><span>{{ works.length }} 个作品 · {{ works.filter(w => w.is_downloaded).length }} 个已完成</span></div><div class="header-actions"><button v-if="selected.length" class="btn danger" @click="batchDelete"><Trash2 :size="16" />删除选中 ({{ selected.length }})</button><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></div></header>
-    <div class="works-toolbar"><nav class="segmented"><button :class="{ active: filter === 'all' }" @click="filter = 'all'">全部</button><button :class="{ active: filter === 'done' }" @click="filter = 'done'">已下载</button><button :class="{ active: filter === 'pending' }" @click="filter = 'pending'">未完成</button></nav><label class="work-sort"><span>排序</span><select v-model="sort" aria-label="作品排序方式" @change="load"><option value="published_desc">作品时间：最新</option><option value="published_asc">作品时间：最早</option><option value="discovered_desc">收录时间：最新</option><option value="discovered_asc">收录时间：最早</option></select></label><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索作品" /></label></div>
+    <header class="works-hero"><button class="icon-btn" @click="router.push('/douyin/authors')"><ArrowLeft /></button><span class="avatar large"><img v-if="author?.avatar_url" :src="`/api/authors/${id}/avatar`" alt="" /></span><div><p class="eyebrow">CREATOR WORKSPACE</p><h2>{{ author?.nickname || '作者作品' }}</h2><span>{{ total }} 个作品 · 当前页 {{ works.filter(w => w.is_downloaded).length }} 个已完成</span></div><div class="header-actions"><button v-if="selected.length" class="btn danger" @click="batchDelete"><Trash2 :size="16" />删除选中 ({{ selected.length }})</button><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></div></header>
+    <div class="works-toolbar"><nav class="segmented"><button :class="{ active: filter === 'all' }" @click="changeFilter('all')">全部</button><button :class="{ active: filter === 'done' }" @click="changeFilter('done')">已下载</button><button :class="{ active: filter === 'pending' }" @click="changeFilter('pending')">未完成</button></nav><label class="work-sort"><span>排序</span><select v-model="sort" aria-label="作品排序方式" @change="changeSort"><option value="published_desc">作品时间：最新</option><option value="published_asc">作品时间：最早</option><option value="discovered_desc">收录时间：最新</option><option value="discovered_asc">收录时间：最早</option></select></label><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索全部作品" @input="queueSearch" /></label></div>
     <main class="work-grid" :class="{ loading }">
-      <article v-for="work in shown" :key="work.id" class="work-card">
+      <article v-for="work in works" :key="work.id" class="work-card">
         <div class="work-cover" @click="preview(work)"><img v-if="work.primary_preview_url" :src="work.primary_preview_url" alt="" loading="lazy" referrerpolicy="no-referrer" /><Image v-else :size="36" /><span>{{ work.work_type === 'images' ? `${work.image_count} 张` : '视频' }}</span><button class="select-box" :class="{ active: selected.includes(work.id) }" @click.stop="selected = selected.includes(work.id) ? selected.filter(v => v !== work.id) : [...selected, work.id]"><CheckSquare :size="18" /></button></div>
         <div class="work-copy"><strong :title="work.title">{{ work.title || `作品 ${work.aweme_id}` }}</strong><time v-if="work.published_at" :datetime="work.published_at">作品时间：{{ formatWorkTime(work.published_at) }}</time><span v-else>作品时间：未知</span><span>{{ work.completed_task_count }}/{{ work.total_task_count }} 个文件 · {{ work.is_downloaded ? '已完成' : '未完成' }}</span></div>
         <footer><button class="btn ghost compact" @click="preview(work)"><Eye :size="14" />预览</button><button class="btn ghost compact" @click="workAction(work, 'redownload')"><Download :size="14" />重新下载</button><button v-if="work.download_status === 'failed'" class="btn ghost compact" @click="workAction(work, 'retry-failed')"><RefreshCw :size="14" />重试</button><button class="icon-btn danger" @click="remove(work)"><Trash2 :size="16" /></button></footer>
       </article>
-      <div v-if="!loading && !shown.length" class="empty-state wide"><Image /><strong>没有符合条件的作品</strong></div>
+      <div v-if="!loading && !works.length" class="empty-state wide"><Image /><strong>没有符合条件的作品</strong></div>
     </main>
+    <Pager :page="page" :pages="pages" :total="total" @change="changePage" />
   </section>
 </template>

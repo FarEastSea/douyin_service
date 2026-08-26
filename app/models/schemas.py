@@ -254,6 +254,15 @@ class PaginatedAuthorsResponse(BaseModel):
     pages: int
 
 
+class PaginatedWorksResponse(BaseModel):
+    """作品分页响应"""
+    items: List[WorkResponse]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
 class PaginatedTasksResponse(BaseModel):
     """任务分页响应"""
     items: List[DownloadTaskResponse]

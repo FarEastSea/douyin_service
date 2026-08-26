@@ -97,6 +97,8 @@ class Settings(BaseModel):
     DEFAULT_CHECK_INTERVAL: int = 21600  # 默认检查间隔6小时
     MIN_CHECK_INTERVAL: int = 3600  # 最小检查间隔1小时
     AUTO_CHECK_ENABLED: bool = True
+    SUBSCRIPTION_KNOWN_STREAK: int = 12  # 连续命中多少个已知作品后停止增量扫描
+    SUBSCRIPTION_MAX_PAGES: int = 50  # 增量扫描安全上限，命中时失败关闭
     
     # 卡住任务检测
     STUCK_TASK_TIMEOUT: int = 600  # 下载任务无进度变化超过此时间(秒)视为卡住，默认10分钟
@@ -109,6 +111,31 @@ class Settings(BaseModel):
     AUTHOR_CHECK_DELAY: float = 30.0  # 自动检查不同作者之间的间隔
     DOUYIN_RISK_COOLDOWN_SECONDS: int = 300  # 命中抖音风控后的全局冷却
     DOUYIN_RISK_AUTO_RETRY: bool = True  # 冷却结束后自动恢复一次
+
+    # 通知中心。所有值由网页设置中心持久化，并在发送时动态读取。
+    NOTIFY_ENABLED: bool = False
+    NOTIFY_ON_NEW_WORKS: bool = True
+    NOTIFY_ON_DOWNLOAD_FAILURE: bool = True
+    NOTIFY_ON_RISK: bool = True
+    NOTIFY_ON_SUBSCRIPTION_FAILURE: bool = True
+    NOTIFY_DEDUPE_SECONDS: int = 300
+    WEBHOOK_ENABLED: bool = False
+    WEBHOOK_URL: str = ""
+    WEBHOOK_SECRET: str = ""
+    BARK_ENABLED: bool = False
+    BARK_SERVER_URL: str = "https://api.day.app"
+    BARK_DEVICE_KEY: str = ""
+    EMAIL_ENABLED: bool = False
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 465
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    SMTP_TO: str = ""
+    SMTP_SECURITY: str = "ssl"
+    GOTIFY_ENABLED: bool = False
+    GOTIFY_SERVER_URL: str = ""
+    GOTIFY_TOKEN: str = ""
     
     # Cookie 配置（可通过环境变量或API设置）
     DOUYIN_COOKIE: Optional[str] = None

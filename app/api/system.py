@@ -10,10 +10,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy import select, func, text, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel
 from pathlib import Path
 import asyncio
+import json
 
 from app.models.database import get_async_db
 from app.models.models import Author, Work, DownloadTask, DownloadHistory, SystemConfig
@@ -43,6 +44,7 @@ from app.core.runtime_config import (
 )
 
 from app.services.media_paths import migrate_download_paths
+from app.services.notifications import send_notification
 
 router = APIRouter(tags=["系统管理"])
 
@@ -58,10 +60,16 @@ class RuntimeConfigUpdate(BaseModel):
     download_retry_count: Optional[int] = None
     download_retry_delay: Optional[int] = None
     stuck_task_timeout: Optional[int] = None
+    subscription_known_streak: Optional[int] = None
+    subscription_max_pages: Optional[int] = None
 
 
 class CompleteConfigUpdate(BaseModel):
     values: Dict[str, Any]
+
+
+class NotificationTestRequest(BaseModel):
+    channel: Literal["all", "webhook", "bark", "email", "gotify"] = "all"
 
 
 # ============ Cookie 配置 ============
@@ -497,6 +505,32 @@ async def get_system_status(db: AsyncSession = Depends(get_async_db)):
     return status
 
 
+@router.post("/notifications/test", response_model=MessageResponse)
+async def test_notification(request: NotificationTestRequest):
+    """使用已保存配置测试通知；敏感值和带 Token 的请求地址不回显。"""
+    channels = None if request.channel == "all" else [request.channel]
+    result = await asyncio.to_thread(
+        send_notification,
+        "test",
+        "媒体下载管理系统测试通知",
+        "如果你收到这条消息，说明当前通知渠道配置可用。",
+        level="info",
+        channels=channels,
+        force=True,
+    )
+    success = result["sent"] > 0
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info" if success else "warning",
+        "system",
+        "通知测试完成" if success else "通知测试未发送",
+        json.dumps(result.get("channels", {}), ensure_ascii=False),
+    )
+    return MessageResponse(
+        success=success,
+        message=f"已成功发送 {result['sent']} 个通知渠道" if success else "没有渠道发送成功，请检查已保存的通知配置",
+        data=result,
+    )
 @router.get("/health")
 async def health_check():
     """健康检查接口"""

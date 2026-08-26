@@ -716,11 +716,15 @@ class DouyinDownloader:
         has_more = True
         max_cursor = 0
         work_list = []
+        seen_cursors = set()
         
         while has_more:
+            if str(max_cursor) in seen_cursors:
+                raise ValueError("抖音作品分页游标未前进，已停止全量扫描")
+            seen_cursors.add(str(max_cursor))
             data = self.get_work_list(sec_uid, max_cursor)
             has_more = data.get('has_more', False)
-            max_cursor = data.get('max_cursor', 0)
+            next_cursor = data.get('max_cursor', 0)
 
             aweme_list = data.get('aweme_list') or []
             if not isinstance(aweme_list, list):
@@ -729,8 +733,12 @@ class DouyinDownloader:
             for item in aweme_list:
                 work_list.append(self._normalize_work_item(item, sec_uid))
             
-            # 请求间隔，避免频繁请求
-            time.sleep(self.request_delay)
+            if has_more:
+                if str(next_cursor) == str(max_cursor):
+                    raise ValueError("抖音作品分页游标未前进，已停止全量扫描")
+                max_cursor = next_cursor
+                # 仅在确实需要下一页时等待，避免最后一页无意义延迟。
+                time.sleep(self.request_delay)
         
         return work_list
     

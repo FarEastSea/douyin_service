@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Activity, Clipboard, Cookie, Database, Play, RefreshCw, Save, Server, Settings2, Square, Trash2 } from '@lucide/vue'
+import { Activity, BellRing, Clipboard, Cookie, Database, Play, RefreshCw, Save, Server, Settings2, Square, Trash2 } from '@lucide/vue'
 import { useRoute } from 'vue-router'
 import { api, jsonBody } from '../api'
 import { useAppStore } from '../stores/app'
@@ -12,6 +12,7 @@ const logs = ref<any[]>([]), logLevels = ref(['info', 'warning', 'error']), live
 const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>()
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
+const notificationTestBusy = ref(false)
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
 const accountOnlyKeys = new Set(['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE'])
 const generalFields = computed(() => allFields.value.filter(field => !accountOnlyKeys.has(field.key)))
@@ -20,6 +21,9 @@ const generalGroups = computed(() => [...new Set(generalFields.value.map(field =
 const visibleGeneralFields = computed(() => generalFields.value.filter(field => String(field.group || '其他') === generalGroup.value))
 const xCookieFile = ref('')
 const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
+const isBooleanField = (field: any) => ['true', 'false'].includes(String(field.default).toLowerCase())
+const booleanFieldValue = (field: any) => String(allValues.value[field.key]?.value).toLowerCase() === 'true'
+function toggleBooleanField(field: any) { allValues.value[field.key].value = booleanFieldValue(field) ? 'false' : 'true' }
 
 async function loadRuntime() { const data = await api<any>('/config/runtime'); runtime.value = data.config; limits.value = data.limits }
 async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || ''; if (!generalGroups.value.includes(generalGroup.value)) generalGroup.value = generalGroups.value[0] || '' }
@@ -43,8 +47,17 @@ async function saveAll() {
       if (secretValues.value[field.key]?.trim()) values[field.key] = secretValues.value[field.key].trim()
     } else if (allValues.value[field.key]?.value !== undefined) values[field.key] = allValues.value[field.key].value
   }
-  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values }) }); store.notify(result.message || '设置已保存') }
-  catch (error: any) { store.notify(error.message || '保存失败', 'error') }
+  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values }) }); store.notify(result.message || '设置已保存'); await loadAll(); return true }
+  catch (error: any) { store.notify(error.message || '保存失败', 'error'); return false }
+}
+async function testNotification() {
+  notificationTestBusy.value = true
+  try {
+    if (!await saveAll()) return
+    const result = await api<any>('/notifications/test', { method: 'POST', ...jsonBody({ channel: 'all' }) })
+    store.notify(result.message || '通知测试完成', result.success ? 'success' : 'error')
+  } catch (error: any) { store.notify(error.message || '通知测试失败', 'error') }
+  finally { notificationTestBusy.value = false }
 }
 async function saveCookie(platform: 'douyin' | 'x') {
   const value = platform === 'douyin' ? cookieValue.value : xCookieValue.value
@@ -71,8 +84,8 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
     <header class="workspace-header"><div><p class="eyebrow">SYSTEM CONTROL</p><h2>设置与诊断</h2><span>所有网页配置在保存后动态生效</span></div><button class="btn ghost" @click="init"><RefreshCw :size="16" />刷新状态</button></header>
     <nav class="settings-tabs"><button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" @click="tab = item[0]">{{ item[1] }}</button></nav>
 
-    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库与后台任务配置</p></div><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></header><nav class="settings-subtabs"><button v-for="group in generalGroups" :key="group" :class="{ active: generalGroup === group }" @click="generalGroup = group">{{ group }}</button></nav><div class="form-grid">
-      <label v-for="field in visibleGeneralFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
+    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库、后台任务与通知配置</p></div><div class="header-actions"><button v-if="generalGroup === '通知'" class="btn ghost" :disabled="notificationTestBusy" @click="testNotification"><BellRing :size="16" />保存并测试</button><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></div></header><nav class="settings-subtabs"><button v-for="group in generalGroups" :key="group" :class="{ active: generalGroup === group }" @click="generalGroup = group">{{ group }}</button></nav><div class="form-grid">
+      <label v-for="field in visibleGeneralFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><button v-else-if="isBooleanField(field)" type="button" class="setting-switch" :class="{ on: booleanFieldValue(field) }" role="switch" :aria-checked="booleanFieldValue(field)" @click="toggleBooleanField(field)"><span class="switch-track"><i /></span><span>{{ booleanFieldValue(field) ? '已开启' : '已关闭' }}</span></button><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
     </div></div>
 
     <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>Cookie 相关配置统一在此管理，敏感内容不会回显</p></div></header><div class="credential-grid"><article><strong>抖音 Cookie</strong><p>用于作者资料、作品列表和链接刷新。</p><textarea v-model="cookieValue" placeholder="粘贴最新抖音 Cookie" /><small class="cookie-format-hint">格式要求：从已登录抖音页面的网络请求头复制完整 Cookie Header String，必须包含 UIFID；不支持 JSON 或 Netscape 格式。</small><button class="btn primary" @click="saveCookie('douyin')"><Save :size="16" />更新抖音 Cookie</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><small class="cookie-format-hint">格式要求：支持 Cookie Header String（例如 name=value; name2=value2）或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="saveCookie('x')"><Save :size="16" />更新 X Cookie</button></article><article class="credential-path"><strong>X Cookie 文件</strong><p>可选：填写服务器上的 Cookie 文件路径，留空则使用上方保存的 Cookie。</p><div><input v-model="xCookieFile" placeholder="例如：/data/cookies/x.txt" /><button class="btn ghost" @click="saveXCookieFile"><Save :size="16" />保存路径</button></div></article></div></div>

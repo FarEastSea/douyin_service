@@ -28,6 +28,8 @@ RUNTIME_CONFIG_ENV_KEYS = {
     "download_retry_count": "DOWNLOAD_RETRY_COUNT",
     "download_retry_delay": "DOWNLOAD_RETRY_DELAY",
     "stuck_task_timeout": "STUCK_TASK_TIMEOUT",
+    "subscription_known_streak": "SUBSCRIPTION_KNOWN_STREAK",
+    "subscription_max_pages": "SUBSCRIPTION_MAX_PAGES",
 }
 
 
@@ -104,6 +106,20 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
         "max": 24 * 3600,
         "label": "卡住任务超时",
         "unit": "秒",
+    },
+    "subscription_known_streak": {
+        "type": "int",
+        "default": settings.SUBSCRIPTION_KNOWN_STREAK,
+        "min": 3,
+        "max": 100,
+        "label": "增量扫描连续已知作品停止数",
+    },
+    "subscription_max_pages": {
+        "type": "int",
+        "default": settings.SUBSCRIPTION_MAX_PAGES,
+        "min": 1,
+        "max": 500,
+        "label": "增量扫描最大页数",
     },
 }
 
