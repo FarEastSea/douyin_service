@@ -1,7 +1,7 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 BRANCH="${DEPLOY_BRANCH:-main}"
 PORT="${APP_PORT:-15000}"
@@ -9,7 +9,7 @@ VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 LOG_DIR="$PROJECT_DIR/logs"
 PREVIOUS_SHA=""
-TARGET_SHA=""
+TARGET_SHA="${DEPLOY_TARGET_SHA:-}"
 CODE_SWITCHED=0
 ROLLING_BACK=0
 
@@ -101,7 +101,13 @@ echo "Preparing ${PROJECT_NAME} deployment..."
 select_python
 PREVIOUS_SHA="$(git rev-parse HEAD)"
 git fetch origin "$BRANCH"
-TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+if [ -z "$TARGET_SHA" ]; then
+    TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+fi
+if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+    echo "Deploy failed: target commit ${TARGET_SHA} is unavailable." >&2
+    exit 1
+fi
 if [ "$PREVIOUS_SHA" = "$TARGET_SHA" ]; then
     echo "Already up to date at ${TARGET_SHA}."
     smoke_check
