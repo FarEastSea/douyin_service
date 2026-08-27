@@ -13,8 +13,8 @@ pipeline {
         REMOTE_PORT = credentials('douyin-remote-port')
         REMOTE_USER = credentials('douyin-remote-user')
         REMOTE_SERVICE_DIR = credentials('douyin-remote-service-dir')
+        REMOTE_PYTHON_ENV = credentials('douyin-remote-python-env')
         DEPLOY_BRANCH = 'main'
-        RELEASE_RETENTION = '5'
         TZ = 'Asia/Shanghai'
     }
 
@@ -25,7 +25,7 @@ pipeline {
                     sh '''
                         set +x
                         set -eu
-                        for value in "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_SERVICE_DIR"; do
+                        for value in "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_SERVICE_DIR" "$REMOTE_PYTHON_ENV"; do
                             test -n "$value"
                         done
                         ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
@@ -44,11 +44,11 @@ pipeline {
                         ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 \
                             -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new \
                             -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" \
-                            bash -s -- "$REMOTE_SERVICE_DIR" "$DEPLOY_BRANCH" "$RELEASE_RETENTION" <<'REMOTE_SCRIPT'
+                            bash -s -- "$REMOTE_SERVICE_DIR" "$DEPLOY_BRANCH" "$REMOTE_PYTHON_ENV" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 SERVICE_DIR="$1"
 BRANCH="$2"
-RETENTION="$3"
+PYTHON_ENV="$3"
 cd "$SERVICE_DIR"
 
 git fetch origin "$BRANCH"
@@ -61,7 +61,7 @@ chmod 700 "$TEMP_DEPLOY"
 PROJECT_DIR_OVERRIDE="$SERVICE_DIR" \
 DEPLOY_BRANCH="$BRANCH" \
 DEPLOY_TARGET_SHA="$TARGET_SHA" \
-RELEASE_RETENTION="$RETENTION" \
+REMOTE_PYTHON_ENV="$PYTHON_ENV" \
     "$TEMP_DEPLOY"
 REMOTE_SCRIPT
                     '''
@@ -72,10 +72,10 @@ REMOTE_SCRIPT
 
     post {
         success {
-            echo 'Atomic release, dependency readiness, and smoke checks succeeded.'
+            echo 'Root deployment and immediate restart with the BT Panel Python environment succeeded.'
         }
         failure {
-            echo 'Deploy failed. Review the stage log; deploy.sh keeps the previous release active or rolls back after a switch.'
+            echo 'Deploy failed. Review the stage log; deploy.sh restores the previous root commit after a switch failure.'
         }
     }
 }
