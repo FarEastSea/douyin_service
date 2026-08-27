@@ -39,10 +39,11 @@ preflight() {
 }
 
 smoke_check() {
-    APP_PORT="$PORT" "$VENV_DIR/bin/python" -c '
+    APP_PORT="$PORT" "$VENV_DIR/bin/python" - <<'PY'
 import json, os, time, urllib.request
 from app.core.config import settings
-base = f"http://127.0.0.1:{os.environ[\"APP_PORT\"]}"
+port = os.environ["APP_PORT"]
+base = f"http://127.0.0.1:{port}"
 token = settings.ADMIN_TOKEN
 headers = {"Authorization": f"Bearer {token}"} if token else {}
 def get(path, auth=False):
@@ -69,10 +70,11 @@ for _ in range(30):
     except Exception as exc:
         last_error = exc; time.sleep(1)
 raise SystemExit(f"Smoke checks failed: {last_error}")
-'
+PY
 }
 
-start_service() { APP_PORT="$PORT" VENV_DIR="$VENV_DIR" "$PROJECT_DIR/start.sh"; }
+start_service() { APP_PORT="$PORT" VENV_DIR="$VENV_DIR" bash "$PROJECT_DIR/start.sh"; }
+stop_service() { bash "$PROJECT_DIR/stop.sh"; }
 
 rollback() {
     local exit_code=$?
@@ -80,7 +82,7 @@ rollback() {
     ROLLING_BACK=1
     trap - ERR
     echo "Deploy failed; rolling back to ${PREVIOUS_SHA}..." >&2
-    "$PROJECT_DIR/stop.sh" || true
+    stop_service || true
     git reset --hard "$PREVIOUS_SHA"
     install_dependencies || true
     start_service
@@ -119,7 +121,7 @@ CODE_SWITCHED=1
 install_dependencies
 preflight
 chmod +x "$PROJECT_DIR/start.sh" "$PROJECT_DIR/stop.sh"
-"$PROJECT_DIR/stop.sh"
+stop_service
 start_service
 smoke_check
 
