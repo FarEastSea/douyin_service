@@ -97,7 +97,10 @@ class AuthorProfileHistory(Base):
 class Work(Base):
     """作品表"""
     __tablename__ = "works"
-    __table_args__ = (Index("idx_works_author_id", "author_id"),)
+    __table_args__ = (
+        Index("idx_works_author_id", "author_id"),
+        Index("idx_works_author_published", "author_id", "published_at"),
+    )
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     aweme_id = Column(String(64), unique=True, nullable=False, index=True)

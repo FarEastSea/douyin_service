@@ -10,7 +10,10 @@ import type { Author, MediaItem, PageData, Work } from '../types'
 
 const route = useRoute(), router = useRouter(), store = useAppStore()
 type WorkSort = 'published_desc' | 'published_asc' | 'discovered_desc' | 'discovered_asc'
-const author = ref<Author>(), works = ref<Work[]>([]), loading = ref(false), filter = ref('all'), search = ref(''), selected = ref<number[]>([])
+type DownloadFilter = 'all' | 'completed' | 'incomplete' | 'active' | 'failed' | 'not_started'
+type WorkTypeFilter = 'all' | 'video' | 'images'
+const author = ref<Author>(), works = ref<Work[]>([]), loading = ref(false), filter = ref<DownloadFilter>('all'), search = ref(''), selected = ref<number[]>([])
+const workType = ref<WorkTypeFilter>('all'), publishedFrom = ref(''), publishedTo = ref('')
 const sort = ref<WorkSort>('published_desc')
 const page = ref(1), pages = ref(1), total = ref(0), pageSize = 30
 const searchTimer = ref<number>()
@@ -18,7 +21,10 @@ const id = Number(route.params.id)
 async function load() {
   loading.value = true
   const params = new URLSearchParams({ paginated: 'true', page: String(page.value), page_size: String(pageSize), sort_by: sort.value })
-  if (filter.value !== 'all') params.set('is_downloaded', String(filter.value === 'done'))
+  if (filter.value !== 'all') params.set('download_status', filter.value)
+  if (workType.value !== 'all') params.set('work_type', workType.value)
+  if (publishedFrom.value) params.set('published_from', publishedFrom.value)
+  if (publishedTo.value) params.set('published_to', publishedTo.value)
   if (search.value.trim()) params.set('q', search.value.trim())
   try {
     const [authorData, data] = await Promise.all([api<Author>(`/authors/${id}`), api<PageData<Work>>(`/authors/${id}/works?${params}`)])
@@ -27,7 +33,7 @@ async function load() {
   catch (error: any) { store.notify(error.message || '加载作品失败', 'error') }
   finally { loading.value = false }
 }
-function changeFilter(value: string) { filter.value = value; page.value = 1; load() }
+function changeFilters() { page.value = 1; load() }
 function changeSort() { page.value = 1; load() }
 function changePage(value: number) { page.value = value; load() }
 function queueSearch() {
@@ -73,7 +79,7 @@ onMounted(load); onBeforeUnmount(() => { if (searchTimer.value != null) window.c
 <template>
   <section class="works-workspace">
     <header class="works-hero"><button class="icon-btn" @click="router.push('/douyin/authors')"><ArrowLeft /></button><span class="avatar large"><img v-if="author?.avatar_url" :src="`/api/authors/${id}/avatar`" alt="" /></span><div><p class="eyebrow">CREATOR WORKSPACE</p><h2>{{ author?.nickname || '作者作品' }}</h2><span>{{ total }} 个作品 · 当前页 {{ works.filter(w => w.is_downloaded).length }} 个已完成</span></div><div class="header-actions"><button v-if="selected.length" class="btn danger" @click="batchDelete"><Trash2 :size="16" />删除选中 ({{ selected.length }})</button><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></div></header>
-    <div class="works-toolbar"><nav class="segmented"><button :class="{ active: filter === 'all' }" @click="changeFilter('all')">全部</button><button :class="{ active: filter === 'done' }" @click="changeFilter('done')">已下载</button><button :class="{ active: filter === 'pending' }" @click="changeFilter('pending')">未完成</button></nav><label class="work-sort"><span>排序</span><select v-model="sort" aria-label="作品排序方式" @change="changeSort"><option value="published_desc">作品时间：最新</option><option value="published_asc">作品时间：最早</option><option value="discovered_desc">收录时间：最新</option><option value="discovered_asc">收录时间：最早</option></select></label><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索全部作品" @input="queueSearch" /></label></div>
+    <div class="works-toolbar"><label class="work-sort"><span>状态</span><select v-model="filter" aria-label="下载状态" @change="changeFilters"><option value="all">全部状态</option><option value="completed">已下载</option><option value="incomplete">未完成</option><option value="active">处理中</option><option value="failed">失败/取消</option><option value="not_started">未创建任务</option></select></label><label class="work-sort"><span>类型</span><select v-model="workType" aria-label="作品类型" @change="changeFilters"><option value="all">全部类型</option><option value="video">视频</option><option value="images">图集</option></select></label><label class="work-sort work-date"><span>从</span><input v-model="publishedFrom" type="date" aria-label="发布日期起始" @change="changeFilters" /></label><label class="work-sort work-date"><span>至</span><input v-model="publishedTo" type="date" aria-label="发布日期结束" @change="changeFilters" /></label><label class="work-sort"><span>排序</span><select v-model="sort" aria-label="作品排序方式" @change="changeSort"><option value="published_desc">作品时间：最新</option><option value="published_asc">作品时间：最早</option><option value="discovered_desc">收录时间：最新</option><option value="discovered_asc">收录时间：最早</option></select></label><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索全部作品" @input="queueSearch" /></label></div>
     <main class="work-grid" :class="{ loading }">
       <article v-for="work in works" :key="work.id" class="work-card">
         <div class="work-cover" @click="preview(work)"><img v-if="work.primary_preview_url" :src="work.primary_preview_url" alt="" loading="lazy" referrerpolicy="no-referrer" /><Image v-else :size="36" /><span>{{ work.work_type === 'images' ? `${work.image_count} 张` : '视频' }}</span><button class="select-box" :class="{ active: selected.includes(work.id) }" @click.stop="selected = selected.includes(work.id) ? selected.filter(v => v !== work.id) : [...selected, work.id]"><CheckSquare :size="18" /></button></div>

@@ -12,11 +12,11 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import case, select, func, or_
+from sqlalchemy import and_, case, select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import List, Literal, Optional, Union
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 
 from app.models.database import get_async_db
 from app.models.models import (
@@ -64,6 +64,11 @@ def _apply_account_status_filter(query, account_status: Optional[str]):
             )
         )
     return query
+
+
+def _escaped_ilike_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
@@ -374,6 +379,7 @@ async def search_authors(
 
 @router.get("/", response_model=PaginatedAuthorsResponse)
 async def list_authors(
+    q: Optional[str] = Query(None, max_length=200, description="按昵称或抖音 ID 搜索"),
     is_subscribed: Optional[bool] = Query(None, description="按订阅状态筛选"),
     account_status: Optional[str] = Query(
         None,
@@ -383,7 +389,7 @@ async def list_authors(
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db)
 ):
-    """获取作者列表（带分页），支持订阅状态与账号状态组合筛选"""
+    """获取作者列表（带分页），支持服务端搜索、订阅状态与账号状态组合筛选。"""
     # 构建基础查询条件
     base_query = select(Author)
     count_query = select(func.count(Author.id))
@@ -391,6 +397,16 @@ async def list_authors(
     if is_subscribed is not None:
         base_query = base_query.where(Author.is_subscribed == is_subscribed)
         count_query = count_query.where(Author.is_subscribed == is_subscribed)
+
+    search_text = (q or "").strip()
+    if search_text:
+        pattern = _escaped_ilike_pattern(search_text)
+        search_filter = or_(
+            Author.nickname.ilike(pattern, escape="\\"),
+            Author.sec_uid.ilike(pattern, escape="\\"),
+        )
+        base_query = base_query.where(search_filter)
+        count_query = count_query.where(search_filter)
 
     # 账号状态筛选（异常/正常/具体状态码），与订阅筛选组合生效
     base_query = _apply_account_status_filter(base_query, account_status)
@@ -757,6 +773,12 @@ async def unsubscribe_author(author_id: int, db: AsyncSession = Depends(get_asyn
 async def list_author_works(
     author_id: int,
     is_downloaded: Optional[bool] = Query(None, description="按下载状态筛选"),
+    download_status: Optional[Literal[
+        "completed", "incomplete", "active", "failed", "not_started"
+    ]] = Query(None, description="按作品下载状态筛选"),
+    work_type: Optional[Literal["video", "images"]] = Query(None, description="按作品类型筛选"),
+    published_from: Optional[date] = Query(None, description="发布日期起始，格式 YYYY-MM-DD"),
+    published_to: Optional[date] = Query(None, description="发布日期结束，格式 YYYY-MM-DD"),
     q: Optional[str] = Query(None, max_length=200, description="按标题或作品 ID 搜索"),
     paginated: bool = Query(False, description="返回分页对象；未指定时兼容旧版数组响应"),
     include_excluded: bool = Query(False, description="是否包含已删除（排除）的作品"),
@@ -787,10 +809,52 @@ async def list_author_works(
     if is_downloaded is not None:
         filters.append(Work.is_downloaded == is_downloaded)
 
+    has_tasks = Work.download_tasks.any()
+    has_completed_tasks = Work.download_tasks.any(DownloadTask.status == "completed")
+    has_non_completed_tasks = Work.download_tasks.any(DownloadTask.status != "completed")
+    downloaded_flag = func.coalesce(Work.is_downloaded, False)
+    completed_filter = or_(
+        and_(has_tasks, ~has_non_completed_tasks),
+        and_(~has_tasks, downloaded_flag.is_(True)),
+    )
+    active_filter = or_(
+        Work.download_tasks.any(
+            DownloadTask.status.in_(["pending", "downloading", "paused"])
+        ),
+        and_(has_completed_tasks, has_non_completed_tasks),
+    )
+    failed_filter = and_(
+        ~active_filter,
+        ~has_completed_tasks,
+        Work.download_tasks.any(DownloadTask.status.in_(["failed", "cancelled"])),
+    )
+
+    if download_status == "completed":
+        filters.append(completed_filter)
+    elif download_status == "incomplete":
+        filters.append(~completed_filter)
+    elif download_status == "active":
+        filters.append(active_filter)
+    elif download_status == "failed":
+        filters.append(failed_filter)
+    elif download_status == "not_started":
+        filters.append(and_(~has_tasks, downloaded_flag.is_(False)))
+
+    if work_type:
+        filters.append(Work.work_type == work_type)
+
+    if published_from and published_to and published_from > published_to:
+        raise HTTPException(status_code=400, detail="发布日期起始不能晚于结束日期")
+    if published_from:
+        filters.append(Work.published_at >= datetime.combine(published_from, datetime_time.min))
+    if published_to:
+        filters.append(
+            Work.published_at <= datetime.combine(published_to, datetime_time.max)
+        )
+
     search_text = (q or "").strip()
     if search_text:
-        escaped = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
+        pattern = _escaped_ilike_pattern(search_text)
         filters.append(or_(
             Work.title.ilike(pattern, escape="\\"),
             Work.aweme_id.ilike(pattern, escape="\\"),

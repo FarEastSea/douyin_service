@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Download, ExternalLink, Plus, RefreshCw, Search, Trash2, UserRound, Users } from '@lucide/vue'
 import { useRouter } from 'vue-router'
 import { api, jsonBody } from '../api'
@@ -10,12 +10,14 @@ import Pager from '../components/Pager.vue'
 const store = useAppStore(), router = useRouter()
 const authors = ref<Author[]>([]), page = ref(1), pages = ref(1), total = ref(0), loading = ref(false)
 const input = ref(''), search = ref(''), subscribed = ref(''), account = ref('all')
+const searchTimer = ref<number>()
 
 async function load() {
   loading.value = true
   try {
     const params = new URLSearchParams({ page: String(page.value), page_size: '20', account_status: account.value })
     if (subscribed.value) params.set('is_subscribed', subscribed.value)
+    if (search.value.trim()) params.set('q', search.value.trim())
     const data = await api<PageData<Author>>(`/authors/?${params}`)
     authors.value = data.items; pages.value = data.pages; total.value = data.total
   } catch (error: any) { store.notify(error.message || '加载作者失败', 'error') }
@@ -49,8 +51,15 @@ async function checkAll() {
   try { const result = await api<any>('/authors/check-all', { method: 'POST' }); store.notify(result.message) }
   catch (error: any) { store.notify(error.message || '提交检查失败', 'error') }
 }
-watch([page, subscribed, account], () => load())
+function resetAndLoad() { if (page.value === 1) load(); else page.value = 1 }
+function queueSearch() {
+  if (searchTimer.value != null) window.clearTimeout(searchTimer.value)
+  searchTimer.value = window.setTimeout(resetAndLoad, 350)
+}
+watch(page, load)
+watch([subscribed, account], resetAndLoad)
 onMounted(load)
+onBeforeUnmount(() => { if (searchTimer.value != null) window.clearTimeout(searchTimer.value) })
 </script>
 
 <template>
@@ -61,12 +70,12 @@ onMounted(load)
     </header>
     <form class="command-bar" @submit.prevent="add"><Plus :size="18" /><input v-model="input" placeholder="粘贴作者主页链接…" /><button class="btn primary" :disabled="store.risk.active">添加作者</button></form>
     <div class="filter-row">
-      <label class="search"><Search :size="16" /><input v-model="search" placeholder="筛选当前页作者" /></label>
+      <label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索全部作者" @input="queueSearch" /></label>
       <div class="selects"><select v-model="subscribed"><option value="">全部订阅状态</option><option value="true">已订阅</option><option value="false">未订阅</option></select><select v-model="account"><option value="all">全部账号状态</option><option value="normal">正常账号</option><option value="abnormal">异常账号</option><option value="banned">封禁/禁言</option><option value="deleted">已销号</option><option value="restricted">不可访问</option></select></div>
     </div>
     <div class="table-shell" :class="{ loading }">
       <table class="data-table author-table"><thead><tr><th>作者</th><th>媒体库</th><th>自动更新</th><th>订阅</th><th class="actions-col">操作</th></tr></thead><tbody>
-        <tr v-for="author in authors.filter(a => !search || `${a.nickname} ${a.sec_uid}`.toLowerCase().includes(search.toLowerCase()))" :key="author.id">
+        <tr v-for="author in authors" :key="author.id">
           <td><div class="author-cell"><span class="avatar"><img v-if="author.avatar_url" :src="`/api/authors/${author.id}/avatar`" alt="" loading="lazy" /><UserRound v-else /></span><div><strong>{{ author.nickname || '未知作者' }}</strong><a v-if="author.share_url" :href="author.share_url" target="_blank" rel="noopener">查看主页 <ExternalLink :size="12" /></a><span v-else>{{ author.sec_uid }}</span></div></div></td>
           <td><strong>{{ author.total_works.toLocaleString() }} 个作品</strong><span>{{ author.downloaded_works.toLocaleString() }} 个已下载</span></td>
           <td><span class="status subtle" :data-tone="author.auto_update_status">{{ author.auto_update_message || (author.is_subscribed ? '等待检查' : '未订阅') }}</span><small v-if="author.last_error" class="inline-error" :title="author.last_error">{{ author.last_error }}</small></td>

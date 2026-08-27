@@ -123,6 +123,7 @@ INDEX_MIGRATIONS = [
     _create_index("0113_idx_history_work", "下载历史作品索引", "idx_download_history_work_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_history_work_id ON download_history (work_id)", "CREATE INDEX idx_download_history_work_id ON download_history (work_id)"),
     _create_index("0114_idx_x_author_status", "X 作者任务状态索引", "idx_x_download_tasks_author_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_x_download_tasks_author_status ON x_download_tasks (x_author_id, status)", "CREATE INDEX idx_x_download_tasks_author_status ON x_download_tasks (x_author_id, status)"),
     _create_index("0115_idx_subscribed_authors", "已订阅作者部分索引", "idx_authors_is_subscribed_true", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_authors_is_subscribed_true ON authors (is_subscribed) WHERE is_subscribed IS TRUE", "CREATE INDEX idx_authors_is_subscribed_true ON authors (is_subscribed)"),
+    _create_index("0116_idx_works_author_published", "作者作品发布时间索引", "idx_works_author_published", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_works_author_published ON works (author_id, published_at)", "CREATE INDEX idx_works_author_published ON works (author_id, published_at)"),
 ]
 
 
