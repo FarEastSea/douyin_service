@@ -1,14 +1,18 @@
 """抖音采集适配层。
 
-业务任务只依赖这里的采集契约；网页接口字段变化时，修复集中在适配器，
-不再让订阅、作者同步和下载编排各自理解上游响应。
+业务 API 与任务编排只依赖这里的契约。上游接口、签名或字段变化时，
+修复集中在适配器，下载执行也不需要理解抖音响应结构。
 """
 
 from __future__ import annotations
 
+import re
 import time
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, Literal, Protocol, TypedDict
+from urllib.parse import quote, unquote
 
+from app.services.avatar_cache import ensure_author_avatar_cached
+from app.services.douyin_cookie import require_douyin_uifid
 from app.services.downloader import DouyinDownloader
 
 
@@ -16,10 +20,48 @@ class DouyinTraversalLimitError(RuntimeError):
     """扫描尚未到达可信边界就触及安全上限。"""
 
 
+class ResolvedDouyinInput(TypedDict):
+    type: Literal["author", "work"]
+    canonical_url: str
+    sec_uid: str | None
+    aweme_id: str | None
+
+
+class DouyinWorkPage(TypedDict):
+    items: list[dict[str, Any]]
+    next_cursor: int | str | None
+    has_more: bool
+
+
+class DouyinSourceHealth(TypedDict):
+    ok: bool
+    reason: str | None
+
+
+def build_author_profile_url(sec_uid: str | None) -> str | None:
+    """生成稳定作者主页地址；不依赖具体采集实现。"""
+    if not sec_uid:
+        return None
+    normalized = unquote(str(sec_uid).strip())
+    if not normalized:
+        return None
+    return f"https://www.douyin.com/user/{quote(normalized, safe='')}"
+
+
 class DouyinSource(Protocol):
-    def get_author_info(self, sec_uid: str) -> dict[str, Any]: ...
-    def get_all_works(self, share_url: str, sec_uid: str | None = None) -> list[dict[str, Any]]: ...
-    def get_incremental_works(
+    """抖音采集契约；不包含文件落盘和断点续传。"""
+
+    def resolve_input(self, raw_input: str) -> ResolvedDouyinInput: ...
+    def fetch_profile(self, sec_uid: str) -> dict[str, Any]: ...
+    def list_works(
+        self, sec_uid: str, *, cursor: int | str = 0, count: int = 42
+    ) -> DouyinWorkPage: ...
+    def fetch_work(self, canonical_url: str) -> dict[str, Any]: ...
+    def refresh_assets(self, aweme_id: str) -> dict[str, Any]: ...
+    def health_check(self) -> DouyinSourceHealth: ...
+    def cache_author_avatar(self, author_id: int, source_url: str | None): ...
+    def list_all_works(self, sec_uid: str) -> list[dict[str, Any]]: ...
+    def list_incremental_works(
         self,
         sec_uid: str,
         known_aweme_ids: Iterable[str],
@@ -29,31 +71,103 @@ class DouyinSource(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
-class DouyinWebSource:
-    """当前抖音 Web 数据源实现。"""
+class DouyinWebAdapter:
+    """当前抖音 Web 采集实现。"""
 
     def __init__(self, downloader: DouyinDownloader):
-        self.downloader = downloader
+        self._downloader = downloader
 
-    @property
-    def filepath(self) -> str:
-        return self.downloader.filepath
+    def resolve_input(self, raw_input: str) -> ResolvedDouyinInput:
+        resolved = self._downloader.detect_url_type(raw_input)
+        input_type = resolved.get("type")
+        canonical_url = str(resolved.get("redirect_url") or "")
+        if input_type not in {"author", "work"} or not canonical_url:
+            raise ValueError("抖音链接解析结果不完整")
 
-    @property
-    def session(self):
-        return self.downloader.session
+        author_match = re.search(r"/user/([^/?#]+)", canonical_url)
+        work_match = re.search(r"/(?:video|note)/(\d+)", canonical_url)
+        sec_uid = unquote(author_match.group(1)) if author_match else None
+        aweme_id = work_match.group(1) if work_match else None
+        if input_type == "author" and not sec_uid:
+            raise ValueError("无法从作者链接中提取 sec_uid")
+        if input_type == "work" and not aweme_id:
+            raise ValueError("无法从作品链接中提取 aweme_id")
+        return {
+            "type": input_type,
+            "canonical_url": canonical_url,
+            "sec_uid": sec_uid,
+            "aweme_id": aweme_id,
+        }
 
-    @property
-    def download_timeout(self) -> int:
-        return self.downloader.download_timeout
+    def fetch_profile(self, sec_uid: str) -> dict[str, Any]:
+        return self._downloader.get_author_info(sec_uid)
 
-    def get_author_info(self, sec_uid: str) -> dict[str, Any]:
-        return self.downloader.get_author_info(sec_uid)
+    def list_works(
+        self, sec_uid: str, *, cursor: int | str = 0, count: int = 42
+    ) -> DouyinWorkPage:
+        data = self._downloader.get_work_list(sec_uid, cursor, count)
+        raw_items = data.get("aweme_list")
+        if not isinstance(raw_items, list):
+            raise ValueError(f"抖音作品列表返回异常类型: {type(raw_items).__name__}")
 
-    def get_all_works(self, share_url: str, sec_uid: str | None = None) -> list[dict[str, Any]]:
-        return self.downloader.get_all_works(share_url, sec_uid=sec_uid)
+        items: list[dict[str, Any]] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise ValueError("抖音作品列表包含非对象数据")
+            items.append(self._downloader.normalize_work_item(raw_item, sec_uid))
 
-    def get_incremental_works(
+        has_more = bool(data.get("has_more", False))
+        next_cursor = data.get("max_cursor")
+        if has_more and (next_cursor is None or str(next_cursor) == str(cursor)):
+            raise DouyinTraversalLimitError("抖音作品分页游标未前进，已停止扫描")
+        return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+
+    def fetch_work(self, canonical_url: str) -> dict[str, Any]:
+        return self._downloader.get_single_work(canonical_url)
+
+    def refresh_assets(self, aweme_id: str) -> dict[str, Any]:
+        if not str(aweme_id or "").strip():
+            raise ValueError("刷新作品资源需要 aweme_id")
+        return self._downloader.refresh_work_urls(str(aweme_id))
+
+    def health_check(self) -> DouyinSourceHealth:
+        """只检查本地请求上下文，不主动访问抖音，避免健康检查放大风控。"""
+        cookie = self._downloader.headers.get("cookie", "")
+        if not cookie:
+            return {"ok": False, "reason": "未配置抖音 Cookie"}
+        try:
+            require_douyin_uifid(cookie)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        return {"ok": True, "reason": None}
+
+    def cache_author_avatar(self, author_id: int, source_url: str | None):
+        return ensure_author_avatar_cached(
+            author_id,
+            source_url,
+            self._downloader.filepath,
+            self._downloader.session,
+            timeout=self._downloader.download_timeout,
+        )
+
+    def list_all_works(self, sec_uid: str) -> list[dict[str, Any]]:
+        cursor: int | str = 0
+        collected: list[dict[str, Any]] = []
+        seen_cursors: set[str] = set()
+        while True:
+            cursor_key = str(cursor)
+            if cursor_key in seen_cursors:
+                raise DouyinTraversalLimitError("抖音作品分页游标重复，已停止全量扫描")
+            seen_cursors.add(cursor_key)
+
+            page = self.list_works(sec_uid, cursor=cursor)
+            collected.extend(page["items"])
+            if not page["has_more"]:
+                return collected
+            cursor = page["next_cursor"]
+            time.sleep(self._downloader.request_delay)
+
+    def list_incremental_works(
         self,
         sec_uid: str,
         known_aweme_ids: Iterable[str],
@@ -61,54 +175,36 @@ class DouyinWebSource:
         known_streak: int,
         max_pages: int,
     ) -> list[dict[str, Any]]:
-        """从最新页向后扫描，跨过置顶项，在连续已知作品处安全停止。
-
-        如果上游声称还有更多数据，但游标不前进或页数触及上限，则失败关闭，
-        避免把不完整结果误判为“没有新作品”。
-        """
+        """从最新页向后扫描，跨过置顶项，在连续已知作品处安全停止。"""
         known_ids = {str(value) for value in known_aweme_ids if value is not None}
         if not known_ids:
             raise ValueError("增量扫描需要至少一个已知作品 ID")
 
         required_streak = max(3, int(known_streak))
         page_limit = max(1, int(max_pages))
-        cursor = 0
+        cursor: int | str = 0
         consecutive_known = 0
         collected: list[dict[str, Any]] = []
         collected_ids: set[str] = set()
 
-        for page_number in range(1, page_limit + 1):
-            data = self.downloader.get_work_list(sec_uid, cursor)
-            raw_items = data.get("aweme_list") or []
-            if not isinstance(raw_items, list):
-                raise ValueError(f"抖音作品列表返回异常类型: {type(raw_items).__name__}")
-
-            for raw_item in raw_items:
-                normalized = self.downloader._normalize_work_item(raw_item, sec_uid)
-                aweme_id = str(normalized.get("aweme_id") or "")
+        for _page_number in range(1, page_limit + 1):
+            page = self.list_works(sec_uid, cursor=cursor)
+            for item in page["items"]:
+                aweme_id = str(item.get("aweme_id") or "")
                 if not aweme_id:
                     raise ValueError("抖音作品列表缺少 aweme_id")
                 if aweme_id not in collected_ids:
-                    collected.append(normalized)
+                    collected.append(item)
                     collected_ids.add(aweme_id)
 
-                # 置顶作品可能来自很早以前，不能参与连续已知边界计算。
-                if normalized.get("is_top"):
+                if item.get("is_top"):
                     continue
-                if aweme_id in known_ids:
-                    consecutive_known += 1
-                else:
-                    consecutive_known = 0
+                consecutive_known = consecutive_known + 1 if aweme_id in known_ids else 0
 
-            has_more = bool(data.get("has_more", False))
-            if consecutive_known >= required_streak or not has_more:
+            if consecutive_known >= required_streak or not page["has_more"]:
                 return collected
-
-            next_cursor = data.get("max_cursor")
-            if next_cursor is None or str(next_cursor) == str(cursor):
-                raise DouyinTraversalLimitError("抖音作品分页游标未前进，已停止本次增量扫描")
-            cursor = next_cursor
-            time.sleep(self.downloader.request_delay)
+            cursor = page["next_cursor"]
+            time.sleep(self._downloader.request_delay)
 
         raise DouyinTraversalLimitError(
             f"增量扫描达到 {page_limit} 页仍未找到连续 {required_streak} 个已知作品，已停止并保留现状"
@@ -119,5 +215,5 @@ def build_douyin_source(
     cookie: str,
     filepath: str | None = None,
     runtime_config: dict[str, Any] | None = None,
-) -> DouyinWebSource:
-    return DouyinWebSource(DouyinDownloader(cookie, filepath, runtime_config=runtime_config))
+) -> DouyinSource:
+    return DouyinWebAdapter(DouyinDownloader(cookie, filepath, runtime_config=runtime_config))

@@ -29,7 +29,6 @@ from app.models.models import (
     AuthorProfileHistory,
 )
 from app.services.downloader import (
-    DouyinDownloader,
     is_video_work_payload,
     latest_video_url,
     payload_image_urls,
@@ -41,11 +40,16 @@ from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
 from app.core.traffic_control import global_download_slot
-from app.services.avatar_cache import ensure_author_avatar_cached
 from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
 from app.services.douyin_errors import DouyinRequestError
-from app.services.douyin_source import DouyinTraversalLimitError, build_douyin_source
+from app.services.douyin_source import (
+    DouyinSource,
+    DouyinTraversalLimitError,
+    build_author_profile_url,
+    build_douyin_source,
+)
+from app.services.douyin_media import build_douyin_media_engine
 
 # 配置日志
 import os
@@ -247,8 +251,8 @@ def _known_work_ids(db: Session, author_id: int) -> set[str]:
 def _collect_author_works(source, author: Author, db: Session, runtime_config: dict, *, incremental: bool) -> list:
     known_ids = _known_work_ids(db, author.id) if incremental else set()
     if not known_ids:
-        return source.get_all_works(author.share_url, sec_uid=author.sec_uid)
-    return source.get_incremental_works(
+        return source.list_all_works(author.sec_uid)
+    return source.list_incremental_works(
         author.sec_uid,
         known_ids,
         known_streak=int(runtime_config.get("subscription_known_streak", settings.SUBSCRIPTION_KNOWN_STREAK)),
@@ -385,9 +389,9 @@ def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing:
     work.video_url = None
 
 
-def sync_author_profile(author: Author, downloader: DouyinDownloader) -> dict:
+def sync_author_profile(author: Author, source: DouyinSource) -> dict:
     """同步作者基础资料，和订阅检查共用同一轮风控节奏。"""
-    profile = downloader.get_author_info(author.sec_uid)
+    profile = source.fetch_profile(author.sec_uid)
     old_nickname = author.nickname
     old_avatar = author.avatar_url
     old_share_url = author.share_url
@@ -395,7 +399,7 @@ def sync_author_profile(author: Author, downloader: DouyinDownloader) -> dict:
 
     nickname = profile.get("nickname")
     avatar_url = profile.get("avatar_url")
-    profile_url = profile.get("profile_url") or DouyinDownloader.build_author_profile_url(author.sec_uid)
+    profile_url = profile.get("profile_url") or build_author_profile_url(author.sec_uid)
     account_status = profile.get("account_status", "active")
     account_status_label = profile.get("account_status_label", "正常")
     account_status_detail = profile.get("account_status_detail")
@@ -408,13 +412,7 @@ def sync_author_profile(author: Author, downloader: DouyinDownloader) -> dict:
     if avatar_url and account_status == "active":
         author.avatar_url = prefer_avatar_url(author.avatar_url, avatar_url)
         try:
-            ensure_author_avatar_cached(
-                author.id,
-                author.avatar_url,
-                downloader.filepath,
-                downloader.session,
-                timeout=downloader.download_timeout,
-            )
+            source.cache_author_avatar(author.id, author.avatar_url)
         except Exception as exc:
             logger.warning("缓存作者头像失败 author_id=%s: %s", author.id, exc)
     if profile_url:
@@ -575,14 +573,19 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
         
         runtime_config = get_runtime_config_sync(db)
 
-        # 获取 Cookie 并创建下载器
+        # 采集和文件执行使用独立契约，任务不再直接操作下载器会话。
         cookie = get_cookie_from_db(db)
-        downloader = DouyinDownloader(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        source = build_douyin_source(
+            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config
+        )
+        media = build_douyin_media_engine(
+            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config
+        )
         
         # 确定下载 URL 和文件路径
         if work.work_type == "video":
             url = work.video_url
-            file_path = downloader.build_file_path(
+            file_path = media.build_file_path(
                 author.nickname or "未知作者",
                 work.title or "untitled",
                 work.aweme_id,
@@ -596,7 +599,7 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             # 仍有效而跳过后面的“过期 URL 刷新”，继续误下成 JPG。
             if len(live_photo_urls) != len(image_urls):
                 try:
-                    fresh = downloader.refresh_work_urls(work.aweme_id)
+                    fresh = source.refresh_assets(work.aweme_id)
                     refreshed_image_urls = payload_image_urls(fresh)
                     refreshed_live_photo_urls = payload_live_photo_urls(fresh)
                     if refreshed_image_urls:
@@ -623,7 +626,7 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                 else None
             )
             url = live_photo_url or image_urls[task.file_index]
-            file_path = downloader.build_file_path(
+            file_path = media.build_file_path(
                 author.nickname or "未知作者",
                 work.title or "untitled",
                 work.aweme_id,
@@ -634,10 +637,10 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
         
         # URL 有效性检测：抖音 URL 会过期，重试任务必须刷新
         try:
-            head_res = downloader.session.head(url, timeout=10, allow_redirects=True)
-            if head_res.status_code in (403, 404, 410):
-                logger.info(f"任务 {task_id} - URL 已过期(HTTP {head_res.status_code})，刷新中...")
-                fresh = downloader.refresh_work_urls(work.aweme_id)
+            probe_status = media.probe_status(url, timeout=10)
+            if probe_status in (403, 404, 410):
+                logger.info(f"任务 {task_id} - URL 已过期(HTTP {probe_status})，刷新中...")
+                fresh = source.refresh_assets(work.aweme_id)
                 if work.work_type == "video":
                     refreshed_video_url = latest_video_url(fresh)
                     if refreshed_video_url:
@@ -656,7 +659,7 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                         work.image_urls = image_urls
                         work.image_count = len(image_urls)
                         work.live_photo_urls = live_photo_urls
-                        file_path = downloader.build_file_path(
+                        file_path = media.build_file_path(
                             author.nickname or "未知作者",
                             work.title or "untitled",
                             work.aweme_id,
@@ -702,7 +705,7 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             return redis_client.is_task_paused(task_id)
         
         # 执行下载
-        result = downloader.download_file_with_resume(
+        result = media.download(
             url=url,
             file_path=file_path,
             task_id=task_id,

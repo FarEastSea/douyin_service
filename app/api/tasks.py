@@ -29,7 +29,6 @@ from app.models.schemas import (
 from app.tasks.download_tasks import download_single_file, download_author_works, resume_task
 from app.core import redis_client
 from app.services.downloader import (
-    DouyinDownloader,
     author_profile_has_identity,
     is_video_work_payload,
     latest_video_url,
@@ -47,6 +46,11 @@ from app.services.douyin_errors import (
     DouyinRequestError,
     classify_stored_task_error,
     http_status_for_douyin_error,
+)
+from app.services.douyin_source import (
+    DouyinSource,
+    build_author_profile_url,
+    build_douyin_source,
 )
 
 router = APIRouter(prefix="/tasks", tags=["下载任务"])
@@ -272,14 +276,16 @@ async def create_download_task(
             pass
 
         runtime_config = await get_runtime_config(db)
-        downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        source = build_douyin_source(
+            cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+        )
 
-        url_info = await asyncio.to_thread(downloader.detect_url_type, request.share_url)
+        url_info = await asyncio.to_thread(source.resolve_input, request.share_url)
 
         if url_info["type"] == "work":
-            return await _handle_single_work(downloader, url_info["redirect_url"], db)
+            return await _handle_single_work(source, url_info["canonical_url"], db)
         else:
-            return await _handle_author_download(downloader, request.share_url, db)
+            return await _handle_author_download(source, url_info["sec_uid"], db)
     
     except DouyinRequestError as e:
         raise HTTPException(status_code=http_status_for_douyin_error(e), detail=e.as_dict())
@@ -292,14 +298,13 @@ async def create_download_task(
 
 
 async def _handle_author_download(
-    downloader: DouyinDownloader, share_url: str, db: AsyncSession
+    source: DouyinSource, sec_uid: str, db: AsyncSession
 ) -> BatchDownloadResponse:
     """处理作者主页链接 - 原有逻辑"""
-    sec_uid = await asyncio.to_thread(downloader.get_sec_uid, share_url)
     result = await db.execute(select(Author).where(Author.sec_uid == sec_uid))
     author = result.scalar_one_or_none()
     author_exists = author is not None
-    author_info = await asyncio.to_thread(downloader.get_author_info, sec_uid)
+    author_info = await asyncio.to_thread(source.fetch_profile, sec_uid)
 
     if not author and not author_profile_has_identity(author_info):
         detail = author_info.get("account_status_detail") or author_info.get("account_status_label") or "抖音未返回可用的作者资料"
@@ -309,7 +314,7 @@ async def _handle_author_download(
         author = Author(
             sec_uid=sec_uid,
             nickname=author_info.get("nickname"),
-            share_url=author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or share_url,
+            share_url=author_info.get("profile_url") or build_author_profile_url(sec_uid),
             avatar_url=author_info.get("avatar_url")
         )
         db.add(author)
@@ -317,7 +322,7 @@ async def _handle_author_download(
     else:
         author.nickname = author_info.get("nickname") or author.nickname
         author.avatar_url = prefer_avatar_url(author.avatar_url, author_info.get("avatar_url"))
-        author.share_url = author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or author.share_url
+        author.share_url = author_info.get("profile_url") or build_author_profile_url(sec_uid) or author.share_url
 
     author_created_at = author.created_at
     await recalc_author_counts(db, author)
@@ -346,10 +351,10 @@ async def _handle_author_download(
 
 
 async def _handle_single_work(
-    downloader: DouyinDownloader, redirect_url: str, db: AsyncSession
+    source: DouyinSource, canonical_url: str, db: AsyncSession
 ) -> BatchDownloadResponse:
     """处理单个作品链接"""
-    work_data = await asyncio.to_thread(downloader.get_single_work, redirect_url)
+    work_data = await asyncio.to_thread(source.fetch_work, canonical_url)
     work_info = work_data["work"]
     author_info = work_data["author_info"]
     sec_uid = author_info["sec_uid"]
@@ -366,13 +371,13 @@ async def _handle_single_work(
         author = Author(
             sec_uid=sec_uid,
             nickname=author_info.get("nickname"),
-            share_url=author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid),
+            share_url=author_info.get("profile_url") or build_author_profile_url(sec_uid),
             avatar_url=author_info.get("avatar_url")
         )
         db.add(author)
         await db.flush()
     else:
-        author.share_url = author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or author.share_url
+        author.share_url = author_info.get("profile_url") or build_author_profile_url(sec_uid) or author.share_url
 
     aweme_id = work_info["aweme_id"]
     result = await db.execute(select(Work).where(Work.aweme_id == aweme_id))
@@ -1025,8 +1030,10 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
         runtime_config = await get_runtime_config(db)
 
         def _refresh():
-            downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
-            return downloader.refresh_work_urls(work.aweme_id)
+            source = build_douyin_source(
+                cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            )
+            return source.refresh_assets(work.aweme_id)
 
         fresh = await asyncio.to_thread(_refresh)
 
@@ -1080,9 +1087,11 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
 
     runtime_config = await get_runtime_config(db)
 
-    def _create_downloader():
-        return DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
-    downloader = await asyncio.to_thread(_create_downloader)
+    def _create_source():
+        return build_douyin_source(
+            cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+        )
+    source = await asyncio.to_thread(_create_source)
 
     # 按 work_id 分组，避免同一个作品重复刷新
     work_ids = set(t.work_id for t in failed_tasks)
@@ -1095,7 +1104,7 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
             continue
         try:
             def _refresh(aweme_id=work.aweme_id):
-                return downloader.refresh_work_urls(aweme_id)
+                return source.refresh_assets(aweme_id)
             fresh = await asyncio.to_thread(_refresh)
 
             if work.work_type == "video":

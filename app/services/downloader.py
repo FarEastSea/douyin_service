@@ -417,7 +417,8 @@ class DouyinDownloader:
         except requests.RequestException as exc:
             raise DouyinRequestError("network_error", detail=str(exc)) from exc
 
-    def _normalize_work_item(self, item: Dict[str, Any], fallback_sec_uid: str = '') -> Dict[str, Any]:
+    def normalize_work_item(self, item: Dict[str, Any], fallback_sec_uid: str = '') -> Dict[str, Any]:
+        """将上游作品数据转换成项目内部结构。仅供采集适配器调用。"""
         author = item.get('author') or {}
         if not isinstance(author, dict):
             author = {}
@@ -500,7 +501,7 @@ class DouyinDownloader:
         sec_uid = author.get('sec_uid', '')
 
         work = {
-            **self._normalize_work_item(item, sec_uid),
+            **self.normalize_work_item(item, sec_uid),
         }
 
         author_info = {
@@ -731,7 +732,7 @@ class DouyinDownloader:
                 raise ValueError(f"抖音作品列表返回异常类型: {type(aweme_list).__name__}")
 
             for item in aweme_list:
-                work_list.append(self._normalize_work_item(item, sec_uid))
+                work_list.append(self.normalize_work_item(item, sec_uid))
             
             if has_more:
                 if str(next_cursor) == str(max_cursor):
@@ -940,7 +941,7 @@ class DouyinDownloader:
             raise ValueError(f"作品 {aweme_id} 详情获取失败，可能已被删除")
         
         return {
-            **self._normalize_work_item(item),
+            **self.normalize_work_item(item),
         }
 
     @staticmethod

@@ -26,8 +26,9 @@ from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
     PaginatedAuthorsResponse, PaginatedWorksResponse
 )
-from app.services.downloader import DouyinDownloader, author_profile_has_identity, prefer_avatar_url
-from app.services.avatar_cache import ensure_author_avatar_cached, find_cached_author_avatar
+from app.services.downloader import author_profile_has_identity, prefer_avatar_url
+from app.services.avatar_cache import find_cached_author_avatar
+from app.services.douyin_source import build_author_profile_url, build_douyin_source
 from app.tasks.download_tasks import (
     AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX,
     SUBSCRIPTION_CYCLE_STATE_KEY,
@@ -87,7 +88,7 @@ async def _raise_if_douyin_cooling() -> None:
 
 
 def _normalize_author_profile_url(author: Author) -> bool:
-    stable_url = DouyinDownloader.build_author_profile_url(author.sec_uid)
+    stable_url = build_author_profile_url(author.sec_uid)
     if not stable_url or author.share_url == stable_url:
         return False
 
@@ -251,17 +252,22 @@ async def add_author(
             raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
         
         runtime_config = await get_runtime_config(db)
-        downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        source = build_douyin_source(
+            cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+        )
         
         # 抖音请求是同步 I/O，放到线程池避免阻塞 FastAPI 事件循环导致网关超时。
-        sec_uid = await asyncio.to_thread(downloader.get_sec_uid, request.share_url)
+        resolved = await asyncio.to_thread(source.resolve_input, request.share_url)
+        if resolved["type"] != "author" or not resolved["sec_uid"]:
+            raise HTTPException(status_code=400, detail="请输入抖音作者主页链接")
+        sec_uid = resolved["sec_uid"]
         result = await db.execute(
             select(Author).where(Author.sec_uid == sec_uid)
         )
         existing = result.scalar_one_or_none()
 
-        author_info = await asyncio.to_thread(downloader.get_author_info, sec_uid)
-        stable_share_url = author_info.get("profile_url") or DouyinDownloader.build_author_profile_url(sec_uid) or request.share_url
+        author_info = await asyncio.to_thread(source.fetch_profile, sec_uid)
+        stable_share_url = author_info.get("profile_url") or build_author_profile_url(sec_uid) or request.share_url
         
         if existing:
             if stable_share_url and existing.share_url != stable_share_url:
@@ -545,8 +551,10 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
         runtime_config = await get_runtime_config(db)
 
         def _sync():
-            downloader = DouyinDownloader(cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
-            return sync_author_profile(author, downloader)
+            source = build_douyin_source(
+                cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            )
+            return sync_author_profile(author, source)
 
         profile_result = await asyncio.to_thread(_sync)
         for field_name, old_value, new_value in (
@@ -594,14 +602,10 @@ async def get_author_avatar(author_id: int, db: AsyncSession = Depends(get_async
     runtime_config = await get_runtime_config(db)
 
     def _cache_avatar():
-        downloader = DouyinDownloader(cookie or "", current_settings.DOWNLOAD_DIR, runtime_config=runtime_config)
-        return ensure_author_avatar_cached(
-            author.id,
-            author.avatar_url,
-            downloader.filepath,
-            downloader.session,
-            timeout=downloader.download_timeout,
+        source = build_douyin_source(
+            cookie or "", current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
         )
+        return source.cache_author_avatar(author.id, author.avatar_url)
 
     try:
         cached = await asyncio.to_thread(_cache_avatar)
