@@ -11,11 +11,12 @@ const store = useAppStore()
 const tasks = ref<Task[]>([])
 const total = ref(0), pages = ref(1), page = ref(1)
 const loading = ref(false), status = ref(''), query = ref(''), shareUrl = ref('')
-const timer = ref<number>()
+const timer = ref<number>(), queryTimer = ref<number>()
+const statusCounts = ref<Record<string, number>>({})
 const statuses = [
-  ['', '全部'], ['pending', '待处理'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['failed', '失败'],
+  ['', '全部'], ['pending', '待处理'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['failed', '失败'], ['cancelled', '已取消'],
 ]
-const failedCount = computed(() => tasks.value.filter(item => item.status === 'failed').length)
+const failedCount = computed(() => statusCounts.value.failed || 0)
 
 function bytes(value = 0) {
   if (!value) return '—'
@@ -31,8 +32,9 @@ async function load(silent = false) {
   try {
     const params = new URLSearchParams({ page: String(page.value), page_size: '20' })
     if (status.value) params.set('status', status.value)
-    const data = await api<PageData<Task>>(`/tasks/?${params}`)
-    tasks.value = data.items; total.value = data.total; pages.value = data.pages
+    if (query.value.trim()) params.set('q', query.value.trim())
+    const data = await api<PageData<Task> & { status_counts: Record<string, number> }>(`/tasks/?${params}`)
+    tasks.value = data.items; total.value = data.total; pages.value = data.pages; statusCounts.value = data.status_counts || {}
   } catch (error: any) { if (!silent) store.notify(error.message || '加载任务失败', 'error') }
   finally { loading.value = false }
 }
@@ -72,9 +74,17 @@ function preview(task: Task) {
   openMedia([{ url: task.preview_url, type: task.preview_media_type === 'video' ? 'video' : 'image', title: task.work_title || task.file_name }])
 }
 function setStatus(value: string) { status.value = value; page.value = 1 }
+function statusCount(value: string) { return value ? (statusCounts.value[value] || 0) : Object.values(statusCounts.value).reduce((sum, count) => sum + count, 0) }
 watch([status, page], () => load())
+watch(query, () => {
+  if (queryTimer.value != null) window.clearTimeout(queryTimer.value)
+  queryTimer.value = window.setTimeout(() => {
+    if (page.value === 1) load()
+    else page.value = 1
+  }, 350)
+})
 onMounted(() => { load(); timer.value = window.setInterval(() => load(true), 5000) })
-onBeforeUnmount(() => clearInterval(timer.value))
+onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null) window.clearTimeout(queryTimer.value) })
 </script>
 
 <template>
@@ -98,15 +108,15 @@ onBeforeUnmount(() => clearInterval(timer.value))
     </form>
 
     <div class="filter-row">
-      <nav class="segmented"><button v-for="item in statuses" :key="item[0]" :class="{ active: status === item[0] }" @click="setStatus(item[0])">{{ item[1] }}</button></nav>
-      <label class="search compact-search"><Search :size="15" /><input v-model="query" placeholder="筛选当前页" /></label>
+      <nav class="segmented"><button v-for="item in statuses" :key="item[0]" :class="{ active: status === item[0] }" @click="setStatus(item[0])">{{ item[1] }} <small>{{ statusCount(item[0]) }}</small></button></nav>
+      <label class="search compact-search"><Search :size="15" /><input v-model="query" placeholder="搜索全部任务、作品或作者" /></label>
     </div>
 
     <div class="table-shell" :class="{ loading }">
       <table class="data-table task-table">
         <thead><tr><th>任务</th><th>状态与进度</th><th>传输</th><th>时间</th><th class="actions-col">操作</th></tr></thead>
         <tbody>
-          <tr v-for="task in tasks.filter(t => !query || `${t.file_name} ${t.work_title} ${t.author_nickname}`.toLowerCase().includes(query.toLowerCase()))" :key="task.id">
+          <tr v-for="task in tasks" :key="task.id">
             <td><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><p v-if="task.error_message" class="inline-error" :title="task.error_message">{{ task.error_message }}</p></div></div></td>
             <td><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b>{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div><small v-if="task.error_action">{{ task.error_action }}</small></td>
             <td><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ task.download_speed ? `${bytes(task.download_speed)}/s` : '等待传输' }}</span></td>

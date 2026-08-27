@@ -16,7 +16,11 @@ celery_app = Celery(
     "douyin_downloader",
     broker=settings.redis_url_with_auth,
     backend=settings.redis_url_with_auth,
-    include=["app.tasks.download_tasks", "app.tasks.x_download_tasks"]
+    include=[
+        "app.tasks.download_tasks",
+        "app.tasks.x_download_tasks",
+        "app.tasks.notification_tasks",
+    ]
 )
 
 # Celery 配置

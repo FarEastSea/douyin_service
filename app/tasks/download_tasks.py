@@ -46,7 +46,6 @@ from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
 from app.services.douyin_errors import DouyinRequestError
 from app.services.douyin_source import DouyinTraversalLimitError, build_douyin_source
-from app.services.notifications import send_notification
 
 # 配置日志
 import os
@@ -81,9 +80,18 @@ TERMINAL_AUTHOR_ACCOUNT_STATUSES = {"deleted", "banned", "restricted"}
 
 def _notify_event(event: str, title: str, body: str, *, level: str, dedupe_key: str) -> None:
     try:
-        send_notification(event, title, body, level=level, dedupe_key=dedupe_key)
+        celery_app.send_task(
+            "app.tasks.notification_tasks.deliver_notification",
+            kwargs={
+                "event": event,
+                "title": title,
+                "body": body,
+                "level": level,
+                "dedupe_key": dedupe_key,
+            },
+        )
     except Exception as exc:
-        logger.warning(f"通知发送器异常，不影响业务任务: {type(exc).__name__}: {str(exc)[:200]}")
+        logger.warning(f"通知任务入队失败，不影响业务任务: {type(exc).__name__}: {str(exc)[:200]}")
 
 
 def build_author_account_status_marker(status_code: str, status_label: str, detail: str | None = None) -> str:

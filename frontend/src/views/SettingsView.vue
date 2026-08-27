@@ -13,6 +13,8 @@ const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>(
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
 const notificationTestBusy = ref(false)
+const notificationTestChannel = ref<'all' | 'webhook' | 'bark' | 'email' | 'gotify'>('all')
+const notificationTestResult = ref<Record<string, any>>({})
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
 const accountOnlyKeys = new Set(['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE'])
 const generalFields = computed(() => allFields.value.filter(field => !accountOnlyKeys.has(field.key)))
@@ -47,14 +49,15 @@ async function saveAll() {
       if (secretValues.value[field.key]?.trim()) values[field.key] = secretValues.value[field.key].trim()
     } else if (allValues.value[field.key]?.value !== undefined) values[field.key] = allValues.value[field.key].value
   }
-  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values }) }); store.notify(result.message || '设置已保存'); await loadAll(); return true }
+  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values }) }); secretValues.value = {}; store.notify(result.message || '设置已保存'); await loadAll(); return true }
   catch (error: any) { store.notify(error.message || '保存失败', 'error'); return false }
 }
 async function testNotification() {
   notificationTestBusy.value = true
   try {
     if (!await saveAll()) return
-    const result = await api<any>('/notifications/test', { method: 'POST', ...jsonBody({ channel: 'all' }) })
+    const result = await api<any>('/notifications/test', { method: 'POST', ...jsonBody({ channel: notificationTestChannel.value }) })
+    notificationTestResult.value = result.data?.channels || {}
     store.notify(result.message || '通知测试完成', result.success ? 'success' : 'error')
   } catch (error: any) { store.notify(error.message || '通知测试失败', 'error') }
   finally { notificationTestBusy.value = false }
@@ -84,9 +87,9 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
     <header class="workspace-header"><div><p class="eyebrow">SYSTEM CONTROL</p><h2>设置与诊断</h2><span>所有网页配置在保存后动态生效</span></div><button class="btn ghost" @click="init"><RefreshCw :size="16" />刷新状态</button></header>
     <nav class="settings-tabs"><button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" @click="tab = item[0]">{{ item[1] }}</button></nav>
 
-    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库、后台任务与通知配置</p></div><div class="header-actions"><button v-if="generalGroup === '通知'" class="btn ghost" :disabled="notificationTestBusy" @click="testNotification"><BellRing :size="16" />保存并测试</button><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></div></header><nav class="settings-subtabs"><button v-for="group in generalGroups" :key="group" :class="{ active: generalGroup === group }" @click="generalGroup = group">{{ group }}</button></nav><div class="form-grid">
+    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库、后台任务与通知配置</p></div><div class="header-actions"><select v-if="generalGroup === '通知'" v-model="notificationTestChannel" aria-label="通知测试渠道"><option value="all">全部渠道</option><option value="webhook">Webhook</option><option value="bark">Bark</option><option value="email">邮件</option><option value="gotify">Gotify</option></select><button v-if="generalGroup === '通知'" class="btn ghost" :disabled="notificationTestBusy" @click="testNotification"><BellRing :size="16" />保存并测试</button><button class="btn primary" @click="saveAll"><Save :size="16" />保存</button></div></header><nav class="settings-subtabs"><button v-for="group in generalGroups" :key="group" :class="{ active: generalGroup === group }" @click="generalGroup = group">{{ group }}</button></nav><div class="form-grid">
       <label v-for="field in visibleGeneralFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><button v-else-if="isBooleanField(field)" type="button" class="setting-switch" :class="{ on: booleanFieldValue(field) }" role="switch" :aria-checked="booleanFieldValue(field)" @click="toggleBooleanField(field)"><span class="switch-track"><i /></span><span>{{ booleanFieldValue(field) ? '已开启' : '已关闭' }}</span></button><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
-    </div></div>
+    </div><div v-if="generalGroup === '通知' && Object.keys(notificationTestResult).length" class="notification-test-result"><article v-for="(result, channel) in notificationTestResult" :key="channel" :data-success="result.success"><strong>{{ channel }}</strong><span>{{ result.message }}</span></article></div></div>
 
     <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>Cookie 相关配置统一在此管理，敏感内容不会回显</p></div></header><div class="credential-grid"><article><strong>抖音 Cookie</strong><p>用于作者资料、作品列表和链接刷新。</p><textarea v-model="cookieValue" placeholder="粘贴最新抖音 Cookie" /><small class="cookie-format-hint">格式要求：从已登录抖音页面的网络请求头复制完整 Cookie Header String，必须包含 UIFID；不支持 JSON 或 Netscape 格式。</small><button class="btn primary" @click="saveCookie('douyin')"><Save :size="16" />更新抖音 Cookie</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><small class="cookie-format-hint">格式要求：支持 Cookie Header String（例如 name=value; name2=value2）或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="saveCookie('x')"><Save :size="16" />更新 X Cookie</button></article><article class="credential-path"><strong>X Cookie 文件</strong><p>可选：填写服务器上的 Cookie 文件路径，留空则使用上方保存的 Cookie。</p><div><input v-model="xCookieFile" placeholder="例如：/data/cookies/x.txt" /><button class="btn ghost" @click="saveXCookieFile"><Save :size="16" />保存路径</button></div></article></div></div>
 
@@ -106,4 +109,10 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 .settings-subtabs { margin: -4px 0 16px; padding-bottom: 12px; display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--line); }
 .settings-subtabs button { padding: 7px 11px; white-space: nowrap; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); cursor: pointer; }
 .settings-subtabs button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.notification-test-result { margin-top: 14px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.notification-test-result article { padding: 10px 12px; display: grid; gap: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.notification-test-result article[data-success="true"] { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.notification-test-result strong { text-transform: capitalize; font-size: 11px; }
+.notification-test-result span { color: var(--muted); font-size: 9px; }
+@media(max-width:900px){.notification-test-result{grid-template-columns:repeat(2,1fr)}}
 </style>

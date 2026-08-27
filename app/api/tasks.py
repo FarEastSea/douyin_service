@@ -9,7 +9,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
 from typing import List, Optional
@@ -433,29 +433,61 @@ async def _handle_single_work(
 async def list_tasks(
     status: Optional[str] = Query(None, description="按状态筛选"),
     author_id: Optional[int] = Query(None, description="按作者筛选"),
+    q: Optional[str] = Query(None, max_length=200, description="搜索任务、作品或作者"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db)
 ):
     """获取下载任务列表（带分页）"""
-    # 构建基础查询
-    base_query = select(DownloadTask).options(
+    common_filters = []
+    if author_id:
+        common_filters.append(Work.author_id == author_id)
+
+    search_text = (q or "").strip()
+    if search_text:
+        escaped = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        search_filters = [
+            DownloadTask.file_name.ilike(pattern, escape="\\"),
+            Work.title.ilike(pattern, escape="\\"),
+            Work.aweme_id.ilike(pattern, escape="\\"),
+            Author.nickname.ilike(pattern, escape="\\"),
+        ]
+        if search_text.isdigit():
+            search_filters.append(DownloadTask.id == int(search_text))
+        common_filters.append(or_(*search_filters))
+
+    # 统一关联作品和作者，使分页、总数与状态汇总使用完全相同的筛选语义。
+    base_query = select(DownloadTask).join(
+        Work, DownloadTask.work_id == Work.id
+    ).outerjoin(
+        Author, Work.author_id == Author.id
+    ).options(
         selectinload(DownloadTask.work).options(
             selectinload(Work.author),
             defer(Work._image_urls),
             defer(Work._live_photo_urls),
             defer(Work.video_url),
         )
-    )
-    count_query = select(func.count(DownloadTask.id))
+    ).where(*common_filters)
+    count_query = select(func.count(DownloadTask.id)).select_from(DownloadTask).join(
+        Work, DownloadTask.work_id == Work.id
+    ).outerjoin(
+        Author, Work.author_id == Author.id
+    ).where(*common_filters)
+
+    status_count_query = select(
+        DownloadTask.status,
+        func.count(DownloadTask.id),
+    ).select_from(DownloadTask).join(
+        Work, DownloadTask.work_id == Work.id
+    ).outerjoin(
+        Author, Work.author_id == Author.id
+    ).where(*common_filters).group_by(DownloadTask.status)
     
     if status:
         base_query = base_query.where(DownloadTask.status == status)
         count_query = count_query.where(DownloadTask.status == status)
-    
-    if author_id:
-        base_query = base_query.join(Work).where(Work.author_id == author_id)
-        count_query = count_query.join(Work).where(Work.author_id == author_id)
     
     # 窗口计数与当页数据一次返回，避免高频轮询每次额外 COUNT。
     # 批量创建的任务可能共享同一个 created_at。必须用唯一主键打破并列，
@@ -470,6 +502,10 @@ async def list_tasks(
     
     result = await db.execute(query)
     rows = result.all()
+    status_counts = {
+        str(row[0]): int(row[1] or 0)
+        for row in (await db.execute(status_count_query)).all()
+    }
     tasks = [row[0] for row in rows]
     if rows:
         total = int(rows[0][1] or 0)
@@ -491,7 +527,8 @@ async def list_tasks(
         total=total,
         page=page,
         page_size=page_size,
-        pages=pages
+        pages=pages,
+        status_counts=status_counts,
     )
 
 

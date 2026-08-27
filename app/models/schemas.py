@@ -8,7 +8,7 @@ Pydantic 数据模型 - 用于 API 请求/响应验证
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Dict, Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -270,6 +270,7 @@ class PaginatedTasksResponse(BaseModel):
     page: int
     page_size: int
     pages: int
+    status_counts: Dict[str, int] = Field(default_factory=dict)
 
 
 # ============ X/Twitter 下载相关 ============
