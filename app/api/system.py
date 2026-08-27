@@ -7,7 +7,7 @@
 3. 状态检查 API：检查服务健康状态
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func, text, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Any, Dict, List, Literal, Optional
@@ -36,6 +36,7 @@ from app.core.env_config import (
     write_env_updates,
 )
 from app.core.network_security import validate_database_test_target
+from app.core.health import build_readiness
 from app.core.runtime_config import (
     RUNTIME_CONFIG_ENV_KEYS,
     RUNTIME_CONFIG_SCHEMA,
@@ -531,10 +532,10 @@ async def test_notification(request: NotificationTestRequest):
         message=f"已成功发送 {result['sent']} 个通知渠道" if success else "没有渠道发送成功，请检查已保存的通知配置",
         data=result,
     )
-@router.get("/health")
-async def health_check():
-    """健康检查接口"""
-    return {"status": "healthy"}
+@router.get("/status/readiness")
+async def get_readiness(request: Request):
+    """返回与发布验收一致的核心依赖状态。"""
+    return await build_readiness(degraded_mode=bool(request.app.state.degraded_mode))
 
 
 @router.get("/celery-status")

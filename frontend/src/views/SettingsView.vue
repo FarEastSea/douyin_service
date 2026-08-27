@@ -9,6 +9,7 @@ const store = useAppStore(), route = useRoute()
 const tab = ref(String(route.query.tab || 'general'))
 const runtime = ref<any>({}), limits = ref<any>({}), cookieValue = ref(''), xCookieValue = ref('')
 const logs = ref<any[]>([]), logLevels = ref(['info', 'warning', 'error']), live = ref(true), process = ref<any>({})
+const readiness = ref<any>({ components: {} })
 const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>()
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
@@ -25,15 +26,17 @@ const xCookieFile = ref('')
 const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
 const isBooleanField = (field: any) => ['true', 'false'].includes(String(field.default).toLowerCase())
 const booleanFieldValue = (field: any) => String(allValues.value[field.key]?.value).toLowerCase() === 'true'
+const readinessLabel = (name: string) => ({ configuration: '应用配置', database: '数据库', redis: 'Redis', worker: 'Celery Worker', beat: 'Celery Beat' }[name] || name)
 function toggleBooleanField(field: any) { allValues.value[field.key].value = booleanFieldValue(field) ? 'false' : 'true' }
 
 async function loadRuntime() { const data = await api<any>('/config/runtime'); runtime.value = data.config; limits.value = data.limits }
 async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || ''; if (!generalGroups.value.includes(generalGroup.value)) generalGroup.value = generalGroups.value[0] || '' }
 async function loadLogs(silent: boolean | Event = false) { try { logs.value = (await api<any>('/logs?start=0&count=500')).logs || [] } catch (e: any) { if (silent !== true) store.notify(e.message, 'error') } }
 async function loadProcess() { process.value = await api('/process/status') }
+async function loadReadiness() { readiness.value = await api('/status/readiness') }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
 async function init() {
-  try { await Promise.all([loadRuntime(), loadAll(), loadProcess(), loadLogs(), loadUpdateInfo()]) }
+  try { await Promise.all([loadRuntime(), loadAll(), loadProcess(), loadReadiness(), loadLogs(), loadUpdateInfo()]) }
   catch (error: any) { store.notify(error.message || '加载设置失败', 'error') }
   if (timer.value != null) window.clearInterval(timer.value)
   timer.value = window.setInterval(() => { if (live.value && tab.value === 'logs') loadLogs(true) }, 3000)
@@ -72,7 +75,7 @@ async function saveXCookieFile() {
   try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values: { X_COOKIE_FILE: xCookieFile.value.trim() } }) }); store.notify(result.message || 'X Cookie 文件路径已保存'); await loadAll() }
   catch (error: any) { store.notify(error.message || '保存 X Cookie 文件路径失败', 'error') }
 }
-async function processAction(target: 'worker' | 'beat', action: 'start' | 'stop') { try { const result = await api<any>(`/process/${target}/${action}`, { method: 'POST' }); store.notify(result.message || '操作完成'); await loadProcess() } catch (e: any) { store.notify(e.message, 'error') } }
+async function processAction(target: 'worker' | 'beat', action: 'start' | 'stop') { try { const result = await api<any>(`/process/${target}/${action}`, { method: 'POST' }); store.notify(result.message || '操作完成'); await Promise.all([loadProcess(), loadReadiness()]) } catch (e: any) { store.notify(e.message, 'error') } }
 async function clearLogs() { if (!confirm('确定清空活动日志？')) return; await api('/logs', { method: 'DELETE' }); logs.value = []; store.notify('日志已清空') }
 async function copyLogs() { await navigator.clipboard.writeText(filteredLogs.value.map(item => `${new Date(item.ts * 1000).toLocaleString()} [${item.level}] [${item.source}] ${item.msg}\n${item.detail || ''}`).join('\n')); store.notify('日志已复制') }
 async function checkUpdate() { updateBusy.value = true; try { updateInfo.value = await api<any>('/update/check'); store.notify(updateInfo.value.message || '检查完成') } catch (e: any) { store.notify(e.message, 'error') } finally { updateBusy.value = false } }
@@ -97,7 +100,7 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
       <label v-for="(spec, key) in limits" :key="key"><span>{{ spec.label }}</span><input v-if="spec.type !== 'bool'" v-model.number="runtime[key]" type="number" :min="spec.min" :max="spec.max" /><button v-else type="button" class="setting-switch" :class="{ on: runtime[key] }" role="switch" :aria-checked="Boolean(runtime[key])" @click="runtime[key] = !runtime[key]"><span class="switch-track"><i /></span><span>{{ runtime[key] ? '已开启' : '已关闭' }}</span></button><small>{{ spec.min != null ? `${spec.min}–${spec.max} ${spec.unit || ''}` : '向右为开启，向左为关闭' }}</small></label>
     </div></div>
 
-    <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div></header><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
+    <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div><button class="btn ghost" @click="loadReadiness"><RefreshCw :size="15" />检查依赖</button></header><div class="readiness-grid"><article v-for="(component, name) in readiness.components" :key="name" :data-ready="component.ok"><span class="health-dot" :class="{ online: component.ok }" /><div><strong>{{ readinessLabel(String(name)) }}</strong><small>{{ component.message }}</small></div></article></div><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
 
     <div v-else-if="tab === 'logs'" class="settings-panel log-panel"><header><Activity /><div><h3>活动日志</h3><p>实时查看最近 500 条系统与任务事件</p></div><div class="header-actions"><button type="button" class="setting-switch" :class="{ on: live }" role="switch" :aria-checked="live" @click="live = !live"><span class="switch-track"><i /></span><span>实时刷新</span></button><button class="btn ghost compact" @click="copyLogs"><Clipboard :size="15" />复制</button><button class="btn ghost compact" @click="clearLogs"><Trash2 :size="15" />清空</button><button class="btn ghost compact" @click="loadLogs"><RefreshCw :size="15" />刷新</button></div></header><div class="log-filters"><button v-for="level in ['info','warning','error']" :key="level" :class="{ active: logLevels.includes(level) }" @click="toggleLevel(level)">{{ level }}</button></div><div class="log-console"><article v-for="(item, index) in filteredLogs" :key="`${item.ts}-${index}`" :data-level="item.level"><time>{{ new Date(item.ts * 1000).toLocaleString() }}</time><b>[{{ item.source }}]</b><span>{{ item.msg }}</span><small v-if="item.detail">{{ item.detail }}</small></article><div v-if="!filteredLogs.length" class="empty-state">暂无符合筛选条件的日志</div></div></div>
 
@@ -114,5 +117,12 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 .notification-test-result article[data-success="true"] { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
 .notification-test-result strong { text-transform: capitalize; font-size: 11px; }
 .notification-test-result span { color: var(--muted); font-size: 9px; }
+.readiness-grid { margin-bottom: 16px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.readiness-grid article { padding: 11px 12px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.readiness-grid article[data-ready="false"] { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+.readiness-grid article div { min-width: 0; display: grid; gap: 2px; }
+.readiness-grid article strong { font-size: 11px; }
+.readiness-grid article small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 @media(max-width:900px){.notification-test-result{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){.readiness-grid{grid-template-columns:repeat(2,1fr)}}
 </style>

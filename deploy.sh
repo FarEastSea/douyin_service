@@ -39,10 +39,12 @@ preflight() {
 }
 
 smoke_check() {
-    APP_PORT="$PORT" "$VENV_DIR/bin/python" - <<'PY'
-import json, os, time, urllib.request
+    local allow_legacy_health="${1:-0}"
+    APP_PORT="$PORT" ALLOW_LEGACY_HEALTH="$allow_legacy_health" "$VENV_DIR/bin/python" - <<'PY'
+import json, os, time, urllib.error, urllib.request
 from app.core.config import settings
 port = os.environ["APP_PORT"]
+allow_legacy_health = os.environ.get("ALLOW_LEGACY_HEALTH") == "1"
 base = f"http://127.0.0.1:{port}"
 token = settings.ADMIN_TOKEN
 headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -54,8 +56,13 @@ def get(path, auth=False):
 last_error = None
 for _ in range(30):
     try:
-        health = json.loads(get("/api/health"))
-        if health.get("status") != "healthy": raise RuntimeError("health payload is not healthy")
+        try:
+            readiness = json.loads(get("/api/ready"))
+            if readiness.get("status") != "ready": raise RuntimeError("dependency readiness payload is not ready")
+        except urllib.error.HTTPError as exc:
+            if not (allow_legacy_health and exc.code == 404): raise
+            health = json.loads(get("/api/health"))
+            if health.get("status") not in {"healthy", "alive"}: raise RuntimeError("legacy health payload is not healthy")
         get("/"); get("/docs")
         if token:
             authors = json.loads(get("/api/authors/?page=1&page_size=1", True))
@@ -65,7 +72,7 @@ for _ in range(30):
                 preview_id = previewable.get("id")
                 get(f"/api/tasks/{preview_id}/preview", True)
             if not isinstance(authors.get("items"), list) or not isinstance(tasks.get("items"), list): raise RuntimeError("management list payload is invalid")
-        print("Smoke checks OK: health, home, docs, tasks, authors, media preview when available")
+        print("Smoke checks OK: dependencies ready, home, docs, tasks, authors, media preview when available")
         raise SystemExit(0)
     except Exception as exc:
         last_error = exc; time.sleep(1)
@@ -86,7 +93,7 @@ rollback() {
     git reset --hard "$PREVIOUS_SHA"
     install_dependencies || true
     start_service
-    smoke_check
+    smoke_check 1
     echo "Rollback completed. Service restored to ${PREVIOUS_SHA}." >&2
     exit "$exit_code"
 }

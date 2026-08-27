@@ -68,7 +68,7 @@ REMOTE_SCRIPT
 
     post {
         success {
-            echo 'Deploy and smoke checks succeeded.'
+            echo 'Deploy and dependency readiness checks succeeded.'
         }
         failure {
             echo 'Deploy failed. Review the stage log; deploy.sh rolls back after a code switch failure.'

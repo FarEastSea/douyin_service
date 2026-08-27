@@ -62,7 +62,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path == "/api/health" or _is_public_page_or_asset(path):
+        if path in {"/api/health", "/api/ready"} or _is_public_page_or_asset(path):
             return await call_next(request)
 
         admin_token = str(read_env_file().get("ADMIN_TOKEN") or "").strip()

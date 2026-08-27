@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 import os
 
 from app.api import bootstrap
@@ -177,8 +177,21 @@ app.add_middleware(DynamicCORSMiddleware)
 
 @app.get("/api/health", include_in_schema=False)
 async def public_health():
-    """初始化模式与正常模式都始终可用的最小健康检查。"""
-    return {"status": "healthy", "bootstrap_mode": bool(app.state.degraded_mode)}
+    """存活检查：只证明 Web 进程仍能响应。"""
+    return {
+        "status": "healthy",
+        "alive": True,
+        "bootstrap_mode": bool(app.state.degraded_mode),
+    }
+
+
+@app.get("/api/ready", include_in_schema=False)
+async def public_readiness():
+    """就绪检查：发布验收必须等待所有核心依赖可用。"""
+    from app.core.health import build_readiness
+
+    payload = await build_readiness(degraded_mode=bool(app.state.degraded_mode))
+    return JSONResponse(status_code=200 if payload["ready"] else 503, content=payload)
 
 app.include_router(bootstrap.router, prefix="/api")
 
