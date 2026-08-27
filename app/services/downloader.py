@@ -430,6 +430,29 @@ class DouyinDownloader:
         image_urls = payload_image_urls({'images': image_entries})
         live_photo_urls = payload_live_photo_urls({'images': image_entries})
         video_urls = _extract_play_urls(item.get('video'))
+        video_payload = item.get('video') if isinstance(item.get('video'), dict) else {}
+        first_image = image_entries[0] if image_entries else {}
+        music = item.get('music') if isinstance(item.get('music'), dict) else {}
+        statistics = item.get('statistics') if isinstance(item.get('statistics'), dict) else {}
+
+        def safe_non_negative_int(value: Any) -> Optional[int]:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed >= 0 else None
+
+        cover_url = (
+            _extract_primary_url(video_payload.get('cover'))
+            or _extract_primary_url(video_payload.get('origin_cover'))
+            or _extract_primary_url(first_image)
+        )
+        text_extra = item.get('text_extra') if isinstance(item.get('text_extra'), list) else []
+        hashtags = list(dict.fromkeys(
+            str(extra.get('hashtag_name') or '').strip().lstrip('#')
+            for extra in text_extra if isinstance(extra, dict)
+            if str(extra.get('hashtag_name') or '').strip().lstrip('#')
+        ))
 
         try:
             create_time = int(item.get('create_time') or 0)
@@ -449,6 +472,23 @@ class DouyinDownloader:
             # 置顶标记与发布时间：用于订阅增量检测，避免置顶作品卡死游标
             'is_top': 1 if item.get('is_top') else 0,
             'create_time': create_time,
+            'cover_url': cover_url,
+            'duration_ms': safe_non_negative_int(video_payload.get('duration')),
+            'width': safe_non_negative_int(video_payload.get('width') or first_image.get('width')),
+            'height': safe_non_negative_int(video_payload.get('height') or first_image.get('height')),
+            'music_title': _normalize_optional_text(music.get('title')),
+            'music_author': _normalize_optional_text(music.get('author')),
+            'music_url': _extract_primary_url(music.get('play_url')),
+            'hashtags': hashtags,
+            'metadata_schema_version': 1,
+            'raw_data_version': 1,
+            'statistics': {
+                'digg_count': safe_non_negative_int(statistics.get('digg_count')),
+                'comment_count': safe_non_negative_int(statistics.get('comment_count')),
+                'collect_count': safe_non_negative_int(statistics.get('collect_count')),
+                'share_count': safe_non_negative_int(statistics.get('share_count')),
+                'play_count': safe_non_negative_int(statistics.get('play_count')),
+            },
         }
     
     def detect_url_type(self, url: str) -> dict:

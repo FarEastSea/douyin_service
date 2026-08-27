@@ -98,6 +98,22 @@ class WorkResponse(BaseModel):
     discovered_at: datetime
     published_at: Optional[datetime] = None
     video_url: Optional[str] = None
+    cover_url: Optional[str] = None
+    duration_ms: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    music_title: Optional[str] = None
+    music_author: Optional[str] = None
+    music_url: Optional[str] = None
+    hashtags: List[str] = Field(default_factory=list)
+    metadata_schema_version: int = 1
+    raw_data_version: int = 1
+    metadata_refreshed_at: Optional[datetime] = None
+    digg_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    collect_count: Optional[int] = None
+    share_count: Optional[int] = None
+    play_count: Optional[int] = None
     image_urls: List[str] = Field(default_factory=list)
     primary_preview_url: Optional[str] = None
     download_status: str = "not_started"
@@ -308,6 +324,22 @@ class XDownloadTaskResponse(BaseModel):
     created_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class WorkStatsSnapshotResponse(BaseModel):
+    """作品互动统计历史。"""
+    id: int
+    work_id: int
+    digg_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    collect_count: Optional[int] = None
+    share_count: Optional[int] = None
+    play_count: Optional[int] = None
+    observed_at: datetime
+    source: str
 
     class Config:
         from_attributes = True

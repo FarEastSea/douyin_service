@@ -13,7 +13,6 @@ from sqlalchemy import select, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
 from typing import List, Optional
-from datetime import datetime
 import asyncio
 import json
 import mimetypes
@@ -30,7 +29,6 @@ from app.tasks.download_tasks import download_single_file, download_author_works
 from app.core import redis_client
 from app.services.downloader import (
     author_profile_has_identity,
-    is_video_work_payload,
     latest_video_url,
     payload_image_urls,
     payload_live_photo_urls,
@@ -41,6 +39,7 @@ from app.core.runtime_config import get_runtime_config
 from app.services.media_paths import resolve_media_path
 from app.services.download_task_factory import ensure_download_task_async
 from app.services.work_manager import recalc_author_counts
+from app.services.work_metadata import apply_work_payload
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -124,38 +123,6 @@ def _dispatch_download_tasks(task_ids: List[int]) -> None:
     """批量向 Celery 投递任务，避免阻塞 FastAPI 事件循环。"""
     for task_id in task_ids:
         download_single_file.delay(task_id)
-
-
-def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing: bool = False) -> None:
-    work_type = "video" if is_video_work_payload(work_payload) else "images"
-    image_urls = payload_image_urls(work_payload)
-    live_photo_urls = payload_live_photo_urls(work_payload)
-    video_url = latest_video_url(work_payload)
-
-    work.work_type = work_type
-
-    try:
-        create_time = int(work_payload.get("create_time") or 0)
-    except (TypeError, ValueError):
-        create_time = 0
-    if create_time > 0:
-        work.published_at = datetime.fromtimestamp(create_time)
-
-    if work_type == "video":
-        work.image_count = 0
-        if video_url or not preserve_existing:
-            work.video_url = video_url
-        if not preserve_existing:
-            work.image_urls = []
-            work.live_photo_urls = []
-        return
-
-    if image_urls or not preserve_existing:
-        work.image_urls = image_urls
-        work.image_count = len(image_urls)
-    if live_photo_urls or not preserve_existing:
-        work.live_photo_urls = live_photo_urls
-    work.video_url = None
 
 
 def _build_task_preview_data(
@@ -390,13 +357,12 @@ async def _handle_single_work(
             title=work_info.get("desc", ""),
             work_type="video",
         )
-        _apply_work_media_payload(work, work_info)
+        apply_work_payload(db, work, work_info)
         db.add(work)
         await db.flush()
     else:
         # 更新已存在作品的 URL（抖音 URL 会过期）
-        _apply_work_media_payload(work, work_info, preserve_existing=True)
-        work.title = work_info.get("desc", "") or work.title
+        apply_work_payload(db, work, work_info, preserve_existing=True)
 
     created_task_ids = []
     reused_task_ids = []

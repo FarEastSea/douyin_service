@@ -9,6 +9,7 @@ APP_PORT="${APP_PORT:-15000}"
 RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_DIR}"
 LOG_DIR="${RUNTIME_DIR}/logs"
 PID_FILE="${LOG_DIR}/gunicorn.pid"
+GUNICORN_BIN="${VENV_DIR}/bin/gunicorn"
 
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_DIR"
@@ -18,7 +19,7 @@ if [ -f "${VENV_DIR}/bin/activate" ]; then
     source "${VENV_DIR}/bin/activate"
 fi
 
-if ! command -v gunicorn >/dev/null 2>&1; then
+if [ ! -x "$GUNICORN_BIN" ]; then
     echo "Start failed: gunicorn is not available in ${VENV_DIR}." >&2
     exit 1
 fi
@@ -34,11 +35,13 @@ fi
 
 GUNICORN_USER_ARGS=()
 if [ "$(id -u)" -eq 0 ] && id www >/dev/null 2>&1; then
-    GUNICORN_USER_ARGS=(--user www)
+    RUNTIME_GROUP="$(id -gn www)"
+    chown -R "www:${RUNTIME_GROUP}" "$LOG_DIR"
+    GUNICORN_USER_ARGS=(--user www --group "$RUNTIME_GROUP")
 fi
 
 echo "Starting media download service on port ${APP_PORT}..."
-nohup gunicorn main:app \
+nohup "$GUNICORN_BIN" main:app \
     --bind "0.0.0.0:${APP_PORT}" \
     --workers 1 \
     --threads 1 \

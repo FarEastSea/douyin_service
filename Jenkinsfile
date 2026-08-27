@@ -72,7 +72,7 @@ REMOTE_SCRIPT
 
     post {
         success {
-            echo 'Root deployment and immediate restart with the BT Panel Python environment succeeded.'
+            echo 'BT Panel dependencies, root deployment, immediate restart, and smoke checks succeeded.'
         }
         failure {
             echo 'Deploy failed. Review the stage log; deploy.sh restores the previous root commit after a switch failure.'

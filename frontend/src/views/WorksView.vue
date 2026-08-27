@@ -49,6 +49,24 @@ function formatWorkTime(value?: string) {
     hour: '2-digit', minute: '2-digit', hour12: false,
   })
 }
+function formatCount(value?: number) {
+  if (value == null) return '—'
+  if (value >= 100000000) return `${(value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)}亿`
+  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`
+  return String(value)
+}
+function formatDuration(value?: number) {
+  if (value == null) return ''
+  const seconds = Math.max(0, Math.round(value / 1000))
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes ? `${minutes}:` : ''}${String(seconds % 60).padStart(minutes ? 2 : 1, '0')} 秒`
+}
+function workSpecs(work: Work) {
+  return [work.width && work.height ? `${work.width}×${work.height}` : '', formatDuration(work.duration_ms)].filter(Boolean).join(' · ')
+}
+function hasStats(work: Work) {
+  return [work.digg_count, work.comment_count, work.collect_count, work.share_count, work.play_count].some(value => value != null)
+}
 function media(work: Work): MediaItem[] {
   if (work.work_type === 'video') {
     const file = work.files.find(item => item.local_available && item.preview_url)
@@ -83,7 +101,15 @@ onMounted(load); onBeforeUnmount(() => { if (searchTimer.value != null) window.c
     <main class="work-grid" :class="{ loading }">
       <article v-for="work in works" :key="work.id" class="work-card">
         <div class="work-cover" @click="preview(work)"><img v-if="work.primary_preview_url" :src="work.primary_preview_url" alt="" loading="lazy" referrerpolicy="no-referrer" /><Image v-else :size="36" /><span>{{ work.work_type === 'images' ? `${work.image_count} 张` : '视频' }}</span><button class="select-box" :class="{ active: selected.includes(work.id) }" @click.stop="selected = selected.includes(work.id) ? selected.filter(v => v !== work.id) : [...selected, work.id]"><CheckSquare :size="18" /></button></div>
-        <div class="work-copy"><strong :title="work.title">{{ work.title || `作品 ${work.aweme_id}` }}</strong><time v-if="work.published_at" :datetime="work.published_at">作品时间：{{ formatWorkTime(work.published_at) }}</time><span v-else>作品时间：未知</span><span>{{ work.completed_task_count }}/{{ work.total_task_count }} 个文件 · {{ work.is_downloaded ? '已完成' : '未完成' }}</span></div>
+        <div class="work-copy">
+          <strong :title="work.title">{{ work.title || `作品 ${work.aweme_id}` }}</strong>
+          <time v-if="work.published_at" :datetime="work.published_at">作品时间：{{ formatWorkTime(work.published_at) }}</time><span v-else>作品时间：未知</span>
+          <span v-if="workSpecs(work)">{{ workSpecs(work) }}</span>
+          <span>{{ work.completed_task_count }}/{{ work.total_task_count }} 个文件 · {{ work.is_downloaded ? '已完成' : '未完成' }}</span>
+          <div v-if="work.hashtags?.length" class="work-tags"><span v-for="tag in work.hashtags.slice(0, 4)" :key="tag">#{{ tag }}</span></div>
+          <span v-if="work.music_title" class="work-music">音乐：{{ work.music_title }}<template v-if="work.music_author"> · {{ work.music_author }}</template></span>
+          <div v-if="hasStats(work)" class="work-stats"><span>赞 {{ formatCount(work.digg_count) }}</span><span>评 {{ formatCount(work.comment_count) }}</span><span>藏 {{ formatCount(work.collect_count) }}</span><span>转 {{ formatCount(work.share_count) }}</span><span v-if="work.play_count != null">播 {{ formatCount(work.play_count) }}</span></div>
+        </div>
         <footer><button class="btn ghost compact" @click="preview(work)"><Eye :size="14" />预览</button><button class="btn ghost compact" @click="workAction(work, 'redownload')"><Download :size="14" />重新下载</button><button v-if="work.download_status === 'failed'" class="btn ghost compact" @click="workAction(work, 'retry-failed')"><RefreshCw :size="14" />重试</button><button class="icon-btn danger" @click="remove(work)"><Trash2 :size="16" /></button></footer>
       </article>
       <div v-if="!loading && !works.length" class="empty-state wide"><Image /><strong>没有符合条件的作品</strong></div>

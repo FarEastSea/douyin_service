@@ -164,7 +164,7 @@ def _build_work_preview_payload(work: Work) -> tuple[Optional[str], List[str], O
     if work.work_type == "video":
         completed_video_task = next(iter(completed_tasks), None)
         video_url = f"/api/tasks/{completed_video_task.id}/preview" if completed_video_task else None
-        return video_url, [], video_url
+        return video_url, [], video_url or work.cover_url
 
     original_image_urls = work.image_urls or []
     local_image_urls = [
@@ -179,7 +179,7 @@ def _build_work_preview_payload(work: Work) -> tuple[Optional[str], List[str], O
     ):
         image_urls = [url for _, url in local_image_urls]
 
-    primary_preview_url = image_urls[0] if image_urls else None
+    primary_preview_url = image_urls[0] if image_urls else work.cover_url
     return None, image_urls, primary_preview_url
 
 
@@ -225,6 +225,22 @@ def _serialize_work_response(work: Work) -> WorkResponse:
         discovered_at=work.discovered_at,
         published_at=work.published_at,
         video_url=video_url,
+        cover_url=work.cover_url,
+        duration_ms=work.duration_ms,
+        width=work.width,
+        height=work.height,
+        music_title=work.music_title,
+        music_author=work.music_author,
+        music_url=work.music_url,
+        hashtags=work.hashtags,
+        metadata_schema_version=work.metadata_schema_version or 1,
+        raw_data_version=work.raw_data_version or 1,
+        metadata_refreshed_at=work.metadata_refreshed_at,
+        digg_count=work.digg_count,
+        comment_count=work.comment_count,
+        collect_count=work.collect_count,
+        share_count=work.share_count,
+        play_count=work.play_count,
         image_urls=image_urls,
         primary_preview_url=primary_preview_url,
         download_status=_get_work_download_status(work),

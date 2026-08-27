@@ -19,6 +19,10 @@ export interface WorkFile { task_id: number; file_index: number; status: string;
 export interface Work {
   id: number; aweme_id: string; author_id: number; title?: string; work_type: string; image_count: number;
   is_downloaded: boolean; discovered_at: string; published_at?: string; video_url?: string;
+  cover_url?: string; duration_ms?: number; width?: number; height?: number;
+  music_title?: string; music_author?: string; music_url?: string; hashtags: string[];
+  metadata_schema_version: number; raw_data_version: number; metadata_refreshed_at?: string;
+  digg_count?: number; comment_count?: number; collect_count?: number; share_count?: number; play_count?: number;
   image_urls: string[]; primary_preview_url?: string; download_status: string;
   completed_task_count: number; total_task_count: number; files: WorkFile[];
 }

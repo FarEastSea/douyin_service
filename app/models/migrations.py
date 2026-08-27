@@ -106,6 +106,22 @@ ADD_COLUMN_MIGRATIONS = [
     _add_column("0021_works_published_at", "works", "published_at", "ALTER TABLE works ADD COLUMN published_at TIMESTAMP NULL"),
     _add_column("0022_authors_auto_update", "authors", "last_auto_update_at", "ALTER TABLE authors ADD COLUMN last_auto_update_at TIMESTAMP NULL"),
     _add_column("0023_authors_full_reconcile", "authors", "last_full_reconcile_at", "ALTER TABLE authors ADD COLUMN last_full_reconcile_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"),
+    _add_column("0024_works_cover", "works", "cover_url", "ALTER TABLE works ADD COLUMN cover_url TEXT"),
+    _add_column("0025_works_duration", "works", "duration_ms", "ALTER TABLE works ADD COLUMN duration_ms INTEGER"),
+    _add_column("0026_works_width", "works", "width", "ALTER TABLE works ADD COLUMN width INTEGER"),
+    _add_column("0027_works_height", "works", "height", "ALTER TABLE works ADD COLUMN height INTEGER"),
+    _add_column("0028_works_music_title", "works", "music_title", "ALTER TABLE works ADD COLUMN music_title TEXT"),
+    _add_column("0029_works_music_author", "works", "music_author", "ALTER TABLE works ADD COLUMN music_author TEXT"),
+    _add_column("0030_works_music_url", "works", "music_url", "ALTER TABLE works ADD COLUMN music_url TEXT"),
+    _add_column("0031_works_hashtags", "works", "hashtags", "ALTER TABLE works ADD COLUMN hashtags TEXT"),
+    _add_column("0032_works_metadata_version", "works", "metadata_schema_version", "ALTER TABLE works ADD COLUMN metadata_schema_version INTEGER DEFAULT 1"),
+    _add_column("0033_works_metadata_refreshed", "works", "metadata_refreshed_at", "ALTER TABLE works ADD COLUMN metadata_refreshed_at TIMESTAMP NULL"),
+    _add_column("0034_works_digg_count", "works", "digg_count", "ALTER TABLE works ADD COLUMN digg_count BIGINT"),
+    _add_column("0035_works_comment_count", "works", "comment_count", "ALTER TABLE works ADD COLUMN comment_count BIGINT"),
+    _add_column("0036_works_collect_count", "works", "collect_count", "ALTER TABLE works ADD COLUMN collect_count BIGINT"),
+    _add_column("0037_works_share_count", "works", "share_count", "ALTER TABLE works ADD COLUMN share_count BIGINT"),
+    _add_column("0038_works_play_count", "works", "play_count", "ALTER TABLE works ADD COLUMN play_count BIGINT"),
+    _add_column("0039_works_raw_data_version", "works", "raw_data_version", "ALTER TABLE works ADD COLUMN raw_data_version INTEGER DEFAULT 1"),
 ]
 
 
@@ -124,6 +140,7 @@ INDEX_MIGRATIONS = [
     _create_index("0114_idx_x_author_status", "X 作者任务状态索引", "idx_x_download_tasks_author_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_x_download_tasks_author_status ON x_download_tasks (x_author_id, status)", "CREATE INDEX idx_x_download_tasks_author_status ON x_download_tasks (x_author_id, status)"),
     _create_index("0115_idx_subscribed_authors", "已订阅作者部分索引", "idx_authors_is_subscribed_true", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_authors_is_subscribed_true ON authors (is_subscribed) WHERE is_subscribed IS TRUE", "CREATE INDEX idx_authors_is_subscribed_true ON authors (is_subscribed)"),
     _create_index("0116_idx_works_author_published", "作者作品发布时间索引", "idx_works_author_published", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_works_author_published ON works (author_id, published_at)", "CREATE INDEX idx_works_author_published ON works (author_id, published_at)"),
+    _create_index("0117_idx_work_stats_observed", "作品统计快照时间索引", "idx_work_stats_snapshot_observed", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_work_stats_snapshot_observed ON work_stats_snapshots (work_id, observed_at)", "CREATE INDEX idx_work_stats_snapshot_observed ON work_stats_snapshots (work_id, observed_at)"),
 ]
 
 

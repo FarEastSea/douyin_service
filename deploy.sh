@@ -41,13 +41,15 @@ validate_layout() {
     RUNTIME_VENV="$(cd "$RUNTIME_VENV" && pwd -P)"
 }
 
-validate_runtime_environment() {
+prepare_runtime_environment() {
     local requirements_file="$CANDIDATE_DIR/requirements.txt"
     local python_bin="$RUNTIME_VENV/bin/python"
     if ! "$python_bin" -c 'import sys; raise SystemExit(sys.version_info[:2] not in ((3, 11), (3, 12)))'; then
         echo "Deploy failed: BT Panel runtime must use Python 3.11 or 3.12: $RUNTIME_VENV" >&2
         return 1
     fi
+    echo "Installing project dependencies into the BT Panel environment..."
+    "$python_bin" -m pip install -r "$requirements_file"
     "$python_bin" -m pip check
     "$python_bin" - "$requirements_file" <<'PY'
 from importlib.metadata import PackageNotFoundError, version
@@ -76,7 +78,7 @@ for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         errors.append(f"{requirement.name}=={installed} does not satisfy {requirement.specifier}")
 if errors:
     raise SystemExit("BT Panel environment is incompatible:\n- " + "\n- ".join(errors))
-print("BT Panel environment requirements OK")
+print("BT Panel environment dependencies OK")
 PY
     (
         cd "$CANDIDATE_DIR"
@@ -348,7 +350,7 @@ fi
 
 prepare_candidate
 preflight
-validate_runtime_environment
+prepare_runtime_environment
 
 if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。

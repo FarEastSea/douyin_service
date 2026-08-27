@@ -10,6 +10,7 @@
 
 from sqlalchemy import (
     Boolean,
+    BigInteger,
     Column,
     DateTime,
     Float,
@@ -111,6 +112,27 @@ class Work(Base):
     
     # 视频相关
     video_url = Column(Text)
+    cover_url = Column(Text)
+    duration_ms = Column(Integer)
+    width = Column(Integer)
+    height = Column(Integer)
+
+    # 音乐、话题与采集元数据
+    music_title = Column(Text)
+    music_author = Column(Text)
+    music_url = Column(Text)
+    _hashtags = Column("hashtags", Text)
+    metadata_schema_version = Column(Integer, default=1)
+    raw_data_version = Column(Integer, default=1)
+    metadata_refreshed_at = Column(DateTime)
+
+    # 最新统计仅用于列表快速读取；每次变化都先写入 WorkStatsSnapshot，
+    # 因此刷新不会覆盖历史趋势。
+    digg_count = Column(BigInteger)
+    comment_count = Column(BigInteger)
+    collect_count = Column(BigInteger)
+    share_count = Column(BigInteger)
+    play_count = Column(BigInteger)
     
     # 图集相关
     image_count = Column(Integer, default=0)
@@ -133,6 +155,10 @@ class Work(Base):
     # 关系
     author = relationship("Author", back_populates="works")
     download_tasks = relationship("DownloadTask", back_populates="work", cascade="all, delete-orphan")
+    stats_snapshots = relationship(
+        "WorkStatsSnapshot", back_populates="work",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
     
     @property
     def image_urls(self):
@@ -164,6 +190,26 @@ class Work(Base):
             self._live_photo_urls = json.dumps(normalized_value)
         else:
             self._live_photo_urls = None
+
+    @property
+    def hashtags(self):
+        if not self._hashtags:
+            return []
+        try:
+            values = json.loads(self._hashtags)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(values, list):
+            return []
+        return [str(value).strip() for value in values if str(value).strip()]
+
+    @hashtags.setter
+    def hashtags(self, value):
+        normalized = list(dict.fromkeys(
+            str(item).strip().lstrip("#") for item in (value or [])
+            if str(item).strip().lstrip("#")
+        ))
+        self._hashtags = json.dumps(normalized, ensure_ascii=False) if normalized else None
     
     @property
     def excluded_file_indices(self):
@@ -186,6 +232,26 @@ class Work(Base):
             self._excluded_file_indices = json.dumps(normalized)
         else:
             self._excluded_file_indices = None
+
+
+class WorkStatsSnapshot(Base):
+    """作品互动统计快照；只追加变化，不覆盖历史。"""
+    __tablename__ = "work_stats_snapshots"
+    __table_args__ = (
+        Index("idx_work_stats_snapshot_observed", "work_id", "observed_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    work_id = Column(Integer, ForeignKey("works.id", ondelete="CASCADE"), nullable=False)
+    digg_count = Column(BigInteger)
+    comment_count = Column(BigInteger)
+    collect_count = Column(BigInteger)
+    share_count = Column(BigInteger)
+    play_count = Column(BigInteger)
+    observed_at = Column(DateTime, default=datetime.now, nullable=False)
+    source = Column(String(32), default="douyin_web", nullable=False)
+
+    work = relationship("Work", back_populates="stats_snapshots")
 
 
 class DownloadTask(Base):

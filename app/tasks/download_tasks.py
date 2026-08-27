@@ -29,7 +29,6 @@ from app.models.models import (
     AuthorProfileHistory,
 )
 from app.services.downloader import (
-    is_video_work_payload,
     latest_video_url,
     payload_image_urls,
     payload_live_photo_urls,
@@ -42,6 +41,7 @@ from app.core.runtime_config import get_runtime_config_sync
 from app.core.traffic_control import global_download_slot
 from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
+from app.services.work_metadata import apply_work_payload
 from app.services.douyin_errors import DouyinRequestError
 from app.services.douyin_source import (
     DouyinSource,
@@ -196,13 +196,6 @@ def _work_create_time(item: dict) -> int:
         return int(item.get("create_time") or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _apply_work_published_at(work: Work, item: dict) -> None:
-    """Persist platform publication time while preserving legacy values when absent."""
-    create_time = _work_create_time(item)
-    if create_time > 0:
-        work.published_at = datetime.fromtimestamp(create_time)
 
 
 def _select_latest_work(work_list: list) -> dict | None:
@@ -388,31 +381,6 @@ def get_cookie_from_db(db: Session) -> str:
     return settings.DOUYIN_COOKIE or ""
 
 
-def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing: bool = False) -> None:
-    work_type = "video" if is_video_work_payload(work_payload) else "images"
-    image_urls = payload_image_urls(work_payload)
-    live_photo_urls = payload_live_photo_urls(work_payload)
-    video_url = latest_video_url(work_payload)
-
-    work.work_type = work_type
-
-    if work_type == "video":
-        work.image_count = 0
-        if video_url or not preserve_existing:
-            work.video_url = video_url
-        if not preserve_existing:
-            work.image_urls = []
-            work.live_photo_urls = []
-        return
-
-    if image_urls or not preserve_existing:
-        work.image_urls = image_urls
-        work.image_count = len(image_urls)
-    if live_photo_urls or not preserve_existing:
-        work.live_photo_urls = live_photo_urls
-    work.video_url = None
-
-
 def _queue_scanned_new_works(
     db: Session,
     author: Author,
@@ -437,8 +405,7 @@ def _queue_scanned_new_works(
             title=item.get("desc", ""),
             work_type="video",
         )
-        _apply_work_media_payload(work, item)
-        _apply_work_published_at(work, item)
+        apply_work_payload(db, work, item)
         db.add(work)
         db.flush()
         persisted_works += 1
@@ -468,6 +435,30 @@ def _queue_scanned_new_works(
         "file_tasks": len(task_ids),
         "celery_task_ids": celery_task_ids,
     }
+
+
+def _refresh_scanned_works(db: Session, author_id: int, work_list: list[dict]) -> int:
+    """用本轮已取回的数据批量刷新已入库作品，避免逐条查询和覆盖统计历史。"""
+    payloads = {
+        str(item.get("aweme_id")): item
+        for item in work_list
+        if item.get("aweme_id")
+    }
+    if not payloads:
+        return 0
+    works = db.execute(
+        select(Work).where(
+            Work.author_id == author_id,
+            Work.aweme_id.in_(list(payloads)),
+        )
+    ).scalars().all()
+    changed_stats = 0
+    for work in works:
+        if apply_work_payload(
+            db, work, payloads[str(work.aweme_id)], preserve_existing=True
+        ):
+            changed_stats += 1
+    return changed_stats
 
 
 def sync_author_profile(author: Author, source: DouyinSource) -> dict:
@@ -1057,16 +1048,14 @@ def download_author_works(self, author_id: int, start_index: int = 1,
             ).scalar_one_or_none()
             
             if existing_work:
-                if download_new_only:
-                    continue
                 # 已被用户删除（排除）的作品：跳过，避免重新下载
                 if getattr(existing_work, "is_excluded", False):
                     continue
                 work = existing_work
-                # 更新 URL（抖音 URL 会过期）
-                _apply_work_media_payload(work, item, preserve_existing=True)
-                _apply_work_published_at(work, item)
-                work.title = item.get("desc", "") or work.title
+                # 刷新 URL、元数据及统计快照；增量模式只跳过后续下载任务创建。
+                apply_work_payload(db, work, item, preserve_existing=True)
+                if download_new_only:
+                    continue
             else:
                 # 创建新作品记录
                 work = Work(
@@ -1075,8 +1064,7 @@ def download_author_works(self, author_id: int, start_index: int = 1,
                     title=item.get("desc", ""),
                     work_type="video",
                 )
-                _apply_work_media_payload(work, item)
-                _apply_work_published_at(work, item)
+                apply_work_payload(db, work, item)
                 
                 db.add(work)
                 db.flush()
@@ -1490,6 +1478,9 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         time.sleep(author_delay)
                     continue
                 
+                # 同一批响应先刷新已知作品的元数据与统计历史，再识别新作品。
+                _refresh_scanned_works(db, author.id, work_list)
+
                 # 检查是否有新作品：以数据库已入库作品为基准，避免置顶作品卡死增量游标
                 new_works = _detect_new_works(db, author.id, work_list)
 

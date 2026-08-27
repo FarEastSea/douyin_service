@@ -7,17 +7,17 @@
 3. 重新下载/重试复用 download_single_file Celery 任务，URL 过期会在任务内自动刷新
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import List
 import asyncio
 
 from app.models.database import get_async_db
-from app.models.models import Work
-from app.models.schemas import MessageResponse
+from app.models.models import Work, WorkStatsSnapshot
+from app.models.schemas import MessageResponse, WorkStatsSnapshotResponse
 from app.services import work_manager
 from app.services.download_task_factory import ensure_download_task_async
 from app.tasks.download_tasks import download_single_file
@@ -50,6 +50,25 @@ async def _load_work_with_tasks(db: AsyncSession, work_id: int) -> Work:
     if not work:
         raise HTTPException(status_code=404, detail="作品不存在")
     return work
+
+
+@router.get("/{work_id}/stats", response_model=List[WorkStatsSnapshotResponse])
+async def get_work_stats_history(
+    work_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """按时间倒序返回作品互动统计快照。"""
+    exists = await db.scalar(select(Work.id).where(Work.id == work_id))
+    if exists is None:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    result = await db.execute(
+        select(WorkStatsSnapshot)
+        .where(WorkStatsSnapshot.work_id == work_id)
+        .order_by(WorkStatsSnapshot.observed_at.desc(), WorkStatsSnapshot.id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 @router.delete("/{work_id}", response_model=MessageResponse)
