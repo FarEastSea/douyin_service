@@ -99,6 +99,8 @@ class Settings(BaseModel):
     AUTO_CHECK_ENABLED: bool = True
     SUBSCRIPTION_KNOWN_STREAK: int = 12  # 连续命中多少个已知作品后停止增量扫描
     SUBSCRIPTION_MAX_PAGES: int = 50  # 增量扫描安全上限，命中时失败关闭
+    SUBSCRIPTION_SAFE_LOOKBACK_PAGES: int = 2  # 即使命中停止边界也至少回看这些页
+    SUBSCRIPTION_FULL_RECONCILE_INTERVAL: int = 604800  # 每位作者全量对账间隔，默认7天
     
     # 卡住任务检测
     STUCK_TASK_TIMEOUT: int = 600  # 下载任务无进度变化超过此时间(秒)视为卡住，默认10分钟

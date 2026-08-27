@@ -63,6 +63,8 @@ class RuntimeConfigUpdate(BaseModel):
     stuck_task_timeout: Optional[int] = None
     subscription_known_streak: Optional[int] = None
     subscription_max_pages: Optional[int] = None
+    subscription_safe_lookback_pages: Optional[int] = None
+    subscription_full_reconcile_interval: Optional[int] = None
 
 
 class CompleteConfigUpdate(BaseModel):

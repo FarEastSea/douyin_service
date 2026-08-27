@@ -30,6 +30,8 @@ RUNTIME_CONFIG_ENV_KEYS = {
     "stuck_task_timeout": "STUCK_TASK_TIMEOUT",
     "subscription_known_streak": "SUBSCRIPTION_KNOWN_STREAK",
     "subscription_max_pages": "SUBSCRIPTION_MAX_PAGES",
+    "subscription_safe_lookback_pages": "SUBSCRIPTION_SAFE_LOOKBACK_PAGES",
+    "subscription_full_reconcile_interval": "SUBSCRIPTION_FULL_RECONCILE_INTERVAL",
 }
 
 
@@ -120,6 +122,21 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
         "min": 1,
         "max": 500,
         "label": "增量扫描最大页数",
+    },
+    "subscription_safe_lookback_pages": {
+        "type": "int",
+        "default": settings.SUBSCRIPTION_SAFE_LOOKBACK_PAGES,
+        "min": 1,
+        "max": 10,
+        "label": "增量扫描安全回看页数",
+    },
+    "subscription_full_reconcile_interval": {
+        "type": "int",
+        "default": settings.SUBSCRIPTION_FULL_RECONCILE_INTERVAL,
+        "min": 24 * 3600,
+        "max": 30 * 24 * 3600,
+        "label": "作者全量对账间隔",
+        "unit": "秒",
     },
 }
 

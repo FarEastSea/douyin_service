@@ -57,6 +57,7 @@ class Author(Base):
     check_interval = Column(Integer, default=21600)  # 检查间隔(秒)
     last_check_time = Column(DateTime)
     last_auto_update_at = Column(DateTime)
+    last_full_reconcile_at = Column(DateTime, server_default=func.now())
     last_aweme_id = Column(String(64))  # 上次最新作品ID
     
     # 统计

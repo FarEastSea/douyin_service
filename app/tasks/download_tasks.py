@@ -248,16 +248,40 @@ def _known_work_ids(db: Session, author_id: int) -> set[str]:
     }
 
 
-def _collect_author_works(source, author: Author, db: Session, runtime_config: dict, *, incremental: bool) -> list:
-    known_ids = _known_work_ids(db, author.id) if incremental else set()
-    if not known_ids:
-        return source.list_all_works(author.sec_uid)
-    return source.list_incremental_works(
+def _collect_author_works(source, author: Author, db: Session, runtime_config: dict, *, incremental: bool) -> dict:
+    known_ids = _known_work_ids(db, author.id)
+    if not incremental or not known_ids:
+        return source.scan_all_works(author.sec_uid, known_ids)
+    return source.scan_incremental_works(
         author.sec_uid,
         known_ids,
         known_streak=int(runtime_config.get("subscription_known_streak", settings.SUBSCRIPTION_KNOWN_STREAK)),
         max_pages=int(runtime_config.get("subscription_max_pages", settings.SUBSCRIPTION_MAX_PAGES)),
+        safe_lookback_pages=int(runtime_config.get(
+            "subscription_safe_lookback_pages", settings.SUBSCRIPTION_SAFE_LOOKBACK_PAGES
+        )),
     )
+
+
+def _full_reconcile_due(author: Author, runtime_config: dict, *, forced: bool = False) -> bool:
+    if forced:
+        return True
+    interval = int(runtime_config.get(
+        "subscription_full_reconcile_interval",
+        settings.SUBSCRIPTION_FULL_RECONCILE_INTERVAL,
+    ))
+    last_reconcile = author.last_full_reconcile_at
+    return last_reconcile is None or (datetime.now() - last_reconcile).total_seconds() >= interval
+
+
+def _scan_audit_fields(scan_result: dict) -> dict:
+    metrics = scan_result.get("metrics") or {}
+    return {
+        "scan_mode": metrics.get("mode"),
+        "pages_requested": int(metrics.get("pages_requested") or 0),
+        "stop_reason": metrics.get("stop_reason"),
+        "known_hits": int(metrics.get("known_hits") or 0),
+    }
 
 
 def _mark_author_account_anomaly(
@@ -387,6 +411,63 @@ def _apply_work_media_payload(work: Work, work_payload: dict, preserve_existing:
     if live_photo_urls or not preserve_existing:
         work.live_photo_urls = live_photo_urls
     work.video_url = None
+
+
+def _queue_scanned_new_works(
+    db: Session,
+    author: Author,
+    new_works: list[dict],
+) -> dict:
+    """直接持久化本轮已验证的新作品，避免再次扫描导致历史缺口被停止边界挡住。"""
+    task_ids: list[int] = []
+    persisted_works = 0
+    for item in new_works:
+        aweme_id = str(item.get("aweme_id") or "")
+        if not aweme_id:
+            raise ValueError("扫描结果缺少 aweme_id")
+        existing = db.execute(
+            select(Work).where(Work.aweme_id == aweme_id)
+        ).scalar_one_or_none()
+        if existing:
+            continue
+
+        work = Work(
+            aweme_id=aweme_id,
+            author_id=author.id,
+            title=item.get("desc", ""),
+            work_type="video",
+        )
+        _apply_work_media_payload(work, item)
+        _apply_work_published_at(work, item)
+        db.add(work)
+        db.flush()
+        persisted_works += 1
+
+        file_indices = [0] if work.work_type == "video" else list(range(work.image_count))
+        for file_index in file_indices:
+            task, action = ensure_download_task_sync(db, work.id, file_index)
+            if action in {"created", "reused"}:
+                task_ids.append(task.id)
+                work.is_downloaded = False
+
+    recalc_author_counts_sync(db, author)
+    db.commit()
+
+    celery_task_ids: list[str] = []
+    for task_id in task_ids:
+        queued = download_single_file.delay(task_id)
+        celery_task_ids.append(queued.id)
+        db.execute(
+            update(DownloadTask)
+            .where(DownloadTask.id == task_id, DownloadTask.status == "pending")
+            .values(celery_task_id=queued.id)
+        )
+    db.commit()
+    return {
+        "persisted_works": persisted_works,
+        "file_tasks": len(task_ids),
+        "celery_task_ids": celery_task_ids,
+    }
 
 
 def sync_author_profile(author: Author, source: DouyinSource) -> dict:
@@ -921,16 +1002,20 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         redis_client.append_activity_log("info", "task",
             f"正在调用抖音 API 获取作品列表...",
             f"sec_uid={author.sec_uid}")
-        work_list = _collect_author_works(
+        scan_result = _collect_author_works(
             source,
             author,
             db,
             runtime_config,
             incremental=download_new_only,
         )
+        work_list = scan_result["items"]
+        scan_metrics = scan_result["metrics"]
         redis_client.append_activity_log("info", "task",
             f"获取到 {len(work_list)} 个作品: {author.nickname}",
-            f"author_id={author_id}")
+            f"author_id={author_id}, mode={scan_metrics['mode']}, "
+            f"pages={scan_metrics['pages_requested']}, stop={scan_metrics['stop_reason']}, "
+            f"known_hits={scan_metrics['known_hits']}")
 
         if _author_is_being_deleted(author_id, "download_author_works:before_create"):
             db.rollback()
@@ -945,6 +1030,8 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         # 更新作者信息
         if work_list:
             author.last_check_time = datetime.now()
+            if scan_metrics["mode"] == "full":
+                author.last_full_reconcile_at = author.last_check_time
             latest_work = _select_latest_work(work_list)
             if latest_work:
                 author.last_aweme_id = latest_work.get("aweme_id")
@@ -1118,7 +1205,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         cycle_id: str | None = None,
                         cycle_total: int = 0,
                         cycle_checked: int = 0,
-                        cycle_new_works: int = 0):
+                        cycle_new_works: int = 0,
+                        full_reconcile: bool = False):
     """
     检查所有订阅的作者是否有新作品
     
@@ -1144,7 +1232,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         author_delay = float(runtime_config.get("author_check_delay", settings.AUTHOR_CHECK_DELAY))
 
         # 风控或超时留下的周期由下一次自动调度或手动触发从断点继续，不新开一轮。
-        if not author_ids:
+        if not author_ids and not full_reconcile:
             saved_cycle = _load_subscription_cycle_state(db)
             saved_remaining = saved_cycle.get("remaining_author_ids") or []
             if saved_cycle.get("active") and saved_remaining:
@@ -1153,6 +1241,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 cycle_total = int(saved_cycle.get("total_authors") or cycle_total or len(author_ids))
                 cycle_checked = int(saved_cycle.get("checked_authors") or cycle_checked or 0)
                 cycle_new_works = int(saved_cycle.get("new_works") or cycle_new_works or 0)
+                full_reconcile = bool(saved_cycle.get("full_reconcile", full_reconcile))
 
         if not force and not author_ids:
             last_check_time = _get_last_subscription_check_time(db)
@@ -1191,7 +1280,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 
         report = SubscriptionCheckReport(
             celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
-            trigger_type="manual" if force else "auto",
+            trigger_type="reconcile" if full_reconcile else ("manual" if force else "auto"),
             status="running",
         )
         db.add(report)
@@ -1223,6 +1312,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             "checked_authors": cycle_checked,
             "remaining_authors": max(0, cycle_total - cycle_checked),
             "new_works": cycle_new_works,
+            "full_reconcile": full_reconcile,
             "remaining_author_ids": [author.id for author in authors],
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         })
@@ -1265,6 +1355,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             round_checked = len(completed_ids)
             round_remaining_ids = [author.id for author in authors if author.id not in settled_ids]
             current_new_works = sum(int(item.get("new_works", 0) or 0) for item in results)
+            requested_pages = sum(int(item.get("pages_requested", 0) or 0) for item in results)
+            full_scans = sum(1 for item in results if item.get("scan_mode") == "full")
             cumulative_checked = min(cycle_total, cycle_checked + round_checked)
             report.checked_authors = round_checked
             report.success_authors = status_counts.get("success", 0) + status_counts.get("new_works", 0)
@@ -1275,7 +1367,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             report.remaining_authors = len(round_remaining_ids)
             report.summary = (
                 f"正在检查：本轮已检查 {round_checked} 位，"
-                f"累计已检查 {cumulative_checked}/{cycle_total} 位"
+                f"累计已检查 {cumulative_checked}/{cycle_total} 位，"
+                f"请求作品页 {requested_pages} 页，全量对账 {full_scans} 位"
             )
             report.details_json = json.dumps(results, ensure_ascii=False, default=str)
             _save_subscription_cycle_state(db, {
@@ -1285,6 +1378,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 "checked_authors": cumulative_checked,
                 "remaining_authors": len(round_remaining_ids),
                 "new_works": cycle_new_works + current_new_works,
+                "full_reconcile": full_reconcile,
                 "remaining_author_ids": round_remaining_ids,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             })
@@ -1344,26 +1438,40 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         time.sleep(author_delay)
                     continue
                 
-                # 获取最新作品（传入 sec_uid 避免冗余请求）
-                work_list = _collect_author_works(
+                # 日常使用有界增量扫描；到达网页设置的周期或人工指定时执行全量对账。
+                run_full_reconcile = _full_reconcile_due(
+                    author, runtime_config, forced=full_reconcile
+                )
+                scan_result = _collect_author_works(
                     source,
                     author,
                     db,
                     runtime_config,
-                    incremental=True,
+                    incremental=not run_full_reconcile,
+                )
+                work_list = scan_result["items"]
+                scan_audit = _scan_audit_fields(scan_result)
+                redis_client.append_activity_log(
+                    "info",
+                    "task",
+                    f"订阅作品扫描完成: {author.nickname or author.id}",
+                    f"mode={scan_audit['scan_mode']}, pages={scan_audit['pages_requested']}, "
+                    f"stop={scan_audit['stop_reason']}, known_hits={scan_audit['known_hits']}",
                 )
 
                 # 空列表无法区分“确实无作品”和风控伪成功。短暂退避后复查一次，
                 # 两次都为空才记录警告，避免一次瞬时空响应造成整轮漏更。
                 if not work_list:
                     time.sleep(max(3.0, min(author_delay, 10.0)))
-                    work_list = _collect_author_works(
+                    scan_result = _collect_author_works(
                         source,
                         author,
                         db,
                         runtime_config,
-                        incremental=True,
+                        incremental=not run_full_reconcile,
                     )
+                    work_list = scan_result["items"]
+                    scan_audit = _scan_audit_fields(scan_result)
                 
                 if not work_list:
                     author.last_check_time = datetime.now()
@@ -1376,6 +1484,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "warning": author.last_error,
                         "status": "warning",
                         "message": author.last_error,
+                        **scan_audit,
                     })
                     if author_delay > 0:
                         time.sleep(author_delay)
@@ -1385,19 +1494,19 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 new_works = _detect_new_works(db, author.id, work_list)
 
                 if new_works:
-                    # 触发下载新作品
-                    result = download_author_works.delay(
-                        author.id,
-                        start_index=1,
-                        download_new_only=True
-                    )
+                    queue_result = _queue_scanned_new_works(db, author, new_works)
                     results.append({
                         "author_id": author.id,
                         "nickname": author.nickname,
-                        "new_works": len(new_works),
-                        "task_id": result.id,
+                        "new_works": queue_result["persisted_works"],
+                        "file_tasks": queue_result["file_tasks"],
+                        "task_ids": queue_result["celery_task_ids"][:20],
                         "status": "new_works",
-                        "message": f"发现 {len(new_works)} 个新作品，已提交下载",
+                        "message": (
+                            f"发现 {queue_result['persisted_works']} 个新作品，"
+                            f"已提交 {queue_result['file_tasks']} 个文件任务"
+                        ),
+                        **scan_audit,
                     })
                 elif profile_result.get("changed"):
                     results.append({
@@ -1406,6 +1515,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "avatar_synced": True,
                         "status": "success",
                         "message": "无新作品，作者资料已更新",
+                        **scan_audit,
                     })
                 else:
                     results.append({
@@ -1413,6 +1523,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "nickname": author.nickname,
                         "status": "success",
                         "message": "检查成功，无新作品",
+                        **scan_audit,
                     })
                 
                 # 本作者检查成功，重置连续限流计数
@@ -1421,6 +1532,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 # 更新检查时间
                 author.last_check_time = datetime.now()
                 author.last_auto_update_at = author.last_check_time
+                if run_full_reconcile:
+                    author.last_full_reconcile_at = author.last_check_time
                 recalc_author_counts_sync(db, author)
                 latest_work = _select_latest_work(work_list)
                 if latest_work:
@@ -1431,7 +1544,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     _notify_event(
                         "new_works",
                         f"{author.nickname or f'作者 {author.id}'} 发布了新作品",
-                        f"发现 {len(new_works)} 个新作品，下载任务已提交。",
+                        f"发现 {queue_result['persisted_works']} 个新作品，下载任务已提交。",
                         level="info",
                         dedupe_key=f"new-works:{author.id}:" + ",".join(
                             sorted(str(item["aweme_id"]) for item in new_works)
@@ -1539,6 +1652,13 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 })
                 if incomplete_scan:
                     results[-1]["error_code"] = "traversal_limit"
+                    if e.metrics:
+                        results[-1].update({
+                            "scan_mode": e.metrics.get("mode"),
+                            "pages_requested": int(e.metrics.get("pages_requested") or 0),
+                            "stop_reason": e.metrics.get("stop_reason"),
+                            "known_hits": int(e.metrics.get("known_hits") or 0),
+                        })
                 _notify_event(
                     "subscription_failure",
                     "作者订阅检查失败",
@@ -1611,6 +1731,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             key = item.get("status", "unknown")
             status_counts[key] = status_counts.get(key, 0) + 1
         current_new_works = sum(int(item.get("new_works", 0) or 0) for item in results)
+        requested_pages = sum(int(item.get("pages_requested", 0) or 0) for item in results)
+        full_scans = sum(1 for item in results if item.get("scan_mode") == "full")
         cumulative_checked = min(cycle_total, cycle_checked + round_checked)
         cumulative_new_works = cycle_new_works + current_new_works
         report.due_authors = due_count
@@ -1628,7 +1750,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         )
         report.summary = (
             f"本轮已检查 {round_checked} 位，累计已检查 {cumulative_checked}/{cycle_total} 位，"
-            f"等待续检 {remaining_count} 位，发现新作品 {report.new_works} 个"
+            f"等待续检 {remaining_count} 位，发现新作品 {report.new_works} 个，"
+            f"请求作品页 {requested_pages} 页，全量对账 {full_scans} 位"
         )
         report.details_json = json.dumps(results, ensure_ascii=False, default=str)
         report.finished_at = datetime.now()
@@ -1640,6 +1763,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 "checked_authors": cumulative_checked,
                 "remaining_authors": remaining_count,
                 "new_works": cumulative_new_works,
+                "full_reconcile": full_reconcile,
                 "remaining_author_ids": resume_author_ids,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             })
@@ -1660,6 +1784,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     "cycle_total": cycle_total,
                     "cycle_checked": cumulative_checked,
                     "cycle_new_works": cumulative_new_works,
+                    "full_reconcile": full_reconcile,
                 }, countdown=countdown)
                 continuation_task_id = continuation.id
                 redis_client.append_activity_log(
@@ -1687,6 +1812,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                             "cycle_total": cycle_total,
                             "cycle_checked": cumulative_checked,
                             "cycle_new_works": cumulative_new_works,
+                            "full_reconcile": full_reconcile,
                         },
                         countdown=countdown,
                     )

@@ -69,6 +69,8 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="AUTO_CHECK_ENABLED", label="启用自动订阅检查", group="订阅", default="true"),
     EnvField(key="SUBSCRIPTION_KNOWN_STREAK", label="连续已知作品停止数", group="订阅", default="12", help="增量扫描连续命中这些非置顶已入库作品后停止"),
     EnvField(key="SUBSCRIPTION_MAX_PAGES", label="增量扫描最大页数", group="订阅", default="50", help="未找到安全停止边界时失败关闭，避免漏更"),
+    EnvField(key="SUBSCRIPTION_SAFE_LOOKBACK_PAGES", label="增量扫描安全回看页数", group="订阅", default="2", help="即使已命中停止边界，也至少扫描这些最新页"),
+    EnvField(key="SUBSCRIPTION_FULL_RECONCILE_INTERVAL", label="全量对账间隔（秒）", group="订阅", default="604800", help="每位作者定期执行一次全量作品对账，默认7天"),
     EnvField(key="REQUEST_DELAY", label="抖音接口最小请求间隔（秒）", group="抖音", default="3.0", help="所有 Worker 共享，避免多个任务在同一秒集中请求抖音"),
     EnvField(key="AUTHOR_CHECK_DELAY", label="作者检查间隔（秒）", group="抖音", default="30.0"),
     EnvField(key="DOUYIN_RISK_COOLDOWN_SECONDS", label="抖音风控冷却时长（秒）", group="抖音", default="300"),

@@ -105,6 +105,7 @@ ADD_COLUMN_MIGRATIONS = [
     _add_column("0020_works_live_photos", "works", "live_photo_urls", "ALTER TABLE works ADD COLUMN live_photo_urls TEXT"),
     _add_column("0021_works_published_at", "works", "published_at", "ALTER TABLE works ADD COLUMN published_at TIMESTAMP NULL"),
     _add_column("0022_authors_auto_update", "authors", "last_auto_update_at", "ALTER TABLE authors ADD COLUMN last_auto_update_at TIMESTAMP NULL"),
+    _add_column("0023_authors_full_reconcile", "authors", "last_full_reconcile_at", "ALTER TABLE authors ADD COLUMN last_full_reconcile_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"),
 ]
 
 

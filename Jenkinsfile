@@ -14,6 +14,7 @@ pipeline {
         REMOTE_USER = credentials('douyin-remote-user')
         REMOTE_SERVICE_DIR = credentials('douyin-remote-service-dir')
         DEPLOY_BRANCH = 'main'
+        TZ = 'Asia/Shanghai'
     }
 
     stages {

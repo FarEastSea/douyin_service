@@ -18,16 +18,26 @@ async function run() {
   try { const result = await api<any>('/authors/check-all', { method: 'POST' }); store.notify(result.message) }
   catch (error: any) { store.notify(error.message || '提交失败', 'error') }
 }
+async function reconcile() {
+  if (store.risk.active) return store.notify('抖音接口正在冷却', 'error')
+  if (!confirm('全量对账会读取每位订阅作者的全部作品，耗时和请求量都高于日常检查，确定继续？')) return
+  try { const result = await api<any>('/authors/reconcile-all', { method: 'POST' }); store.notify(result.message) }
+  catch (error: any) { store.notify(error.message || '提交全量对账失败', 'error') }
+}
+function triggerLabel(trigger: string) {
+  if (trigger === 'reconcile') return '全量对账'
+  return trigger === 'manual' ? '手动触发' : '自动调度'
+}
 onMounted(() => { load(); timer.value = window.setInterval(() => load(true), 5000) })
 onBeforeUnmount(() => clearInterval(timer.value))
 </script>
 
 <template>
   <section class="workspace-card update-workspace">
-    <header class="workspace-header"><div><p class="eyebrow">AUTOMATION</p><h2>自动更新中心</h2><span>查看订阅检查周期、断点与新作品发现情况</span></div><div class="header-actions"><button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button><button class="btn primary" :disabled="store.risk.active" @click="run"><Zap :size="16" />立即检查全部</button></div></header>
+    <header class="workspace-header"><div><p class="eyebrow">AUTOMATION</p><h2>自动更新中心</h2><span>查看订阅检查周期、断点与新作品发现情况</span></div><div class="header-actions"><button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button><button class="btn ghost" :disabled="store.risk.active" @click="reconcile"><RefreshCw :size="16" />全量对账</button><button class="btn primary" :disabled="store.risk.active" @click="run"><Zap :size="16" />立即检查全部</button></div></header>
     <div class="metric-grid cycle-metrics"><article><Users /><div><strong>{{ cycle.total_authors || latest?.total_authors || store.stats.subscribed_authors }}</strong><span>订阅作者</span></div></article><article><Clock3 /><div><strong>{{ latest?.checked_authors || 0 }}</strong><span>本轮已检查</span></div></article><article><Clock3 /><div><strong>{{ cycle.checked_authors || 0 }}</strong><span>已检查</span></div></article><article><Sparkles /><div><strong>{{ cycle.new_works || latest?.new_works || 0 }}</strong><span>发现新作品</span></div></article><article><RefreshCw /><div><strong>{{ cycle.remaining_authors ?? latest?.remaining_authors ?? 0 }}</strong><span>等待续检</span></div></article></div>
     <div class="timeline" :class="{ loading }">
-      <article v-for="report in reports" :key="report.id" class="timeline-item"><i :data-tone="report.status" /><div class="timeline-head"><strong>{{ report.summary || '订阅检查' }}</strong><span class="status subtle" :data-tone="report.status">{{ reportStatusLabel(report.status) }}</span></div><p>{{ report.checked_authors }} 位已检查 · {{ report.success_authors }} 位成功 · {{ report.warning_authors + report.failed_authors }} 位异常</p><footer><time>{{ report.started_at ? new Date(report.started_at).toLocaleString() : '时间未知' }}</time><span>{{ report.trigger_type === 'manual' ? '手动触发' : '自动调度' }}</span></footer></article>
+      <article v-for="report in reports" :key="report.id" class="timeline-item"><i :data-tone="report.status" /><div class="timeline-head"><strong>{{ report.summary || '订阅检查' }}</strong><span class="status subtle" :data-tone="report.status">{{ reportStatusLabel(report.status) }}</span></div><p>{{ report.checked_authors }} 位已检查 · {{ report.success_authors }} 位成功 · {{ report.warning_authors + report.failed_authors }} 位异常</p><footer><time>{{ report.started_at ? new Date(report.started_at).toLocaleString() : '时间未知' }}</time><span>{{ triggerLabel(report.trigger_type) }}</span></footer></article>
       <div v-if="!loading && !reports.length" class="empty-state"><Clock3 /><strong>暂无检查报告</strong><span>运行一次订阅检查后将在这里形成报告</span></div>
     </div>
   </section>

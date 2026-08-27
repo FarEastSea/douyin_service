@@ -924,6 +924,34 @@ async def check_author_updates(author_id: int, db: AsyncSession = Depends(get_as
     )
 
 
+@router.post("/{author_id}/reconcile", response_model=MessageResponse)
+async def reconcile_author_works(author_id: int, db: AsyncSession = Depends(get_async_db)):
+    """人工触发单个作者全量作品对账；仍受全局互斥锁和请求节奏保护。"""
+    await _raise_if_douyin_cooling()
+    result = await db.execute(select(Author).where(Author.id == author_id))
+    author = result.scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="作者不存在")
+    if not author.is_subscribed:
+        raise HTTPException(status_code=400, detail="作者尚未订阅，不能执行订阅全量对账")
+    if await asyncio.to_thread(redis_client.is_author_deleting, author_id):
+        raise HTTPException(status_code=409, detail="作者正在删除，请稍后刷新列表")
+
+    celery_result = await asyncio.to_thread(
+        check_subscriptions.apply_async,
+        kwargs={
+            "force": True,
+            "author_ids": [author_id],
+            "full_reconcile": True,
+        },
+    )
+    return MessageResponse(
+        success=True,
+        message="作者全量对账任务已提交",
+        data={"celery_task_id": celery_result.id},
+    )
+
+
 @router.post("/check-all", response_model=MessageResponse)
 async def check_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
     """手动触发检查所有订阅"""
@@ -934,6 +962,21 @@ async def check_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
         success=True,
         message="订阅检查任务已提交",
         data={"celery_task_id": celery_result.id}
+    )
+
+
+@router.post("/reconcile-all", response_model=MessageResponse)
+async def reconcile_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
+    """人工触发全部订阅作者全量作品对账。"""
+    await _raise_if_douyin_cooling()
+    celery_result = await asyncio.to_thread(
+        check_subscriptions.apply_async,
+        kwargs={"force": True, "full_reconcile": True},
+    )
+    return MessageResponse(
+        success=True,
+        message="订阅作者全量对账任务已提交",
+        data={"celery_task_id": celery_result.id},
     )
 
 
