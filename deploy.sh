@@ -140,6 +140,21 @@ print(f"Python syntax OK: {len(files)} files")
 PY
         "$BUILD_VENV/bin/python" -c 'import main; assert main.app is not None; print("FastAPI import OK")'
         "$BUILD_VENV/bin/python" - <<'PY'
+from app.core.env_config import validate_env
+
+status = validate_env()
+if not status.get("ready"):
+    problems = [
+        f"{item.get('label') or item.get('key')}: {item.get('message') or '缺少必填配置'}"
+        for item in [*status.get("missing", []), *status.get("errors", [])]
+    ]
+    raise SystemExit(
+        "Runtime preflight failed before stopping the current service:\n- "
+        + "\n- ".join(problems or ["unknown configuration error"])
+    )
+print("Runtime configuration, database, Redis and download storage OK")
+PY
+        "$BUILD_VENV/bin/python" - <<'PY'
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -266,6 +281,19 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                 raise RuntimeError("dependency readiness payload is not ready")
         except urllib.error.HTTPError as exc:
             if not (allow_legacy_health and exc.code == 404):
+                if exc.code == 503:
+                    try:
+                        readiness = json.loads(exc.read())
+                    except Exception:
+                        raise
+                    failures = [
+                        f"{name}: {item.get('message', 'not ready')}"
+                        for name, item in readiness.get("components", {}).items()
+                        if item.get("ok") is not True
+                    ]
+                    raise RuntimeError(
+                        "readiness failed: " + "; ".join(failures or ["HTTP 503"])
+                    ) from exc
                 raise
             health = json.loads(get("/api/health"))
             if health.get("status") not in {"healthy", "alive"}:
