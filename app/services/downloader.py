@@ -308,7 +308,8 @@ class DouyinDownloader:
 
         return f"https://www.douyin.com/user/{quote(normalized_sec_uid, safe='')}"
     
-    def __init__(self, cookie: str, filepath: str = None, runtime_config: dict = None):
+    def __init__(self, cookie: str, filepath: str = None, runtime_config: dict = None,
+                 request_context: Any = None):
         """
         初始化下载器
         
@@ -316,6 +317,9 @@ class DouyinDownloader:
             cookie: 抖音 Cookie
             filepath: 下载保存路径，默认使用配置中的路径
         """
+        context_user_agent = getattr(request_context, "user_agent", None)
+        self.account_profile_id = getattr(request_context, "profile_id", None)
+        self.account_context_version = getattr(request_context, "context_version", None)
         self.headers = {
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
@@ -327,7 +331,7 @@ class DouyinDownloader:
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
             'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0'
+            'user-agent': context_user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
         }
         self.runtime_config = runtime_config or get_cached_runtime_config()
         self.download_timeout = int(self.runtime_config.get("download_timeout", settings.DOWNLOAD_TIMEOUT))
@@ -338,7 +342,13 @@ class DouyinDownloader:
         ))
         self.filepath = filepath or settings.DOWNLOAD_DIR
         self.session = requests.Session()
+        if context_user_agent:
+            for header_name in ('sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'):
+                self.headers.pop(header_name, None)
         self.session.headers.update(self.headers)
+        proxy_url = getattr(request_context, "proxy_url", None)
+        if proxy_url:
+            self.session.proxies.update({'http': proxy_url, 'https': proxy_url})
         # 设置重试
         adapter = requests.adapters.HTTPAdapter(
             max_retries=self.download_retry_count
@@ -359,6 +369,10 @@ class DouyinDownloader:
             )
 
     def _record_risk_error(self, exc: DouyinRequestError) -> None:
+        isolated = self._record_account_result(exc.code)
+        if isolated:
+            exc.retry_after = 0
+            return
         if exc.code not in {"browser_identity_missing", "argus_blocked", "rate_limited"}:
             return
         try:
@@ -372,9 +386,25 @@ class DouyinDownloader:
         except Exception as redis_exc:
             logger.warning("写入抖音风控冷却状态失败: %s", redis_exc)
 
+    def _record_account_result(self, error_code: Optional[str] = None) -> bool:
+        if not self.account_profile_id:
+            return False
+        try:
+            from app.services.douyin_account import record_request_result
+            return record_request_result(
+                self.account_profile_id,
+                self.account_context_version,
+                error_code,
+            )
+        except Exception as account_exc:
+            logger.warning("更新抖音账号健康状态失败: %s", account_exc)
+            return False
+
     def _parse_json_response(self, response, *, expected_keys=()) -> Dict[str, Any]:
         try:
-            return parse_douyin_json_response(response, expected_keys=expected_keys)
+            data = parse_douyin_json_response(response, expected_keys=expected_keys)
+            self._record_account_result()
+            return data
         except DouyinRequestError as exc:
             self._record_risk_error(exc)
             logger.warning(
@@ -394,6 +424,7 @@ class DouyinDownloader:
         if error and (error.code == "argus_blocked" or (status_code or 0) >= 400):
             self._record_risk_error(error)
             raise error
+        self._record_account_result()
 
     def _get_douyin_response(self, url: str):
         """统一执行抖音业务请求，并将网络异常转成结构化错误。"""
@@ -415,6 +446,7 @@ class DouyinDownloader:
         except DouyinRequestError:
             raise
         except requests.RequestException as exc:
+            self._record_account_result("network_error")
             raise DouyinRequestError("network_error", detail=str(exc)) from exc
 
     def normalize_work_item(self, item: Dict[str, Any], fallback_sec_uid: str = '') -> Dict[str, Any]:

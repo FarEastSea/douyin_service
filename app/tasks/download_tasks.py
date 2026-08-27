@@ -42,6 +42,7 @@ from app.core.traffic_control import global_download_slot
 from app.services.download_task_factory import ensure_download_task_sync
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
 from app.services.work_metadata import apply_work_payload
+from app.services.douyin_account import get_request_context_sync
 from app.services.douyin_errors import DouyinRequestError
 from app.services.douyin_source import (
     DouyinSource,
@@ -360,27 +361,6 @@ def _reset_subscription_check_cooldown(db: Session):
         pass
 
 
-def get_cookie_from_db(db: Session) -> str:
-    """从数据库获取 Cookie"""
-    # 优先从 Redis 获取
-    cookie = redis_client.get_cookie()
-    if cookie:
-        return cookie
-    
-    # 从数据库获取
-    config = db.execute(
-        select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
-    ).scalar_one_or_none()
-    
-    if config:
-        # 缓存到 Redis
-        redis_client.set_cookie(config.value)
-        return config.value
-    
-    # 使用配置文件中的 Cookie
-    return settings.DOUYIN_COOKIE or ""
-
-
 def _queue_scanned_new_works(
     db: Session,
     author: Author,
@@ -646,12 +626,15 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
         runtime_config = get_runtime_config_sync(db)
 
         # 采集和文件执行使用独立契约，任务不再直接操作下载器会话。
-        cookie = get_cookie_from_db(db)
+        request_context = get_request_context_sync(db)
+        cookie = request_context.cookie
         source = build_douyin_source(
-            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config,
+            request_context=request_context,
         )
         media = build_douyin_media_engine(
-            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config,
+            request_context=request_context,
         )
         
         # 确定下载 URL 和文件路径
@@ -953,10 +936,14 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         runtime_config = get_runtime_config_sync(db)
 
         # 获取 Cookie 并创建下载器
-        cookie = get_cookie_from_db(db)
+        request_context = get_request_context_sync(db)
+        cookie = request_context.cookie
         redis_client.append_activity_log("debug", "task",
             f"Cookie 状态: {'\u5df2配置(' + str(len(cookie)) + '字符)' if cookie else '\u672a配置'}")
-        source = build_douyin_source(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+        source = build_douyin_source(
+            cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config,
+            request_context=request_context,
+        )
 
         try:
             profile_result = sync_author_profile(author, source)
@@ -1325,7 +1312,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     continue
                 status = item.get("status")
                 risk_failure = item.get("error_code") in {
-                    "browser_identity_missing", "argus_blocked", "rate_limited",
+                    "account_isolated", "browser_identity_missing", "argus_blocked", "rate_limited",
                     "suspected_rate_limit",
                 }
                 if status != "deferred" and not risk_failure:
@@ -1392,8 +1379,12 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             checked_count += 1
             try:
                 # 获取 Cookie 并创建下载器
-                cookie = get_cookie_from_db(db)
-                source = build_douyin_source(cookie, settings.DOWNLOAD_DIR, runtime_config=runtime_config)
+                request_context = get_request_context_sync(db)
+                source = build_douyin_source(
+                    request_context.cookie, settings.DOWNLOAD_DIR,
+                    runtime_config=runtime_config,
+                    request_context=request_context,
+                )
 
                 profile_result = sync_author_profile(author, source)
                 record_author_profile_history(db, author, profile_result)
@@ -1558,7 +1549,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 error_msg = str(e)
 
                 if isinstance(e, DouyinRequestError) and e.code in {
-                    "browser_identity_missing", "argus_blocked", "rate_limited",
+                    "account_isolated", "browser_identity_missing", "argus_blocked", "rate_limited",
                 }:
                     author.last_error = f"{e.user_message} {e.action}"
                     db.commit()
@@ -1701,8 +1692,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         if risk_author_id is not None and risk_author_id not in resume_author_ids:
             resume_author_ids.insert(0, risk_author_id)
         if stopped_for_timeout or stopped_for_rate_limit:
-            if risk_error_code == "browser_identity_missing":
-                deferred_reason = "Cookie 缺少浏览器身份标识，更新 Cookie 后优先续检"
+            if risk_error_code in {"account_isolated", "browser_identity_missing"}:
+                deferred_reason = "抖音账号请求上下文不可用，重新保存账号档案后优先续检"
             else:
                 deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
             for author in authors:
@@ -1735,7 +1726,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         report.skipped_authors = skipped_count
         report.remaining_authors = remaining_count
         report.status = (
-            "partial_authentication" if risk_error_code == "browser_identity_missing"
+            "partial_authentication" if risk_error_code in {"account_isolated", "browser_identity_missing"}
             else ("partial_rate_limited" if stopped_for_rate_limit
                   else ("partial_timeout" if stopped_for_timeout else "completed"))
         )

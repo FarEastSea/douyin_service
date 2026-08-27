@@ -73,6 +73,7 @@ from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
 from app.services.work_manager import delete_author_hard
+from app.services.douyin_account import get_request_context
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -266,15 +267,13 @@ async def add_author(
     """
     try:
         await _raise_if_douyin_cooling()
-        # 获取 Cookie
         current_settings = await asyncio.to_thread(settings.snapshot)
-        cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
-        if not cookie:
-            raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
+        request_context = await get_request_context(db)
         
         runtime_config = await get_runtime_config(db)
         source = build_douyin_source(
-            cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            request_context.cookie, current_settings.DOWNLOAD_DIR,
+            runtime_config=runtime_config, request_context=request_context,
         )
         
         # 抖音请求是同步 I/O，放到线程池避免阻塞 FastAPI 事件循环导致网关超时。
@@ -573,9 +572,7 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
         raise HTTPException(status_code=404, detail="作者不存在")
 
     current_settings = await asyncio.to_thread(settings.snapshot)
-    cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
-    if not cookie:
-        raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
+    request_context = await get_request_context(db)
 
     try:
         import asyncio
@@ -584,7 +581,8 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
 
         def _sync():
             source = build_douyin_source(
-                cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+                request_context.cookie, current_settings.DOWNLOAD_DIR,
+                runtime_config=runtime_config, request_context=request_context,
             )
             return sync_author_profile(author, source)
 
@@ -630,12 +628,13 @@ async def get_author_avatar(author_id: int, db: AsyncSession = Depends(get_async
     if not author.avatar_url:
         raise HTTPException(status_code=404, detail="作者暂无头像")
 
-    cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
+    request_context = await get_request_context(db)
     runtime_config = await get_runtime_config(db)
 
     def _cache_avatar():
         source = build_douyin_source(
-            cookie or "", current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            request_context.cookie, current_settings.DOWNLOAD_DIR,
+            runtime_config=runtime_config, request_context=request_context,
         )
         return source.cache_author_avatar(author.id, author.avatar_url)
 

@@ -366,18 +366,6 @@ def is_author_deleting(author_id: int) -> bool:
     return redis_client.sismember(AUTHOR_DELETING_SET_KEY, str(author_id))
 
 
-# ============ Cookie 管理 ============
-
-def set_cookie(cookie: str) -> None:
-    """存储 Cookie"""
-    redis_client.set(COOKIE_KEY, cookie)
-
-
-def get_cookie() -> Optional[str]:
-    """获取 Cookie"""
-    return redis_client.get(COOKIE_KEY)
-
-
 # ============ 运行期配置缓存 ============
 
 def set_runtime_config(config: Dict[str, Any]) -> None:

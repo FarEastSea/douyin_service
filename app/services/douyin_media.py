@@ -86,7 +86,11 @@ def build_douyin_media_engine(
     cookie: str,
     filepath: str | None = None,
     runtime_config: dict[str, Any] | None = None,
+    request_context: Any = None,
 ) -> DouyinMediaEngine:
     return RequestsDouyinMediaEngine(
-        DouyinDownloader(cookie, filepath, runtime_config=runtime_config)
+        DouyinDownloader(
+            cookie, filepath, runtime_config=runtime_config,
+            request_context=request_context,
+        )
     )

@@ -314,5 +314,9 @@ def build_douyin_source(
     cookie: str,
     filepath: str | None = None,
     runtime_config: dict[str, Any] | None = None,
+    request_context: Any = None,
 ) -> DouyinSource:
-    return DouyinWebAdapter(DouyinDownloader(cookie, filepath, runtime_config=runtime_config))
+    return DouyinWebAdapter(DouyinDownloader(
+        cookie, filepath, runtime_config=runtime_config,
+        request_context=request_context,
+    ))

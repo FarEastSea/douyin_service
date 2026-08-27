@@ -24,7 +24,8 @@ from app.models.schemas import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core import updater
-from app.services.douyin_cookie import get_cookie_value, require_douyin_uifid
+from app.services.douyin_cookie import require_douyin_uifid
+from app.services.douyin_account import get_account_status, save_account_profile
 from app.services.douyin_errors import douyin_error_type_label, localize_douyin_reason
 from app.core.env_config import (
     ENV_FIELDS,
@@ -75,6 +76,13 @@ class NotificationTestRequest(BaseModel):
     channel: Literal["all", "webhook", "bark", "email", "gotify"] = "all"
 
 
+class DouyinAccountUpdate(BaseModel):
+    cookie: Optional[str] = None
+    user_agent: Optional[str] = None
+    proxy_enabled: Optional[bool] = None
+    proxy_url: Optional[str] = None
+
+
 # ============ Cookie 配置 ============
 
 @router.post("/config/cookie", response_model=MessageResponse)
@@ -84,60 +92,59 @@ async def update_cookie(
 ):
     """更新抖音 Cookie"""
     try:
-        require_douyin_uifid(request.cookie)
+        status = await save_account_profile(
+            db, cookie=request.cookie, user_agent=None,
+            proxy_enabled=None, proxy_url=None,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    # 存储到数据库（持久化）
-    result = await db.execute(
-        select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
+    return MessageResponse(
+        success=True,
+        message="Cookie 已加密保存并绑定到默认请求上下文",
+        data=status,
     )
-    config = result.scalar_one_or_none()
-    
-    if config:
-        config.value = request.cookie
-    else:
-        config = SystemConfig(key="douyin_cookie", value=request.cookie)
-        db.add(config)
-
-    try:
-        await db.flush()
-        await asyncio.to_thread(write_env_updates, {"DOUYIN_COOKIE": request.cookie})
-        await db.commit()
-    except ValueError as e:
-        await db.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        await db.rollback()
-        raise
-
-    # 网页保存值优先，并同步到快速缓存。
-    await asyncio.to_thread(redis_client.set_cookie, request.cookie)
-    await asyncio.to_thread(redis_client.clear_douyin_risk_state)
-
-    return MessageResponse(success=True, message="Cookie 已更新，浏览器身份标识校验通过")
 
 
 @router.get("/config/cookie", response_model=MessageResponse)
 async def get_cookie_status(db: AsyncSession = Depends(get_async_db)):
     """检查 Cookie 是否已配置"""
-    cookie = await asyncio.to_thread(redis_client.get_cookie)
-    
-    if not cookie:
-        result = await db.execute(
-            select(SystemConfig).where(SystemConfig.key == "douyin_cookie")
-        )
-        config = result.scalar_one_or_none()
-        cookie = config.value if config else None
-    if not cookie:
-        cookie = (await asyncio.to_thread(settings.snapshot)).DOUYIN_COOKIE
-    
-    has_uifid = bool(get_cookie_value(cookie or "", "UIFID"))
+    status = await get_account_status(db)
     return MessageResponse(
-        success=bool(cookie) and has_uifid,
-        message=("Cookie 已配置且包含 UIFID" if has_uifid else (
-            "Cookie 已配置，但缺少 UIFID" if cookie else "Cookie 未配置"
-        )),
-        data={"configured": bool(cookie), "has_uifid": has_uifid}
+        success=bool(status.get("configured")) and bool(status.get("has_uifid")),
+        message=status.get("status_label") or "未配置",
+        data=status,
+    )
+
+
+@router.get("/config/douyin-account")
+async def get_douyin_account(db: AsyncSession = Depends(get_async_db)):
+    return {"success": True, "account": await get_account_status(db)}
+
+
+@router.post("/config/douyin-account", response_model=MessageResponse)
+async def update_douyin_account(
+    request: DouyinAccountUpdate,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        status = await save_account_profile(
+            db,
+            cookie=request.cookie,
+            user_agent=request.user_agent,
+            proxy_enabled=request.proxy_enabled,
+            proxy_url=request.proxy_url,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info", "system", "抖音账号请求上下文已更新",
+        f"proxy_enabled={status.get('proxy_enabled')}, status={status.get('status')}",
+    )
+    return MessageResponse(
+        success=True,
+        message="账号请求上下文已加密保存，下次请求动态生效",
+        data=status,
     )
 
 
@@ -181,6 +188,9 @@ async def get_douyin_risk_state():
             normalized_error_type, state.get("reason")
         ),
         "requires_cookie_update": normalized_error_type == "browser_identity_missing",
+        "requires_account_update": normalized_error_type in {
+            "account_isolated", "browser_identity_missing",
+        },
     }
 
 
@@ -277,7 +287,10 @@ async def save_complete_settings(
         if runtime_updates:
             await persist_runtime_config(db, runtime_updates)
 
-        environment_updates = {key: value for key, value in updates.items() if key not in runtime_by_env}
+        environment_updates = {
+            key: value for key, value in updates.items()
+            if key not in runtime_by_env and key != "DOUYIN_COOKIE"
+        }
         if environment_updates:
             await asyncio.to_thread(write_env_updates, environment_updates)
         legacy_douyin = current.get("DOWNLOAD_DIR")
@@ -304,7 +317,7 @@ async def save_complete_settings(
                 new_x_download_dir=new_x,
             )
 
-        cookie_keys = {"DOUYIN_COOKIE": "douyin_cookie", "X_COOKIE": "x_cookie"}
+        cookie_keys = {"X_COOKIE": "x_cookie"}
         for env_key, config_key in cookie_keys.items():
             value = updates.get(env_key)
             if value == "********":
@@ -328,8 +341,10 @@ async def save_complete_settings(
 
     douyin_cookie = updates.get("DOUYIN_COOKIE")
     if douyin_cookie and douyin_cookie != "********":
-        await asyncio.to_thread(redis_client.set_cookie, str(douyin_cookie).strip())
-        await asyncio.to_thread(redis_client.clear_douyin_risk_state)
+        await save_account_profile(
+            db, cookie=str(douyin_cookie).strip(), user_agent=None,
+            proxy_enabled=None, proxy_url=None,
+        )
     x_cookie = updates.get("X_COOKIE")
     if x_cookie and x_cookie != "********":
         await asyncio.to_thread(redis_client.set_x_cookie, str(x_cookie).strip())

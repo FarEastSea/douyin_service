@@ -40,6 +40,7 @@ from app.services.media_paths import resolve_media_path
 from app.services.download_task_factory import ensure_download_task_async
 from app.services.work_manager import recalc_author_counts
 from app.services.work_metadata import apply_work_payload
+from app.services.douyin_account import get_request_context
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -222,9 +223,7 @@ async def create_download_task(
     try:
         await _raise_if_douyin_cooling()
         current_settings = await asyncio.to_thread(settings.snapshot)
-        cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
-        if not cookie:
-            raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
+        request_context = await get_request_context(db)
         
         # 检查 Celery Worker 是否在线
         try:
@@ -244,7 +243,8 @@ async def create_download_task(
 
         runtime_config = await get_runtime_config(db)
         source = build_douyin_source(
-            cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            request_context.cookie, current_settings.DOWNLOAD_DIR,
+            runtime_config=runtime_config, request_context=request_context,
         )
 
         url_info = await asyncio.to_thread(source.resolve_input, request.share_url)
@@ -989,15 +989,14 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
     # 刷新下载链接
     try:
         current_settings = await asyncio.to_thread(settings.snapshot)
-        cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
-        if not cookie:
-            raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
+        request_context = await get_request_context(db)
 
         runtime_config = await get_runtime_config(db)
 
         def _refresh():
             source = build_douyin_source(
-                cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+                request_context.cookie, current_settings.DOWNLOAD_DIR,
+                runtime_config=runtime_config, request_context=request_context,
             )
             return source.refresh_assets(work.aweme_id)
 
@@ -1047,15 +1046,14 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
         return MessageResponse(success=True, message="没有失败的任务需要重试", data={"count": 0})
 
     current_settings = await asyncio.to_thread(settings.snapshot)
-    cookie = await asyncio.to_thread(redis_client.get_cookie) or current_settings.DOUYIN_COOKIE
-    if not cookie:
-        raise HTTPException(status_code=400, detail="请先配置抖音 Cookie")
+    request_context = await get_request_context(db)
 
     runtime_config = await get_runtime_config(db)
 
     def _create_source():
         return build_douyin_source(
-            cookie, current_settings.DOWNLOAD_DIR, runtime_config=runtime_config
+            request_context.cookie, current_settings.DOWNLOAD_DIR,
+            runtime_config=runtime_config, request_context=request_context,
         )
     source = await asyncio.to_thread(_create_source)
 
@@ -1086,7 +1084,7 @@ async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
                     work.live_photo_urls = live_photo_urls
             refreshed_works[wid] = True
         except DouyinRequestError as exc:
-            if exc.code in {"argus_blocked", "rate_limited"}:
+            if exc.code in {"account_isolated", "browser_identity_missing", "cookie_invalid", "argus_blocked", "rate_limited"}:
                 raise HTTPException(status_code=http_status_for_douyin_error(exc), detail=exc.as_dict())
             refreshed_works[wid] = False
         except Exception:

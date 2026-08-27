@@ -14,6 +14,7 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redi
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 import os
+import asyncio
 
 from app.api import bootstrap
 from app.core.diagnostics import get_runtime_errors
@@ -32,6 +33,7 @@ if not BOOTSTRAP_MODE:
         from app.core.config import settings, ensure_download_dir
         from app.core.process_manager import process_manager
         from app.api import tasks, authors, system, x_tasks, works
+        from app.services.douyin_account import migrate_legacy_account_sync
         config_errors = get_runtime_errors()
         if config_errors:
             BOOTSTRAP_MODE = True
@@ -75,7 +77,10 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     try:
         await init_db()
+        migrated_account = await asyncio.to_thread(migrate_legacy_account_sync)
         print("✅ 数据库初始化完成")
+        if migrated_account:
+            print("✅ 旧抖音 Cookie 已迁移到加密账号档案")
     except Exception as e:
         BOOTSTRAP_STATUS["ready"] = False
         BOOTSTRAP_STATUS.setdefault("errors", []).append({

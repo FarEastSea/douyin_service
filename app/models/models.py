@@ -415,12 +415,35 @@ class XMediaAsset(Base):
 
 
 class SystemConfig(Base):
-    """系统配置表 - 存储 Cookie 等配置"""
+    """非敏感运行配置与任务状态；平台凭据使用独立密文模型。"""
     __tablename__ = "system_config"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     key = Column(String(64), unique=True, nullable=False)
     value = Column(Text)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class DouyinAccountProfile(Base):
+    """单一、低并发的抖音请求上下文；敏感值只保存密文。"""
+    __tablename__ = "douyin_account_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), default="默认账号", nullable=False)
+    encrypted_cookie = Column(Text, nullable=False)
+    encrypted_proxy_url = Column(Text)
+    cookie_fingerprint = Column(String(16), nullable=False)
+    uifid_fingerprint = Column(String(16))
+    user_agent = Column(Text, nullable=False)
+    proxy_enabled = Column(Boolean, default=False, nullable=False)
+    status = Column(String(32), default="unknown", nullable=False, index=True)
+    isolation_reason = Column(String(64))
+    consecutive_failures = Column(Integer, default=0, nullable=False)
+    last_success_at = Column(DateTime)
+    last_failure_at = Column(DateTime)
+    last_failure_code = Column(String(64))
+    last_checked_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 

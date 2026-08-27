@@ -17,6 +17,12 @@ class DouyinErrorInfo:
 
 
 ERROR_INFO = {
+    "account_isolated": DouyinErrorInfo(
+        "account_isolated", "authentication",
+        "抖音账号请求上下文已被自动隔离。",
+        "请在设置中心检查并重新保存 Cookie、User-Agent 与代理配置后重试。",
+        False,
+    ),
     "browser_identity_missing": DouyinErrorInfo(
         "browser_identity_missing", "authentication",
         "抖音请求缺少浏览器身份标识，系统已停止继续请求。",
@@ -79,7 +85,7 @@ class DouyinRequestError(ValueError):
 class DouyinCooldownError(DouyinRequestError):
     def __init__(self, *, retry_after: int, reason: str = "argus_blocked") -> None:
         code = reason if reason in {
-            "browser_identity_missing", "argus_blocked", "rate_limited",
+            "account_isolated", "browser_identity_missing", "argus_blocked", "rate_limited",
         } else "argus_blocked"
         super().__init__(code, detail="global cooldown active", retry_after=retry_after)
 
@@ -191,7 +197,7 @@ def classify_stored_task_error(value: Optional[str]) -> dict[str, Any]:
 def http_status_for_douyin_error(exc: DouyinRequestError) -> int:
     if exc.code in {"argus_blocked", "rate_limited"}:
         return 429
-    if exc.code in {"browser_identity_missing", "cookie_invalid"}:
+    if exc.code in {"account_isolated", "browser_identity_missing", "cookie_invalid"}:
         return 401
     if exc.code == "content_unavailable":
         return 404
@@ -202,15 +208,21 @@ def http_status_for_douyin_error(exc: DouyinRequestError) -> int:
 
 def douyin_error_type_label(code: Optional[str]) -> str:
     return {
+        "account_isolated": "抖音账号已隔离",
+        "credential_decryption_failed": "账号密钥无法解密",
         "browser_identity_missing": "浏览器身份信息缺失",
         "argus_blocked": "抖音安全校验拦截",
         "rate_limited": "抖音请求频率受限",
+        "cookie_invalid": "抖音登录状态失效",
+        "network_error": "抖音网络请求异常",
         "cookie_invalid": "抖音登录状态失效",
     }.get(str(code or ""), "抖音请求保护")
 
 
 def localize_douyin_reason(code: Optional[str], reason: Optional[str]) -> str:
     lowered = str(reason or "").lower()
+    if code == "account_isolated":
+        return "账号请求上下文连续异常，系统已停止使用该账号，等待在设置中心重新保存。"
     if code == "browser_identity_missing" or "uifid not found" in lowered:
         return "请求缺少或未识别 UIFID 浏览器身份标识，抖音安全校验拒绝了本次请求。"
     if code == "argus_blocked" or "argussecurityplugin" in lowered:

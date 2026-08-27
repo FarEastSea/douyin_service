@@ -31,7 +31,7 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   let payload: any = {}
   try { payload = text ? JSON.parse(text) : {} } catch { payload = { message: text } }
   if (!response.ok) {
-    const businessAuthError = ['browser_identity_missing', 'cookie_invalid'].includes(String(payload.code || ''))
+    const businessAuthError = ['account_isolated', 'browser_identity_missing', 'cookie_invalid'].includes(String(payload.code || ''))
     if (response.status === 401 && !businessAuthError) window.dispatchEvent(new CustomEvent('app:auth-required'))
     throw new ApiError(payload.message || payload.detail || `请求失败 (${response.status})`, response.status, payload)
   }

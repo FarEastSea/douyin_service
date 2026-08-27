@@ -14,7 +14,7 @@ function format(seconds: number) {
 async function copy() {
   await navigator.clipboard.writeText([
     `错误类型：${riskTypeLabel(store.risk.error_type, store.risk.error_type_label)}`,
-    store.risk.requires_cookie_update ? '恢复条件：更新包含 UIFID 的完整抖音 Cookie' : `剩余冷却：${store.risk.retry_after} 秒`,
+    store.risk.requires_account_update ? '恢复条件：在设置中心重新保存抖音账号请求上下文' : `剩余冷却：${store.risk.retry_after} 秒`,
     `最近触发：${store.risk.last_seen_at || '未知'}`,
     `原因：${riskReasonLabel(store.risk.error_type, store.risk.reason, store.risk.reason_label)}`,
   ].join('\n'))
@@ -26,9 +26,9 @@ async function copy() {
   <Transition name="slide">
     <section v-if="store.risk.active" class="risk-banner" role="status">
       <AlertTriangle :size="20" />
-      <div><strong>{{ store.risk.requires_cookie_update ? '抖音 Cookie 身份信息不完整' : '抖音接口保护性冷却中' }}</strong><span>{{ store.risk.requires_cookie_update ? '系统已停止新的抖音业务请求，请更新包含 UIFID 的完整 Cookie。' : '系统已停止新的抖音业务请求，已有直链下载与 X 功能不受影响。' }}</span></div>
-      <time>{{ store.risk.requires_cookie_update ? '等待更新 Cookie' : format(store.risk.retry_after) }}</time>
-      <button class="btn ghost compact" @click="router.push('/douyin/settings?tab=account')"><Settings2 :size="15" />更新 Cookie</button>
+      <div><strong>{{ store.risk.requires_account_update ? '抖音账号请求上下文不可用' : '抖音接口保护性冷却中' }}</strong><span>{{ store.risk.requires_account_update ? '系统已隔离该账号，请检查 Cookie、User-Agent 与代理后重新保存。' : '系统已停止新的抖音业务请求，已有直链下载与 X 功能不受影响。' }}</span></div>
+      <time>{{ store.risk.requires_account_update ? '等待更新账号档案' : format(store.risk.retry_after) }}</time>
+      <button class="btn ghost compact" @click="router.push('/douyin/settings?tab=account')"><Settings2 :size="15" />更新账号</button>
       <button class="btn ghost compact" @click="copy"><Clipboard :size="15" />复制诊断</button>
     </section>
   </Transition>

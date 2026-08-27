@@ -40,6 +40,7 @@ htmlcov/
 !env.example.txt
 logs/
 log/
+.runtime/
 downloads/
 celerybeat-schedule
 celerybeat.pid

@@ -8,11 +8,12 @@ VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
 APP_PORT="${APP_PORT:-15000}"
 RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_DIR}"
 LOG_DIR="${RUNTIME_DIR}/logs"
+STATE_DIR="${PROJECT_DIR}/.runtime"
 PID_FILE="${LOG_DIR}/gunicorn.pid"
 GUNICORN_BIN="${VENV_DIR}/bin/gunicorn"
 
 cd "$PROJECT_DIR"
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$STATE_DIR"
 
 if [ -f "${VENV_DIR}/bin/activate" ]; then
     # shellcheck disable=SC1091
@@ -36,7 +37,7 @@ fi
 GUNICORN_USER_ARGS=()
 if [ "$(id -u)" -eq 0 ] && id www >/dev/null 2>&1; then
     RUNTIME_GROUP="$(id -gn www)"
-    chown -R "www:${RUNTIME_GROUP}" "$LOG_DIR"
+    chown -R "www:${RUNTIME_GROUP}" "$LOG_DIR" "$STATE_DIR"
     GUNICORN_USER_ARGS=(--user www --group "$RUNTIME_GROUP")
 fi
 
