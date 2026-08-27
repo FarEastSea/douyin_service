@@ -129,6 +129,7 @@ class ProcessManager:
                 self._python, "-m", "celery",
                 "-A", "app.tasks.celery_app", "beat",
                 f"--pidfile={os.path.join(self._project_dir, 'logs', 'celery_beat.pid')}",
+                f"--schedule={os.path.join(self._project_dir, 'logs', 'celerybeat-schedule')}",
                 "--loglevel=info",
             ]
 

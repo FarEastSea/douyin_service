@@ -4,7 +4,7 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
-        timeout(time: 20, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES')
         timestamps()
     }
 
@@ -14,6 +14,7 @@ pipeline {
         REMOTE_USER = credentials('douyin-remote-user')
         REMOTE_SERVICE_DIR = credentials('douyin-remote-service-dir')
         DEPLOY_BRANCH = 'main'
+        RELEASE_RETENTION = '5'
         TZ = 'Asia/Shanghai'
     }
 
@@ -43,10 +44,11 @@ pipeline {
                         ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 \
                             -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new \
                             -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" \
-                            bash -s -- "$REMOTE_SERVICE_DIR" "$DEPLOY_BRANCH" <<'REMOTE_SCRIPT'
+                            bash -s -- "$REMOTE_SERVICE_DIR" "$DEPLOY_BRANCH" "$RELEASE_RETENTION" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 SERVICE_DIR="$1"
 BRANCH="$2"
+RETENTION="$3"
 cd "$SERVICE_DIR"
 
 git fetch origin "$BRANCH"
@@ -59,6 +61,7 @@ chmod 700 "$TEMP_DEPLOY"
 PROJECT_DIR_OVERRIDE="$SERVICE_DIR" \
 DEPLOY_BRANCH="$BRANCH" \
 DEPLOY_TARGET_SHA="$TARGET_SHA" \
+RELEASE_RETENTION="$RETENTION" \
     "$TEMP_DEPLOY"
 REMOTE_SCRIPT
                     '''
@@ -69,10 +72,10 @@ REMOTE_SCRIPT
 
     post {
         success {
-            echo 'Deploy and dependency readiness checks succeeded.'
+            echo 'Atomic release, dependency readiness, and smoke checks succeeded.'
         }
         failure {
-            echo 'Deploy failed. Review the stage log; deploy.sh rolls back after a code switch failure.'
+            echo 'Deploy failed. Review the stage log; deploy.sh keeps the previous release active or rolls back after a switch.'
         }
     }
 }

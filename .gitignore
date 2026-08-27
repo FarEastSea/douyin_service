@@ -44,6 +44,8 @@ downloads/
 celerybeat-schedule
 celerybeat.pid
 .deploy_backup/
+.current
+.releases/
 
 # Local secrets and credentials
 *.pem

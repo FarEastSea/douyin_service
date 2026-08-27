@@ -6,7 +6,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
 APP_PORT="${APP_PORT:-15000}"
-LOG_DIR="${PROJECT_DIR}/logs"
+RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_DIR}"
+LOG_DIR="${RUNTIME_DIR}/logs"
 PID_FILE="${LOG_DIR}/gunicorn.pid"
 
 cd "$PROJECT_DIR"
