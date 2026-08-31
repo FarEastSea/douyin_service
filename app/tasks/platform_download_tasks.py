@@ -19,6 +19,7 @@ from app.services.platform_profile_download import (
     cleanup_platform_cookie_file,
     get_profile_platform_spec,
     materialize_platform_cookie_file,
+    profile_storage_key,
 )
 from app.services.platform_task_service import (
     finalize_platform_task,
@@ -120,7 +121,7 @@ def download_platform_profile(self, task_id: int):
         if task.status == "cancelled":
             return {"success": False, "cancelled": True}
 
-        task.download_dir = str(Path(spec.download_root()) / task.source_key)
+        task.download_dir = str(Path(spec.download_root()) / profile_storage_key(task.source_key))
         existing_paths = set(db.execute(
             select(PlatformMediaAsset.file_path).where(
                 PlatformMediaAsset.task_id == task.id

@@ -151,6 +151,14 @@ def _classify_input(platform_id: str, path: str) -> PlatformInputKind:
             return "work"
         if normalized_path.startswith("/@"):
             return "author"
+    elif platform_id == "weibo":
+        segments = [item for item in normalized_path.split("/") if item]
+        if segments and segments[0] in {"detail", "status"}:
+            return "work"
+        if len(segments) >= 2 and segments[0].isdigit():
+            return "work"
+        if segments:
+            return "author"
     return "unknown"
 
 
@@ -197,6 +205,17 @@ platform_registry = _build_registry((
         route_prefix="/tiktok",
         icon_text="T",
         domains=("tiktok.com",),
+        capabilities=PlatformCapabilities(
+            profile_download=True,
+        ),
+    ),
+    PlatformDefinition(
+        id="weibo",
+        name="微博",
+        short_name="微博",
+        route_prefix="/weibo",
+        icon_text="微",
+        domains=("weibo.com", "weibo.cn"),
         capabilities=PlatformCapabilities(
             profile_download=True,
         ),

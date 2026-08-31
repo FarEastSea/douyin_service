@@ -28,6 +28,7 @@ _LOCAL_CONFIG_LOCK = RLock()
 _DOWNLOAD_PATH_ENV_KEYS = {
     "DOWNLOAD_ROOT", "DOWNLOAD_DIR", "X_DOWNLOAD_DIR",
     "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR",
+    "WEIBO_DOWNLOAD_SUBDIR",
 }
 
 
@@ -50,6 +51,7 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="DOUYIN_DOWNLOAD_SUBDIR", label="抖音子目录", group="下载目录", default="douyin", required=True, help="根目录下的相对子目录"),
     EnvField(key="X_DOWNLOAD_SUBDIR", label="X 子目录", group="下载目录", default="X", required=True, help="根目录下的相对子目录"),
     EnvField(key="TIKTOK_DOWNLOAD_SUBDIR", label="TikTok 子目录", group="下载目录", default="TikTok", help="根目录下的相对子目录"),
+    EnvField(key="WEIBO_DOWNLOAD_SUBDIR", label="微博子目录", group="下载目录", default="Weibo", help="根目录下的相对子目录"),
     EnvField(key="DB_TYPE", label="数据库类型", group="数据库", default="postgresql", required=True),
     EnvField(key="DB_HOST", label="数据库主机", group="数据库", default="localhost", required=True),
     EnvField(key="DB_PORT", label="数据库端口", group="数据库", default="5432", required=True),
@@ -110,6 +112,9 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="TIKTOK_DOWNLOAD_ENGINE", label="TikTok 下载引擎", group="TikTok", default="gallery-dl"),
     EnvField(key="TIKTOK_COOKIE", label="TikTok Cookie", group="TikTok", default="", secret=True),
     EnvField(key="TIKTOK_COOKIE_FILE", label="TikTok Cookie 文件", group="TikTok", default=""),
+    EnvField(key="WEIBO_DOWNLOAD_ENGINE", label="微博下载引擎", group="微博", default="gallery-dl"),
+    EnvField(key="WEIBO_COOKIE", label="微博 Cookie", group="微博", default="", secret=True),
+    EnvField(key="WEIBO_COOKIE_FILE", label="微博 Cookie 文件", group="微博", default=""),
 ]
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
@@ -267,7 +272,10 @@ def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]
     elif not os.access(root, os.R_OK | os.W_OK | os.X_OK):
         message = "下载根目录不可访问或不可写，请检查目录权限"
     else:
-        for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR"):
+        for key in (
+            "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR",
+            "TIKTOK_DOWNLOAD_SUBDIR", "WEIBO_DOWNLOAD_SUBDIR",
+        ):
             value = str(values.get(key) or "").strip()
             if not value:
                 continue

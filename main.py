@@ -150,6 +150,7 @@ app = FastAPI(
 - 🔔 作者订阅，自动检查新作品
 - 🐦 X/Twitter 媒体下载（gallery-dl）
 - 🌍 TikTok 用户主页媒体下载（gallery-dl）
+- 🔴 微博用户主页媒体下载（gallery-dl）
 
 ## API 文档
 

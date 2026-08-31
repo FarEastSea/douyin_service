@@ -69,8 +69,7 @@ async def migrate_download_paths(
     new_download_dir: str,
     old_x_download_dir: str,
     new_x_download_dir: str,
-    old_tiktok_download_dir: str,
-    new_tiktok_download_dir: str,
+    platform_download_dirs: dict[str, tuple[str, str]],
 ) -> dict:
     """同步迁移所有已存在任务、历史记录和各平台任务中的持久化路径。"""
     changed = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0}
@@ -99,55 +98,58 @@ async def migrate_download_paths(
         last_id = tasks[-1].id
         await db.flush()
 
-    last_id = 0
-    while True:
-        platform_tasks = (await db.execute(
-            select(PlatformDownloadTask)
-            .where(
-                PlatformDownloadTask.platform == "tiktok",
-                PlatformDownloadTask.id > last_id,
-            )
-            .order_by(PlatformDownloadTask.id)
-            .limit(batch_size)
-        )).scalars().all()
-        if not platform_tasks:
-            break
-        for task in platform_tasks:
-            download_dir, path_unresolved = _rebase_path_result(
-                task.download_dir, old_tiktok_download_dir, new_tiktok_download_dir
-            )
-            if path_unresolved:
-                unresolved["platform_tasks"] += 1
-            if download_dir != task.download_dir:
-                task.download_dir = download_dir
-                changed["platform_tasks"] += 1
-        last_id = platform_tasks[-1].id
-        await db.flush()
+    for platform, (old_root, new_root) in platform_download_dirs.items():
+        if old_root == new_root:
+            continue
+        last_id = 0
+        while True:
+            platform_tasks = (await db.execute(
+                select(PlatformDownloadTask)
+                .where(
+                    PlatformDownloadTask.platform == platform,
+                    PlatformDownloadTask.id > last_id,
+                )
+                .order_by(PlatformDownloadTask.id)
+                .limit(batch_size)
+            )).scalars().all()
+            if not platform_tasks:
+                break
+            for task in platform_tasks:
+                download_dir, path_unresolved = _rebase_path_result(
+                    task.download_dir, old_root, new_root
+                )
+                if path_unresolved:
+                    unresolved["platform_tasks"] += 1
+                if download_dir != task.download_dir:
+                    task.download_dir = download_dir
+                    changed["platform_tasks"] += 1
+            last_id = platform_tasks[-1].id
+            await db.flush()
 
-    last_id = 0
-    while True:
-        platform_media = (await db.execute(
-            select(PlatformMediaAsset)
-            .where(
-                PlatformMediaAsset.platform == "tiktok",
-                PlatformMediaAsset.id > last_id,
-            )
-            .order_by(PlatformMediaAsset.id)
-            .limit(batch_size)
-        )).scalars().all()
-        if not platform_media:
-            break
-        for asset in platform_media:
-            file_path, path_unresolved = _rebase_path_result(
-                asset.file_path, old_tiktok_download_dir, new_tiktok_download_dir
-            )
-            if path_unresolved:
-                unresolved["platform_media"] += 1
-            if file_path != asset.file_path:
-                asset.file_path = file_path
-                changed["platform_media"] += 1
-        last_id = platform_media[-1].id
-        await db.flush()
+        last_id = 0
+        while True:
+            platform_media = (await db.execute(
+                select(PlatformMediaAsset)
+                .where(
+                    PlatformMediaAsset.platform == platform,
+                    PlatformMediaAsset.id > last_id,
+                )
+                .order_by(PlatformMediaAsset.id)
+                .limit(batch_size)
+            )).scalars().all()
+            if not platform_media:
+                break
+            for asset in platform_media:
+                file_path, path_unresolved = _rebase_path_result(
+                    asset.file_path, old_root, new_root
+                )
+                if path_unresolved:
+                    unresolved["platform_media"] += 1
+                if file_path != asset.file_path:
+                    asset.file_path = file_path
+                    changed["platform_media"] += 1
+            last_id = platform_media[-1].id
+            await db.flush()
 
     last_id = 0
     while True:

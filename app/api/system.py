@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.core import updater
 from app.services.douyin_cookie import require_douyin_uifid
 from app.services.platform_credentials import save_platform_cookie
+from app.services.platform_profile_download import PROFILE_PLATFORM_SPECS
 from app.services.douyin_account import get_account_status, save_account_profile
 from app.services.douyin_errors import douyin_error_type_label, localize_douyin_reason
 from app.core.env_config import (
@@ -51,6 +52,18 @@ from app.services.notifications import send_notification
 from app.services.archive_rules import get_archive_rules, save_archive_rules
 
 router = APIRouter(tags=["系统管理"])
+
+GENERIC_PLATFORM_CONFIG = {
+    platform: (
+        spec.download_subdir_env_key,
+        spec.default_download_subdir,
+        spec.cookie_env_key,
+    )
+    for platform, spec in PROFILE_PLATFORM_SPECS.items()
+}
+GENERIC_PLATFORM_COOKIE_KEYS = {
+    cookie_key for _, _, cookie_key in GENERIC_PLATFORM_CONFIG.values()
+}
 
 
 class RuntimeConfigUpdate(BaseModel):
@@ -288,7 +301,10 @@ async def save_complete_settings(
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     current = await asyncio.to_thread(read_env_file)
-    for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR"):
+    platform_subdir_keys = tuple(
+        item[0] for item in GENERIC_PLATFORM_CONFIG.values()
+    )
+    for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", *platform_subdir_keys):
         if key not in updates:
             continue
         subdir = Path(str(updates[key]).strip())
@@ -327,7 +343,8 @@ async def save_complete_settings(
 
         environment_updates = {
             key: value for key, value in updates.items()
-            if key not in runtime_by_env and key not in {"DOUYIN_COOKIE", "TIKTOK_COOKIE"}
+            if key not in runtime_by_env
+            and key not in {"DOUYIN_COOKIE", *GENERIC_PLATFORM_COOKIE_KEYS}
         }
         if environment_updates:
             await asyncio.to_thread(write_env_updates, environment_updates)
@@ -335,11 +352,18 @@ async def save_complete_settings(
         old_root = current.get("DOWNLOAD_ROOT") or (str(Path(legacy_douyin).parent) if legacy_douyin else "/downloads")
         old_douyin = legacy_douyin or str(Path(old_root) / current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))
         old_x = current.get("X_DOWNLOAD_DIR") or str(Path(old_root) / current.get("X_DOWNLOAD_SUBDIR", "X"))
-        old_tiktok = str(Path(old_root) / current.get("TIKTOK_DOWNLOAD_SUBDIR", "TikTok"))
         new_root = str(updates.get("DOWNLOAD_ROOT", old_root))
         new_douyin = str(Path(new_root) / str(updates.get("DOUYIN_DOWNLOAD_SUBDIR", current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))))
         new_x = str(Path(new_root) / str(updates.get("X_DOWNLOAD_SUBDIR", current.get("X_DOWNLOAD_SUBDIR", "X"))))
-        new_tiktok = str(Path(new_root) / str(updates.get("TIKTOK_DOWNLOAD_SUBDIR", current.get("TIKTOK_DOWNLOAD_SUBDIR", "TikTok"))))
+        platform_download_dirs = {
+            platform: (
+                str(Path(old_root) / current.get(subdir_key, default_subdir)),
+                str(Path(new_root) / str(updates.get(
+                    subdir_key, current.get(subdir_key, default_subdir)
+                ))),
+            )
+            for platform, (subdir_key, default_subdir, _) in GENERIC_PLATFORM_CONFIG.items()
+        }
         path_changes = {
             "tasks": 0,
             "history": 0,
@@ -350,15 +374,18 @@ async def save_complete_settings(
             "unresolved": {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0},
             "unresolved_total": 0,
         }
-        if old_douyin != new_douyin or old_x != new_x or old_tiktok != new_tiktok:
+        if (
+            old_douyin != new_douyin
+            or old_x != new_x
+            or any(old != new for old, new in platform_download_dirs.values())
+        ):
             path_changes = await migrate_download_paths(
                 db,
                 old_download_dir=old_douyin,
                 new_download_dir=new_douyin,
                 old_x_download_dir=old_x,
                 new_x_download_dir=new_x,
-                old_tiktok_download_dir=old_tiktok,
-                new_tiktok_download_dir=new_tiktok,
+                platform_download_dirs=platform_download_dirs,
             )
 
         cookie_keys = {"X_COOKIE": "x_cookie"}
@@ -392,9 +419,10 @@ async def save_complete_settings(
     x_cookie = updates.get("X_COOKIE")
     if x_cookie and x_cookie != "********":
         await asyncio.to_thread(redis_client.set_x_cookie, str(x_cookie).strip())
-    tiktok_cookie = updates.get("TIKTOK_COOKIE")
-    if tiktok_cookie and tiktok_cookie != "********":
-        await save_platform_cookie(db, "tiktok", str(tiktok_cookie).strip())
+    for platform, (_, _, cookie_key) in GENERIC_PLATFORM_CONFIG.items():
+        cookie = updates.get(cookie_key)
+        if cookie and cookie != "********":
+            await save_platform_cookie(db, platform, str(cookie).strip())
 
     await asyncio.to_thread(
         redis_client.append_activity_log,
@@ -409,6 +437,7 @@ async def save_complete_settings(
         "DOUYIN_DOWNLOAD_SUBDIR",
         "X_DOWNLOAD_SUBDIR",
         "TIKTOK_DOWNLOAD_SUBDIR",
+        "WEIBO_DOWNLOAD_SUBDIR",
         "DB_TYPE",
         "DB_HOST",
         "DB_PORT",
@@ -423,6 +452,8 @@ async def save_complete_settings(
         "X_COOKIE_FILE",
         "TIKTOK_DOWNLOAD_ENGINE",
         "TIKTOK_COOKIE_FILE",
+        "WEIBO_DOWNLOAD_ENGINE",
+        "WEIBO_COOKIE_FILE",
         "X_TASK_LOG_MAX_LINES",
         "X_TASK_LOG_TTL_SECONDS",
         "X_TASK_STATE_TTL_SECONDS",
@@ -433,7 +464,7 @@ async def save_complete_settings(
         and key not in {
             "DOUYIN_COOKIE",
             "X_COOKIE",
-            "TIKTOK_COOKIE",
+            *GENERIC_PLATFORM_COOKIE_KEYS,
             "ADMIN_TOKEN",
             "CORS_ALLOWED_ORIGINS",
             *hot_reload_keys,

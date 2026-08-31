@@ -22,6 +22,8 @@ export const router = createRouter({
     { path: '/x/settings', component: SettingsView },
     { path: '/tiktok/tasks', component: PlatformTasksView, props: { platform: 'tiktok' } },
     { path: '/tiktok/settings', component: SettingsView },
+    { path: '/weibo/tasks', component: PlatformTasksView, props: { platform: 'weibo' } },
+    { path: '/weibo/settings', component: SettingsView },
     { path: '/:pathMatch(.*)*', redirect: '/douyin/tasks' },
   ],
 })

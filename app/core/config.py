@@ -38,6 +38,7 @@ class Settings(BaseModel):
     DOUYIN_DOWNLOAD_SUBDIR: str = "douyin"
     X_DOWNLOAD_SUBDIR: str = "X"
     TIKTOK_DOWNLOAD_SUBDIR: str = "TikTok"
+    WEIBO_DOWNLOAD_SUBDIR: str = "Weibo"
 
     @cached_property
     def DOWNLOAD_DIR(self) -> str:
@@ -161,6 +162,13 @@ class Settings(BaseModel):
     TIKTOK_DOWNLOAD_ENGINE: str = "gallery-dl"
     TIKTOK_COOKIE: Optional[str] = None
     TIKTOK_COOKIE_FILE: Optional[str] = None
+
+    @cached_property
+    def WEIBO_DOWNLOAD_DIR(self) -> str:
+        return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.WEIBO_DOWNLOAD_SUBDIR)
+    WEIBO_DOWNLOAD_ENGINE: str = "gallery-dl"
+    WEIBO_COOKIE: Optional[str] = None
+    WEIBO_COOKIE_FILE: Optional[str] = None
     
 class WebSettings:
     """动态读取网页配置，并用可跨进程失效的进程内快照加速。"""
@@ -261,6 +269,7 @@ def ensure_download_dir():
         "DOUYIN_DOWNLOAD_SUBDIR": current.DOUYIN_DOWNLOAD_SUBDIR,
         "X_DOWNLOAD_SUBDIR": current.X_DOWNLOAD_SUBDIR,
         "TIKTOK_DOWNLOAD_SUBDIR": current.TIKTOK_DOWNLOAD_SUBDIR,
+        "WEIBO_DOWNLOAD_SUBDIR": current.WEIBO_DOWNLOAD_SUBDIR,
     }
     error = env_config.check_download_directory(values)
     if error:
@@ -271,5 +280,6 @@ def ensure_download_dir():
     (root / current.DOUYIN_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.X_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.TIKTOK_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
+    (root / current.WEIBO_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     return root
 

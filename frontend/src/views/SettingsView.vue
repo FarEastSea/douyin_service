@@ -6,9 +6,10 @@ import { api, jsonBody } from '../api'
 import { useAppStore } from '../stores/app'
 import { riskTypeLabel } from '../localization'
 
+const Promise = globalThis.Promise
 const store = useAppStore(), route = useRoute()
 const tab = ref(String(route.query.tab || 'general'))
-const runtime = ref<any>({}), limits = ref<any>({}), cookieValue = ref(''), xCookieValue = ref(''), tiktokCookieValue = ref('')
+const runtime = ref<any>({}), limits = ref<any>({}), cookieValue = ref(''), xCookieValue = ref('')
 const douyinAccount = ref<any>({ user_agent: '', proxy_enabled: false }), douyinProxyValue = ref('')
 const logs = ref<any[]>([]), logLevels = ref(['info', 'warning', 'error']), live = ref(true), process = ref<any>({})
 const readiness = ref<any>({ components: {} })
@@ -24,13 +25,22 @@ const archiveRules = ref<any>({
   min_file_size_mb: 0, max_file_size_mb: 0, metadata_formats: [],
 })
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
-const accountOnlyKeys = new Set(['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE', 'TIKTOK_COOKIE', 'TIKTOK_COOKIE_FILE'])
+const managedPlatformCredentials = [
+  { id: 'tiktok', name: 'TikTok', cookieKey: 'TIKTOK_COOKIE', fileKey: 'TIKTOK_COOKIE_FILE' },
+  { id: 'weibo', name: '微博', cookieKey: 'WEIBO_COOKIE', fileKey: 'WEIBO_COOKIE_FILE' },
+]
+const platformCookieValues = ref<Record<string, string>>({})
+const platformCookieFiles = ref<Record<string, string>>({})
+const platformCredentialStatus = ref<Record<string, any>>({})
+const accountOnlyKeys = new Set([
+  'DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE',
+  ...managedPlatformCredentials.flatMap(item => [item.cookieKey, item.fileKey]),
+])
 const generalFields = computed(() => allFields.value.filter(field => !accountOnlyKeys.has(field.key)))
 const generalGroup = ref('')
 const generalGroups = computed(() => [...new Set(generalFields.value.map(field => String(field.group || '其他')))])
 const visibleGeneralFields = computed(() => generalFields.value.filter(field => String(field.group || '其他') === generalGroup.value))
 const xCookieFile = ref('')
-const tiktokCookieFile = ref('')
 const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['archive', '归档与导出'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
 const isBooleanField = (field: any) => ['true', 'false'].includes(String(field.default).toLowerCase())
 const booleanFieldValue = (field: any) => String(allValues.value[field.key]?.value).toLowerCase() === 'true'
@@ -40,13 +50,14 @@ function toggleBooleanField(field: any) { allValues.value[field.key].value = boo
 async function loadRuntime() { const data = await api<any>('/config/runtime'); runtime.value = data.config; limits.value = data.limits }
 async function loadArchiveRules() { const data = await api<any>('/config/archive-rules'); archiveRules.value = data.rules }
 async function loadDouyinAccount() { const data = await api<any>('/config/douyin-account'); douyinAccount.value = data.account || {} }
-async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || ''; tiktokCookieFile.value = data.values?.TIKTOK_COOKIE_FILE?.value || ''; if (!generalGroups.value.includes(generalGroup.value)) generalGroup.value = generalGroups.value[0] || '' }
+async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || ''; for (const item of managedPlatformCredentials) platformCookieFiles.value[item.id] = data.values?.[item.fileKey]?.value || ''; if (!generalGroups.value.includes(generalGroup.value)) generalGroup.value = generalGroups.value[0] || '' }
+async function loadPlatformCredentialStatus() { const rows = await Promise.all(managedPlatformCredentials.map(async item => [item.id, await api<any>(`/platform-downloads/${item.id}/config/cookie`)] as const)); platformCredentialStatus.value = Object.fromEntries(rows) }
 async function loadLogs(silent: boolean | Event = false) { try { logs.value = (await api<any>('/logs?start=0&count=500')).logs || [] } catch (e: any) { if (silent !== true) store.notify(e.message, 'error') } }
 async function loadProcess() { process.value = await api('/process/status') }
 async function loadReadiness() { readiness.value = await api('/status/readiness') }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
 async function init() {
-  try { await Promise.all([loadRuntime(), loadArchiveRules(), loadDouyinAccount(), loadAll(), loadProcess(), loadReadiness(), loadLogs(), loadUpdateInfo()]) }
+  try { await Promise.all([loadRuntime(), loadArchiveRules(), loadDouyinAccount(), loadPlatformCredentialStatus(), loadAll(), loadProcess(), loadReadiness(), loadLogs(), loadUpdateInfo()]) }
   catch (error: any) { store.notify(error.message || '加载设置失败', 'error') }
   if (timer.value != null) window.clearInterval(timer.value)
   timer.value = window.setInterval(() => { if (live.value && tab.value === 'logs') loadLogs(true) }, 3000)
@@ -102,15 +113,15 @@ async function saveXCookieFile() {
   try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values: { X_COOKIE_FILE: xCookieFile.value.trim() } }) }); store.notify(result.message || 'X Cookie 文件路径已保存'); await loadAll() }
   catch (error: any) { store.notify(error.message || '保存 X Cookie 文件路径失败', 'error') }
 }
-async function saveTikTokCookie() {
-  const value = tiktokCookieValue.value
+async function savePlatformCookie(platform: typeof managedPlatformCredentials[number]) {
+  const value = platformCookieValues.value[platform.id] || ''
   if (!value.trim()) return store.notify('Cookie 内容不能为空', 'error')
-  try { const result = await api<any>('/platform-downloads/tiktok/config/cookie', { method: 'POST', ...jsonBody({ cookie: value.trim() }) }); store.notify(result.message); tiktokCookieValue.value = '' }
-  catch (error: any) { store.notify(error.message || '保存 TikTok Cookie 失败', 'error') }
+  try { const result = await api<any>(`/platform-downloads/${platform.id}/config/cookie`, { method: 'POST', ...jsonBody({ cookie: value.trim() }) }); store.notify(result.message); platformCookieValues.value[platform.id] = ''; await loadPlatformCredentialStatus() }
+  catch (error: any) { store.notify(error.message || `保存 ${platform.name} Cookie 失败`, 'error') }
 }
-async function saveTikTokCookieFile() {
-  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values: { TIKTOK_COOKIE_FILE: tiktokCookieFile.value.trim() } }) }); store.notify(result.message || 'TikTok Cookie 文件路径已保存'); await loadAll() }
-  catch (error: any) { store.notify(error.message || '保存 TikTok Cookie 文件路径失败', 'error') }
+async function savePlatformCookieFile(platform: typeof managedPlatformCredentials[number]) {
+  try { const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values: { [platform.fileKey]: (platformCookieFiles.value[platform.id] || '').trim() } }) }); store.notify(result.message || `${platform.name} Cookie 文件路径已保存`); await Promise.all([loadAll(), loadPlatformCredentialStatus()]) }
+  catch (error: any) { store.notify(error.message || `保存 ${platform.name} Cookie 文件路径失败`, 'error') }
 }
 async function processAction(target: 'worker' | 'beat', action: 'start' | 'stop') { try { const result = await api<any>(`/process/${target}/${action}`, { method: 'POST' }); store.notify(result.message || '操作完成'); await Promise.all([loadProcess(), loadReadiness()]) } catch (e: any) { store.notify(e.message, 'error') } }
 async function clearLogs() { if (!confirm('确定清空活动日志？')) return; await api('/logs', { method: 'DELETE' }); logs.value = []; store.notify('日志已清空') }
@@ -131,7 +142,7 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
       <label v-for="field in visibleGeneralFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><button v-else-if="isBooleanField(field)" type="button" class="setting-switch" :class="{ on: booleanFieldValue(field) }" role="switch" :aria-checked="booleanFieldValue(field)" @click="toggleBooleanField(field)"><span class="switch-track"><i /></span><span>{{ booleanFieldValue(field) ? '已开启' : '已关闭' }}</span></button><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
     </div><div v-if="generalGroup === '通知' && Object.keys(notificationTestResult).length" class="notification-test-result"><article v-for="(result, channel) in notificationTestResult" :key="channel" :data-success="result.success"><strong>{{ channel }}</strong><span>{{ result.message }}</span></article></div></div>
 
-    <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>敏感内容不会回显，所有平台凭据均从网页保存并在下次任务动态读取</p></div><button class="btn ghost" @click="loadDouyinAccount"><RefreshCw :size="15" />刷新健康状态</button></header><div class="credential-grid"><article class="douyin-account-card"><div class="account-health"><strong>抖音默认账号</strong><span :data-status="douyinAccount.status">{{ douyinAccount.status_label || '未配置' }}</span></div><p>Cookie、UIFID、User-Agent 与代理绑定使用；连续鉴权或风控异常会自动隔离，不会自动轮换账号。</p><div class="account-facts"><span>Cookie：{{ douyinAccount.configured ? `已加密 · ${douyinAccount.cookie_fingerprint}` : '未配置' }}</span><span>UIFID：{{ douyinAccount.has_uifid ? `已绑定 · ${douyinAccount.uifid_fingerprint}` : '缺失' }}</span><span>最近成功：{{ douyinAccount.last_success_at ? new Date(douyinAccount.last_success_at).toLocaleString() : '暂无' }}</span><span v-if="douyinAccount.last_failure_code">最近失败：{{ riskTypeLabel(douyinAccount.last_failure_code) }} · {{ douyinAccount.last_failure_at ? new Date(douyinAccount.last_failure_at).toLocaleString() : '时间未知' }} · 连续 {{ douyinAccount.consecutive_failures }} 次</span></div><textarea v-model="cookieValue" placeholder="留空保持当前 Cookie；粘贴新值时必须包含 UIFID" /><label class="account-field"><span>User-Agent</span><input v-model="douyinAccount.user_agent" placeholder="浏览器 User-Agent" /></label><label class="account-proxy"><button type="button" class="setting-switch" :class="{ on: douyinAccount.proxy_enabled }" role="switch" :aria-checked="Boolean(douyinAccount.proxy_enabled)" @click="douyinAccount.proxy_enabled = !douyinAccount.proxy_enabled"><span class="switch-track"><i /></span><span>{{ douyinAccount.proxy_enabled ? '使用代理' : '不使用代理' }}</span></button><input v-if="douyinAccount.proxy_enabled" v-model="douyinProxyValue" :placeholder="douyinAccount.proxy_label ? `留空保持 ${douyinAccount.proxy_label}` : 'http://user:password@host:port'" /></label><button class="btn primary" @click="saveDouyinAccount"><Save :size="16" />保存账号请求上下文</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><small class="cookie-format-hint">支持 Cookie Header String 或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="saveXCookie"><Save :size="16" />更新 X Cookie</button></article><article class="credential-path"><strong>X Cookie 文件</strong><p>可选：填写服务器上的 Cookie 文件路径。</p><div><input v-model="xCookieFile" placeholder="例如：/data/cookies/x.txt" /><button class="btn ghost" @click="saveXCookieFile"><Save :size="16" />保存路径</button></div></article><article><strong>TikTok Cookie</strong><p>用于访问需要登录的 TikTok 用户内容。</p><textarea v-model="tiktokCookieValue" placeholder="粘贴最新 TikTok Cookie" /><small class="cookie-format-hint">支持 Cookie Header String 或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="saveTikTokCookie"><Save :size="16" />更新 TikTok Cookie</button></article><article class="credential-path"><strong>TikTok Cookie 文件</strong><p>可选：留空时使用上方网页保存的 Cookie。</p><div><input v-model="tiktokCookieFile" placeholder="例如：/data/cookies/tiktok.txt" /><button class="btn ghost" @click="saveTikTokCookieFile"><Save :size="16" />保存路径</button></div></article></div></div>
+    <div v-else-if="tab === 'account'" class="settings-panel"><header><Cookie /><div><h3>平台登录凭据</h3><p>敏感内容不会回显，所有平台凭据均从网页保存并在下次任务动态读取</p></div><button class="btn ghost" @click="Promise.all([loadDouyinAccount(), loadPlatformCredentialStatus()])"><RefreshCw :size="15" />刷新健康状态</button></header><div class="credential-grid"><article class="douyin-account-card"><div class="account-health"><strong>抖音默认账号</strong><span :data-status="douyinAccount.status">{{ douyinAccount.status_label || '未配置' }}</span></div><p>Cookie、UIFID、User-Agent 与代理绑定使用；连续鉴权或风控异常会自动隔离，不会自动轮换账号。</p><div class="account-facts"><span>Cookie：{{ douyinAccount.configured ? `已加密 · ${douyinAccount.cookie_fingerprint}` : '未配置' }}</span><span>UIFID：{{ douyinAccount.has_uifid ? `已绑定 · ${douyinAccount.uifid_fingerprint}` : '缺失' }}</span><span>最近成功：{{ douyinAccount.last_success_at ? new Date(douyinAccount.last_success_at).toLocaleString() : '暂无' }}</span><span v-if="douyinAccount.last_failure_code">最近失败：{{ riskTypeLabel(douyinAccount.last_failure_code) }} · {{ douyinAccount.last_failure_at ? new Date(douyinAccount.last_failure_at).toLocaleString() : '时间未知' }} · 连续 {{ douyinAccount.consecutive_failures }} 次</span></div><textarea v-model="cookieValue" placeholder="留空保持当前 Cookie；粘贴新值时必须包含 UIFID" /><label class="account-field"><span>User-Agent</span><input v-model="douyinAccount.user_agent" placeholder="浏览器 User-Agent" /></label><label class="account-proxy"><button type="button" class="setting-switch" :class="{ on: douyinAccount.proxy_enabled }" role="switch" :aria-checked="Boolean(douyinAccount.proxy_enabled)" @click="douyinAccount.proxy_enabled = !douyinAccount.proxy_enabled"><span class="switch-track"><i /></span><span>{{ douyinAccount.proxy_enabled ? '使用代理' : '不使用代理' }}</span></button><input v-if="douyinAccount.proxy_enabled" v-model="douyinProxyValue" :placeholder="douyinAccount.proxy_label ? `留空保持 ${douyinAccount.proxy_label}` : 'http://user:password@host:port'" /></label><button class="btn primary" @click="saveDouyinAccount"><Save :size="16" />保存账号请求上下文</button></article><article><strong>X Cookie</strong><p>用于 gallery-dl 访问需要登录的内容。</p><textarea v-model="xCookieValue" placeholder="粘贴最新 X Cookie" /><small class="cookie-format-hint">支持 Cookie Header String 或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="saveXCookie"><Save :size="16" />更新 X Cookie</button></article><article class="credential-path"><strong>X Cookie 文件</strong><p>可选：填写服务器上的 Cookie 文件路径。</p><div><input v-model="xCookieFile" placeholder="例如：/data/cookies/x.txt" /><button class="btn ghost" @click="saveXCookieFile"><Save :size="16" />保存路径</button></div></article><template v-for="credential in managedPlatformCredentials" :key="credential.id"><article><div class="account-health"><strong>{{ credential.name }} Cookie</strong><span>{{ platformCredentialStatus[credential.id]?.configured ? `已加密 · ${platformCredentialStatus[credential.id]?.cookie_fingerprint || '文件凭据'}` : '未配置' }}</span></div><p>用于 gallery-dl 访问该平台用户主页内容。</p><textarea v-model="platformCookieValues[credential.id]" :placeholder="`粘贴最新 ${credential.name} Cookie`" /><small class="cookie-format-hint">支持 Cookie Header String 或 Netscape 格式，不支持 JSON。</small><button class="btn primary" @click="savePlatformCookie(credential)"><Save :size="16" />更新 {{ credential.name }} Cookie</button></article><article class="credential-path"><strong>{{ credential.name }} Cookie 文件</strong><p>可选：留空时使用上方网页保存的加密 Cookie。</p><div><input v-model="platformCookieFiles[credential.id]" :placeholder="`例如：/data/cookies/${credential.id}.txt`" /><button class="btn ghost" @click="savePlatformCookieFile(credential)"><Save :size="16" />保存路径</button></div></article></template></div></div>
 
     <div v-else-if="tab === 'runtime'" class="settings-panel"><header><Activity /><div><h3>下载、订阅与风控</h3><p>修改后下一次请求或调度周期生效</p></div><button class="btn primary" @click="saveRuntime"><Save :size="16" />保存运行配置</button></header><div class="form-grid">
       <label v-for="(spec, key) in limits" :key="key"><span>{{ spec.label }}</span><input v-if="spec.type !== 'bool'" v-model.number="runtime[key]" type="number" :min="spec.min" :max="spec.max" /><button v-else type="button" class="setting-switch" :class="{ on: runtime[key] }" role="switch" :aria-checked="Boolean(runtime[key])" @click="runtime[key] = !runtime[key]"><span class="switch-track"><i /></span><span>{{ runtime[key] ? '已开启' : '已关闭' }}</span></button><small>{{ spec.min != null ? `${spec.min}–${spec.max} ${spec.unit || ''}` : '向右为开启，向左为关闭' }}</small></label>
