@@ -275,8 +275,11 @@ class DownloadTask(Base):
     file_index = Column(Integer, default=0, nullable=False)  # 文件索引（图集中的第几张，从0开始）
     file_name = Column(String(255))  # 文件名
     
-    # 状态: pending, downloading, paused, completed, failed, cancelled
+    # 状态: pending, downloading, paused, completed, skipped, failed, cancelled
     status = Column(String(16), default="pending", index=True)
+
+    # 创建任务时固化归档规则，避免网页配置变化影响已排队任务。
+    archive_rule_snapshot = Column(Text)
     
     # 进度追踪
     total_bytes = Column(Integer, default=0)

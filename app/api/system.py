@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func, text, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pathlib import Path
 import asyncio
 import json
@@ -47,6 +47,7 @@ from app.core.runtime_config import (
 
 from app.services.media_paths import migrate_download_paths
 from app.services.notifications import send_notification
+from app.services.archive_rules import get_archive_rules, save_archive_rules
 
 router = APIRouter(tags=["系统管理"])
 
@@ -81,6 +82,42 @@ class DouyinAccountUpdate(BaseModel):
     user_agent: Optional[str] = None
     proxy_enabled: Optional[bool] = None
     proxy_url: Optional[str] = None
+
+
+class ArchiveRulesUpdate(BaseModel):
+    directory_template: str
+    filename_template: str
+    work_types: List[Literal["video", "images"]]
+    published_from: Optional[str] = None
+    published_to: Optional[str] = None
+    min_file_size_mb: float = 0
+    max_file_size_mb: float = 0
+    metadata_formats: List[Literal["json", "csv"]] = Field(default_factory=list)
+
+
+@router.get("/config/archive-rules")
+async def read_archive_rules(db: AsyncSession = Depends(get_async_db)):
+    try:
+        return {"success": True, "rules": await get_archive_rules(db)}
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/config/archive-rules")
+async def update_archive_rules(
+    request: ArchiveRulesUpdate,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        rules = await save_archive_rules(db, request.model_dump())
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    redis_client.append_activity_log(
+        "info", "system", "归档规则已更新",
+        f"directory={rules['directory_template']}, metadata={','.join(rules['metadata_formats']) or 'none'}",
+    )
+    return {"success": True, "message": "归档规则已保存；仅影响新建任务", "rules": rules}
 
 
 # ============ Cookie 配置 ============

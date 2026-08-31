@@ -21,6 +21,7 @@ class TaskStatus(str, Enum):
     DOWNLOADING = "downloading"
     PAUSED = "paused"
     COMPLETED = "completed"
+    SKIPPED = "skipped"
     FAILED = "failed"
     CANCELLED = "cancelled"
 

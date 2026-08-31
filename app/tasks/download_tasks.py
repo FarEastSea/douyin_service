@@ -51,6 +51,15 @@ from app.services.douyin_source import (
     build_douyin_source,
 )
 from app.services.douyin_media import build_douyin_media_engine
+from app.services.archive_rules import (
+    archive_size_limits,
+    build_archive_file_path,
+    deserialize_archive_rules,
+    get_archive_rules_sync,
+    serialize_archive_rules,
+    work_matches_archive_rules,
+    write_metadata_sidecars,
+)
 
 # 配置日志
 import os
@@ -369,6 +378,9 @@ def _queue_scanned_new_works(
     """直接持久化本轮已验证的新作品，避免再次扫描导致历史缺口被停止边界挡住。"""
     task_ids: list[int] = []
     persisted_works = 0
+    filtered_works = 0
+    archive_rules = get_archive_rules_sync(db)
+    archive_snapshot = serialize_archive_rules(archive_rules)
     for item in new_works:
         aweme_id = str(item.get("aweme_id") or "")
         if not aweme_id:
@@ -390,9 +402,16 @@ def _queue_scanned_new_works(
         db.flush()
         persisted_works += 1
 
+        matches, _ = work_matches_archive_rules(work, archive_rules)
+        if not matches:
+            filtered_works += 1
+            continue
+
         file_indices = [0] if work.work_type == "video" else list(range(work.image_count))
         for file_index in file_indices:
-            task, action = ensure_download_task_sync(db, work.id, file_index)
+            task, action = ensure_download_task_sync(
+                db, work.id, file_index, archive_rule_snapshot=archive_snapshot,
+            )
             if action in {"created", "reused"}:
                 task_ids.append(task.id)
                 work.is_downloaded = False
@@ -413,6 +432,7 @@ def _queue_scanned_new_works(
     return {
         "persisted_works": persisted_works,
         "file_tasks": len(task_ids),
+        "filtered_works": filtered_works,
         "celery_task_ids": celery_task_ids,
     }
 
@@ -622,6 +642,15 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             task.error_message = "作者正在删除"
             db.commit()
             return {"success": False, "deleted": True, "error": "作者正在删除"}
+
+        if task.archive_rule_snapshot:
+            archive_rules = deserialize_archive_rules(task.archive_rule_snapshot)
+        else:
+            # 兼容升级前已存在的任务：首次执行时固化当时的网页规则。
+            archive_rules = get_archive_rules_sync(db)
+            task.archive_rule_snapshot = serialize_archive_rules(archive_rules)
+            db.commit()
+        min_file_size, max_file_size = archive_size_limits(archive_rules)
         
         runtime_config = get_runtime_config_sync(db)
 
@@ -640,11 +669,8 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
         # 确定下载 URL 和文件路径
         if work.work_type == "video":
             url = work.video_url
-            file_path = media.build_file_path(
-                author.nickname or "未知作者",
-                work.title or "untitled",
-                work.aweme_id,
-                is_video=True
+            file_path = build_archive_file_path(
+                settings.DOWNLOAD_DIR, archive_rules, author, work, task.file_index,
             )
         else:
             # 图集
@@ -681,12 +707,12 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                 else None
             )
             url = live_photo_url or image_urls[task.file_index]
-            file_path = media.build_file_path(
-                author.nickname or "未知作者",
-                work.title or "untitled",
-                work.aweme_id,
-                index=task.file_index + 1,
-                is_video=False,
+            file_path = build_archive_file_path(
+                settings.DOWNLOAD_DIR,
+                archive_rules,
+                author,
+                work,
+                task.file_index,
                 is_live_photo=bool(live_photo_url),
             )
         
@@ -714,12 +740,12 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                         work.image_urls = image_urls
                         work.image_count = len(image_urls)
                         work.live_photo_urls = live_photo_urls
-                        file_path = media.build_file_path(
-                            author.nickname or "未知作者",
-                            work.title or "untitled",
-                            work.aweme_id,
-                            index=task.file_index + 1,
-                            is_video=False,
+                        file_path = build_archive_file_path(
+                            settings.DOWNLOAD_DIR,
+                            archive_rules,
+                            author,
+                            work,
+                            task.file_index,
                             is_live_photo=bool(live_photo_url),
                         )
                 db.commit()
@@ -765,7 +791,9 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             file_path=file_path,
             task_id=task_id,
             progress_callback=progress_callback,
-            check_pause=check_pause
+            check_pause=check_pause,
+            min_file_size=min_file_size,
+            max_file_size=max_file_size,
         )
         
         if result.get("paused"):
@@ -775,7 +803,27 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             logger.info(f"任务 {task_id} 已暂停, 已下载: {task.downloaded_bytes}/{task.total_bytes}")
             return {"success": False, "paused": True}
 
+        if result.get("filtered"):
+            task.status = "skipped"
+            task.error_message = result.get("error") or "文件大小不符合归档规则"
+            task.completed_at = datetime.now()
+            task.downloaded_bytes = 0
+            task.total_bytes = result.get("total_bytes", 0)
+            task.temp_file_path = None
+            refresh_work_download_state_sync(db, work)
+            recalc_author_counts_sync(db, author)
+            db.commit()
+            redis_client.delete_progress(task_id)
+            redis_client.append_activity_log(
+                "info", "task", f"归档规则已跳过: {task.file_name}",
+                f"task_id={task_id}, reason={task.error_message}",
+            )
+            return {"success": True, "skipped": True, "reason": task.error_message}
+
         if result.get("success"):
+            write_metadata_sidecars(
+                file_path, archive_rules, author, work, task.file_index,
+            )
             task.status = "completed"
             task.completed_at = datetime.now()
             task.downloaded_bytes = result["downloaded_bytes"]
@@ -1020,6 +1068,9 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         
         created_tasks = []
         reused_tasks = []
+        filtered_works = 0
+        archive_rules = get_archive_rules_sync(db)
+        archive_snapshot = serialize_archive_rules(archive_rules)
         
         # 处理每个作品
         for idx, item in enumerate(work_list[start_index - 1:], start=start_index):
@@ -1055,10 +1106,18 @@ def download_author_works(self, author_id: int, start_index: int = 1,
                 
                 db.add(work)
                 db.flush()
+
+            matches, reason = work_matches_archive_rules(work, archive_rules)
+            if not matches:
+                filtered_works += 1
+                logger.info(f"作品 {work.aweme_id} 被归档规则跳过: {reason}")
+                continue
             
             # 创建或重用下载任务
             if work.work_type == "video":
-                task, action = ensure_download_task_sync(db, work.id, 0)
+                task, action = ensure_download_task_sync(
+                    db, work.id, 0, archive_rule_snapshot=archive_snapshot,
+                )
                 if action == "created":
                     created_tasks.append(task.id)
                 elif action == "reused":
@@ -1072,7 +1131,9 @@ def download_author_works(self, author_id: int, start_index: int = 1,
                     # 跳过用户单独删除的图集文件，避免重新下载
                     if img_idx in excluded_indices:
                         continue
-                    task, action = ensure_download_task_sync(db, work.id, img_idx)
+                    task, action = ensure_download_task_sync(
+                        db, work.id, img_idx, archive_rule_snapshot=archive_snapshot,
+                    )
                     if action == "created":
                         created_tasks.append(task.id)
                     elif action == "reused":
@@ -1109,16 +1170,19 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         db.commit()
         
         logger.info(f"作者 {author.nickname}(ID:{author_id}) 作品处理完成: "
-                     f"总作品 {len(work_list)}, 新建任务 {len(created_tasks)}, 重用任务 {len(reused_tasks)}")
+                     f"总作品 {len(work_list)}, 新建任务 {len(created_tasks)}, "
+                     f"重用任务 {len(reused_tasks)}, 规则过滤 {filtered_works}")
         redis_client.append_activity_log("info", "task",
             f"✅ 作品处理完成: {author.nickname}",
-            f"总作品={len(work_list)}, 新建={len(created_tasks)}, 重用={len(reused_tasks)}, 下载分发={len(all_task_ids)}")
+            f"总作品={len(work_list)}, 新建={len(created_tasks)}, 重用={len(reused_tasks)}, "
+            f"规则过滤={filtered_works}, 下载分发={len(all_task_ids)}")
         
         return {
             "success": True,
             "total_works": len(work_list),
             "created_tasks": len(created_tasks),
             "reused_tasks": len(reused_tasks),
+            "filtered_works": filtered_works,
             "task_ids": all_task_ids
         }
 

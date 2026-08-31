@@ -38,6 +38,11 @@ from app.core.config import settings
 from app.core.runtime_config import get_runtime_config
 from app.services.media_paths import resolve_media_path
 from app.services.download_task_factory import ensure_download_task_async
+from app.services.archive_rules import (
+    get_archive_rules,
+    serialize_archive_rules,
+    work_matches_archive_rules,
+)
 from app.services.work_manager import recalc_author_counts
 from app.services.work_metadata import apply_work_payload
 from app.services.douyin_account import get_request_context
@@ -200,7 +205,11 @@ def _serialize_download_task(
     item.preview_media_type = preview_data["preview_media_type"]
     item.preview_url = preview_data["preview_url"]
     item.local_preview_available = preview_data["local_preview_available"]
-    error_meta = classify_stored_task_error(task.error_message)
+    error_meta = (
+        {"error_code": None, "error_category": None, "error_action": None}
+        if task.status == "skipped"
+        else classify_stored_task_error(task.error_message)
+    )
     item.error_code = error_meta["error_code"]
     item.error_category = error_meta["error_category"]
     item.error_action = error_meta["error_action"]
@@ -364,10 +373,19 @@ async def _handle_single_work(
         # 更新已存在作品的 URL（抖音 URL 会过期）
         apply_work_payload(db, work, work_info, preserve_existing=True)
 
+    archive_rules = await get_archive_rules(db)
+    matches, reason = work_matches_archive_rules(work, archive_rules)
+    if not matches:
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"作品未创建下载任务：{reason}")
+    archive_snapshot = serialize_archive_rules(archive_rules)
+
     created_task_ids = []
     reused_task_ids = []
     if work.work_type == "video":
-        task, action = await ensure_download_task_async(db, work.id, 0)
+        task, action = await ensure_download_task_async(
+            db, work.id, 0, archive_rule_snapshot=archive_snapshot,
+        )
         if action == "created":
             created_task_ids.append(task.id)
         elif action == "reused":
@@ -376,7 +394,9 @@ async def _handle_single_work(
             work.is_downloaded = False
     else:
         for img_idx in range(work.image_count):
-            task, action = await ensure_download_task_async(db, work.id, img_idx)
+            task, action = await ensure_download_task_async(
+                db, work.id, img_idx, archive_rule_snapshot=archive_snapshot,
+            )
             if action == "created":
                 created_task_ids.append(task.id)
             elif action == "reused":

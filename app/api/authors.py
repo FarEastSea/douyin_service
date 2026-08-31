@@ -152,6 +152,8 @@ def _get_work_download_status(work: Work) -> str:
         return "failed"
     if "cancelled" in statuses:
         return "cancelled"
+    if "skipped" in statuses:
+        return "skipped"
     return "not_started"
 
 

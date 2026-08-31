@@ -44,7 +44,15 @@ def _safe_remove_file(path: Optional[str]) -> bool:
         return False
 
     removed = False
-    for candidate in (target, target.with_name(target.name + ".downloading")):
+    candidates = (
+        target,
+        target.with_name(target.name + ".downloading"),
+        target.with_name(target.name + ".json"),
+        target.with_name(target.name + ".csv"),
+        target.with_name(target.name + ".json.tmp"),
+        target.with_name(target.name + ".csv.tmp"),
+    )
+    for candidate in candidates:
         try:
             if candidate.is_file():
                 candidate.unlink()

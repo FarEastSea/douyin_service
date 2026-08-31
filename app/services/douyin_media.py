@@ -28,6 +28,8 @@ class DouyinMediaEngine(Protocol):
         task_id: int | None = None,
         progress_callback: Callable[[int, int, float], None] | None = None,
         check_pause: Callable[[], bool] | None = None,
+        min_file_size: int = 0,
+        max_file_size: int = 0,
     ) -> dict[str, Any]: ...
 
 
@@ -72,6 +74,8 @@ class RequestsDouyinMediaEngine:
         task_id: int | None = None,
         progress_callback: Callable[[int, int, float], None] | None = None,
         check_pause: Callable[[], bool] | None = None,
+        min_file_size: int = 0,
+        max_file_size: int = 0,
     ) -> dict[str, Any]:
         return self._downloader.download_file_with_resume(
             url=url,
@@ -79,6 +83,8 @@ class RequestsDouyinMediaEngine:
             task_id=task_id,
             progress_callback=progress_callback,
             check_pause=check_pause,
+            min_file_size=min_file_size,
+            max_file_size=max_file_size,
         )
 
 

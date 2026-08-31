@@ -821,7 +821,9 @@ class DouyinDownloader:
         file_path: str,
         task_id: int = None,
         progress_callback: Callable[[int, int, float], None] = None,
-        check_pause: Callable[[], bool] = None
+        check_pause: Callable[[], bool] = None,
+        min_file_size: int = 0,
+        max_file_size: int = 0,
     ) -> Dict[str, Any]:
         """
         下载文件，支持断点续传
@@ -878,6 +880,26 @@ class DouyinDownloader:
                 error_msg = f"下载失败，HTTP状态码: {res.status_code}, URL: {url[:100]}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
+
+            if total_bytes and (
+                (min_file_size and total_bytes < min_file_size)
+                or (max_file_size and total_bytes > max_file_size)
+            ):
+                res.close()
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                if min_file_size and total_bytes < min_file_size:
+                    reason = f"文件大小 {total_bytes} 字节，小于归档规则下限 {min_file_size} 字节"
+                else:
+                    reason = f"文件大小 {total_bytes} 字节，大于归档规则上限 {max_file_size} 字节"
+                return {
+                    'success': False,
+                    'paused': False,
+                    'filtered': True,
+                    'error': reason,
+                    'downloaded_bytes': 0,
+                    'total_bytes': total_bytes,
+                }
             
             # 确保目录存在
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -887,6 +909,7 @@ class DouyinDownloader:
             last_update_time = start_time
             last_pause_check_time = start_time - 0.5
             bytes_since_last_update = 0
+            exceeded_maximum = False
             
             mode = 'ab' if downloaded_bytes > 0 else 'wb'
             with open(temp_path, mode) as f:
@@ -920,6 +943,11 @@ class DouyinDownloader:
                         chunk_size = len(chunk)
                         downloaded_bytes += chunk_size
                         bytes_since_last_update += chunk_size
+
+                        # Content-Length 缺失或不可信时也要执行上限；最多多读一个分块。
+                        if max_file_size and downloaded_bytes > max_file_size:
+                            exceeded_maximum = True
+                            break
                         
                         # 每0.5秒更新一次进度
                         current_time = time.time()
@@ -944,6 +972,39 @@ class DouyinDownloader:
                             last_update_time = current_time
                             bytes_since_last_update = 0
             
+            if exceeded_maximum:
+                res.close()
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return {
+                    'success': False,
+                    'paused': False,
+                    'filtered': True,
+                    'error': f"文件已超过归档规则上限 {max_file_size} 字节，下载已提前停止",
+                    'downloaded_bytes': 0,
+                    'total_bytes': total_bytes or downloaded_bytes,
+                }
+
+            actual_size = downloaded_bytes
+            if (
+                (min_file_size and actual_size < min_file_size)
+                or (max_file_size and actual_size > max_file_size)
+            ):
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                if min_file_size and actual_size < min_file_size:
+                    reason = f"文件大小 {actual_size} 字节，小于归档规则下限 {min_file_size} 字节"
+                else:
+                    reason = f"文件大小 {actual_size} 字节，大于归档规则上限 {max_file_size} 字节"
+                return {
+                    'success': False,
+                    'paused': False,
+                    'filtered': True,
+                    'error': reason,
+                    'downloaded_bytes': 0,
+                    'total_bytes': actual_size,
+                }
+
             # 下载完成，重命名临时文件
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -957,7 +1018,7 @@ class DouyinDownloader:
                 'success': True,
                 'paused': False,
                 'downloaded_bytes': downloaded_bytes,
-                'total_bytes': total_bytes,
+                'total_bytes': total_bytes or downloaded_bytes,
                 'file_path': file_path,
                 'duration': int(total_time)
             }

@@ -14,7 +14,7 @@ const loading = ref(false), status = ref(''), query = ref(''), shareUrl = ref(''
 const timer = ref<number>(), queryTimer = ref<number>()
 const statusCounts = ref<Record<string, number>>({})
 const statuses = [
-  ['', '全部'], ['pending', '待处理'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['failed', '失败'], ['cancelled', '已取消'],
+  ['', '全部'], ['pending', '待处理'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['skipped', '规则跳过'], ['failed', '失败'], ['cancelled', '已取消'],
 ]
 const failedCount = computed(() => statusCounts.value.failed || 0)
 
@@ -25,7 +25,7 @@ function bytes(value = 0) {
   return `${size.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`
 }
 function statusLabel(value: string) {
-  return ({ pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[value] || value
+  return ({ pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', skipped: '规则跳过', failed: '失败', cancelled: '已取消' } as Record<string, string>)[value] || value
 }
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -117,7 +117,7 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
         <thead><tr><th>任务</th><th>状态与进度</th><th>传输</th><th>时间</th><th class="actions-col">操作</th></tr></thead>
         <tbody>
           <tr v-for="task in tasks" :key="task.id">
-            <td><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><p v-if="task.error_message" class="inline-error" :title="task.error_message">{{ task.error_message }}</p></div></div></td>
+            <td><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><p v-if="task.error_message" :class="task.status === 'skipped' ? 'inline-note' : 'inline-error'" :title="task.error_message">{{ task.error_message }}</p></div></div></td>
             <td><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b>{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div><small v-if="task.error_action">{{ task.error_action }}</small></td>
             <td><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ task.download_speed ? `${bytes(task.download_speed)}/s` : '等待传输' }}</span></td>
             <td><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>

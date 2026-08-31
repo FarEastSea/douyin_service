@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Activity, BellRing, Clipboard, Cookie, Database, Play, RefreshCw, Save, Server, Settings2, Square, Trash2 } from '@lucide/vue'
+import { Activity, Archive, BellRing, Clipboard, Cookie, Database, Play, RefreshCw, Save, Server, Settings2, Square, Trash2 } from '@lucide/vue'
 import { useRoute } from 'vue-router'
 import { api, jsonBody } from '../api'
 import { useAppStore } from '../stores/app'
@@ -18,6 +18,11 @@ const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(f
 const notificationTestBusy = ref(false)
 const notificationTestChannel = ref<'all' | 'webhook' | 'bark' | 'email' | 'gotify'>('all')
 const notificationTestResult = ref<Record<string, any>>({})
+const archiveRules = ref<any>({
+  directory_template: '{author}', filename_template: '{title}_{aweme_id}{index_suffix}.{ext}',
+  work_types: ['video', 'images'], published_from: null, published_to: null,
+  min_file_size_mb: 0, max_file_size_mb: 0, metadata_formats: [],
+})
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
 const accountOnlyKeys = new Set(['DOUYIN_COOKIE', 'X_COOKIE', 'X_COOKIE_FILE'])
 const generalFields = computed(() => allFields.value.filter(field => !accountOnlyKeys.has(field.key)))
@@ -25,13 +30,14 @@ const generalGroup = ref('')
 const generalGroups = computed(() => [...new Set(generalFields.value.map(field => String(field.group || '其他')))])
 const visibleGeneralFields = computed(() => generalFields.value.filter(field => String(field.group || '其他') === generalGroup.value))
 const xCookieFile = ref('')
-const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
+const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['archive', '归档与导出'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
 const isBooleanField = (field: any) => ['true', 'false'].includes(String(field.default).toLowerCase())
 const booleanFieldValue = (field: any) => String(allValues.value[field.key]?.value).toLowerCase() === 'true'
 const readinessLabel = (name: string) => ({ configuration: '应用配置', database: '数据库', redis: 'Redis', worker: 'Celery Worker', beat: 'Celery Beat' }[name] || name)
 function toggleBooleanField(field: any) { allValues.value[field.key].value = booleanFieldValue(field) ? 'false' : 'true' }
 
 async function loadRuntime() { const data = await api<any>('/config/runtime'); runtime.value = data.config; limits.value = data.limits }
+async function loadArchiveRules() { const data = await api<any>('/config/archive-rules'); archiveRules.value = data.rules }
 async function loadDouyinAccount() { const data = await api<any>('/config/douyin-account'); douyinAccount.value = data.account || {} }
 async function loadAll() { const data = await api<any>('/config/all'); allFields.value = data.fields; allValues.value = data.values; xCookieFile.value = data.values?.X_COOKIE_FILE?.value || ''; if (!generalGroups.value.includes(generalGroup.value)) generalGroup.value = generalGroups.value[0] || '' }
 async function loadLogs(silent: boolean | Event = false) { try { logs.value = (await api<any>('/logs?start=0&count=500')).logs || [] } catch (e: any) { if (silent !== true) store.notify(e.message, 'error') } }
@@ -39,7 +45,7 @@ async function loadProcess() { process.value = await api('/process/status') }
 async function loadReadiness() { readiness.value = await api('/status/readiness') }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
 async function init() {
-  try { await Promise.all([loadRuntime(), loadDouyinAccount(), loadAll(), loadProcess(), loadReadiness(), loadLogs(), loadUpdateInfo()]) }
+  try { await Promise.all([loadRuntime(), loadArchiveRules(), loadDouyinAccount(), loadAll(), loadProcess(), loadReadiness(), loadLogs(), loadUpdateInfo()]) }
   catch (error: any) { store.notify(error.message || '加载设置失败', 'error') }
   if (timer.value != null) window.clearInterval(timer.value)
   timer.value = window.setInterval(() => { if (live.value && tab.value === 'logs') loadLogs(true) }, 3000)
@@ -47,6 +53,16 @@ async function init() {
 async function saveRuntime() {
   try { const result = await api<any>('/config/runtime', { method: 'POST', ...jsonBody(runtime.value) }); runtime.value = result.data.config; store.notify('运行配置已保存'); await store.refreshStatus() }
   catch (error: any) { store.notify(error.message || '保存失败', 'error') }
+}
+function toggleArchiveValue(key: 'work_types' | 'metadata_formats', value: string) {
+  const values = archiveRules.value[key] || []
+  archiveRules.value[key] = values.includes(value) ? values.filter((item: string) => item !== value) : [...values, value]
+}
+async function saveArchiveRules() {
+  try {
+    const result = await api<any>('/config/archive-rules', { method: 'POST', ...jsonBody(archiveRules.value) })
+    archiveRules.value = result.rules; store.notify(result.message || '归档规则已保存')
+  } catch (error: any) { store.notify(error.message || '保存归档规则失败', 'error') }
 }
 async function saveAll() {
   const values: Record<string, any> = {}
@@ -110,6 +126,15 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
       <label v-for="(spec, key) in limits" :key="key"><span>{{ spec.label }}</span><input v-if="spec.type !== 'bool'" v-model.number="runtime[key]" type="number" :min="spec.min" :max="spec.max" /><button v-else type="button" class="setting-switch" :class="{ on: runtime[key] }" role="switch" :aria-checked="Boolean(runtime[key])" @click="runtime[key] = !runtime[key]"><span class="switch-track"><i /></span><span>{{ runtime[key] ? '已开启' : '已关闭' }}</span></button><small>{{ spec.min != null ? `${spec.min}–${spec.max} ${spec.unit || ''}` : '向右为开启，向左为关闭' }}</small></label>
     </div></div>
 
+    <div v-else-if="tab === 'archive'" class="settings-panel archive-panel"><header><Archive /><div><h3>归档与导出规则</h3><p>规则在创建任务时固化，修改不会影响已排队任务</p></div><button class="btn primary" @click="saveArchiveRules"><Save :size="16" />保存归档规则</button></header><div class="archive-grid">
+      <label><span>目录模板</span><input v-model="archiveRules.directory_template" placeholder="{author}/{year}/{month}" /><small>可用：{author} {published_date} {year} {month} {work_type}</small></label>
+      <label><span>文件名模板</span><input v-model="archiveRules.filename_template" placeholder="{title}_{aweme_id}{index_suffix}.{ext}" /><small>必须包含 {aweme_id}、{index} 或 {index_suffix}、{ext}</small></label>
+      <fieldset><legend>作品类型</legend><button type="button" class="setting-switch" :class="{ on: archiveRules.work_types?.includes('video') }" @click="toggleArchiveValue('work_types', 'video')"><span class="switch-track"><i /></span><span>视频</span></button><button type="button" class="setting-switch" :class="{ on: archiveRules.work_types?.includes('images') }" @click="toggleArchiveValue('work_types', 'images')"><span class="switch-track"><i /></span><span>图集</span></button></fieldset>
+      <div class="archive-pair"><label><span>发布时间起</span><input v-model="archiveRules.published_from" type="date" /></label><label><span>发布时间止</span><input v-model="archiveRules.published_to" type="date" /></label></div>
+      <div class="archive-pair"><label><span>最小文件（MB）</span><input v-model.number="archiveRules.min_file_size_mb" type="number" min="0" step="0.1" /><small>0 表示不限制</small></label><label><span>最大文件（MB）</span><input v-model.number="archiveRules.max_file_size_mb" type="number" min="0" step="0.1" /><small>0 表示不限制</small></label></div>
+      <fieldset><legend>同目录元数据</legend><button type="button" class="setting-switch" :class="{ on: archiveRules.metadata_formats?.includes('json') }" @click="toggleArchiveValue('metadata_formats', 'json')"><span class="switch-track"><i /></span><span>JSON</span></button><button type="button" class="setting-switch" :class="{ on: archiveRules.metadata_formats?.includes('csv') }" @click="toggleArchiveValue('metadata_formats', 'csv')"><span class="switch-track"><i /></span><span>CSV</span></button><small>每个媒体文件旁生成独立元数据文件；默认关闭。</small></fieldset>
+    </div></div>
+
     <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div><button class="btn ghost" @click="loadReadiness"><RefreshCw :size="15" />检查依赖</button></header><div class="readiness-grid"><article v-for="(component, name) in readiness.components" :key="name" :data-ready="component.ok"><span class="health-dot" :class="{ online: component.ok }" /><div><strong>{{ readinessLabel(String(name)) }}</strong><small>{{ component.message }}</small></div></article></div><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
 
     <div v-else-if="tab === 'logs'" class="settings-panel log-panel"><header><Activity /><div><h3>活动日志</h3><p>实时查看最近 500 条系统与任务事件</p></div><div class="header-actions"><button type="button" class="setting-switch" :class="{ on: live }" role="switch" :aria-checked="live" @click="live = !live"><span class="switch-track"><i /></span><span>实时刷新</span></button><button class="btn ghost compact" @click="copyLogs"><Clipboard :size="15" />复制</button><button class="btn ghost compact" @click="clearLogs"><Trash2 :size="15" />清空</button><button class="btn ghost compact" @click="loadLogs"><RefreshCw :size="15" />刷新</button></div></header><div class="log-filters"><button v-for="level in ['info','warning','error']" :key="level" :class="{ active: logLevels.includes(level) }" @click="toggleLevel(level)">{{ level }}</button></div><div class="log-console"><article v-for="(item, index) in filteredLogs" :key="`${item.ts}-${index}`" :data-level="item.level"><time>{{ new Date(item.ts * 1000).toLocaleString() }}</time><b>[{{ item.source }}]</b><span>{{ item.msg }}</span><small v-if="item.detail">{{ item.detail }}</small></article><div v-if="!filteredLogs.length" class="empty-state">暂无符合筛选条件的日志</div></div></div>
@@ -135,6 +160,14 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 .account-facts { margin:10px 0; display:grid; gap:4px; color:var(--muted); font-size:9px; }
 .account-field,.account-proxy { margin:8px 0; display:grid; gap:6px; color:var(--muted); font-size:10px; }
 .account-field input,.account-proxy input { width:100%; min-height:36px; padding:0 10px; }
+.archive-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.archive-grid>label,.archive-pair label { display:grid; gap:6px; }
+.archive-grid input { width:100%; min-height:40px; padding:0 11px; }
+.archive-grid small { color:var(--muted); font-size:9px; line-height:1.5; }
+.archive-grid fieldset { margin:0; padding:12px; display:flex; flex-wrap:wrap; align-items:center; gap:12px; border:1px solid var(--line); border-radius:10px; }
+.archive-grid legend { padding:0 5px; color:var(--muted); font-size:10px; }
+.archive-grid fieldset small { flex-basis:100%; }
+.archive-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
 .readiness-grid { margin-bottom: 16px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
 .readiness-grid article { padding: 11px 12px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
 .readiness-grid article[data-ready="false"] { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
@@ -143,4 +176,5 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 .readiness-grid article small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 @media(max-width:900px){.notification-test-result{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:900px){.readiness-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:720px){.archive-grid{grid-template-columns:1fr}.archive-pair{grid-template-columns:1fr}}
 </style>

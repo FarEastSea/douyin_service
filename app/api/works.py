@@ -20,6 +20,11 @@ from app.models.models import Work, WorkStatsSnapshot
 from app.models.schemas import MessageResponse, WorkStatsSnapshotResponse
 from app.services import work_manager
 from app.services.download_task_factory import ensure_download_task_async
+from app.services.archive_rules import (
+    get_archive_rules,
+    serialize_archive_rules,
+    work_matches_archive_rules,
+)
 from app.tasks.download_tasks import download_single_file
 from app.core import redis_client
 
@@ -141,6 +146,11 @@ async def delete_work_file(
 async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)):
     """重新下载作品：清除排除标记，重建缺失任务并分发（已完成文件保留）。"""
     work = await _load_work_with_tasks(db, work_id)
+    archive_rules = await get_archive_rules(db)
+    matches, reason = work_matches_archive_rules(work, archive_rules)
+    if not matches:
+        raise HTTPException(status_code=400, detail=f"作品不符合当前归档规则：{reason}")
+    archive_snapshot = serialize_archive_rules(archive_rules)
 
     # 清除作品级与文件级排除标记
     work.is_excluded = False
@@ -156,12 +166,15 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
     dispatch_ids: List[int] = []
     clear_progress_ids: List[int] = []
     for idx in needed_indices:
-        task, action = await ensure_download_task_async(db, work.id, idx)
+        task, action = await ensure_download_task_async(
+            db, work.id, idx, archive_rule_snapshot=archive_snapshot,
+        )
         if action in {"created", "reused"}:
             dispatch_ids.append(task.id)
         elif task.status != "completed":
             task.status = "pending"
             task.error_message = None
+            task.archive_rule_snapshot = archive_snapshot
             clear_progress_ids.append(task.id)
             dispatch_ids.append(task.id)
 
