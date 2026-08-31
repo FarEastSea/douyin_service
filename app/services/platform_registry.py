@@ -146,6 +146,11 @@ def _classify_input(platform_id: str, path: str) -> PlatformInputKind:
             return "work"
         if segments:
             return "author"
+    elif platform_id == "tiktok":
+        if re.search(r"/@[^/]+/video/\d+", normalized_path):
+            return "work"
+        if normalized_path.startswith("/@"):
+            return "author"
     return "unknown"
 
 
@@ -185,5 +190,15 @@ platform_registry = _build_registry((
             profile_download=True,
         ),
     ),
+    PlatformDefinition(
+        id="tiktok",
+        name="TikTok",
+        short_name="TikTok",
+        route_prefix="/tiktok",
+        icon_text="T",
+        domains=("tiktok.com",),
+        capabilities=PlatformCapabilities(
+            profile_download=True,
+        ),
+    ),
 ))
-

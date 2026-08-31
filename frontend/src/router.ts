@@ -6,6 +6,7 @@ import UpdatesView from './views/UpdatesView.vue'
 import SettingsView from './views/SettingsView.vue'
 import XTasksView from './views/XTasksView.vue'
 import XAuthorsView from './views/XAuthorsView.vue'
+import PlatformTasksView from './views/PlatformTasksView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -19,6 +20,8 @@ export const router = createRouter({
     { path: '/x/tasks', component: XTasksView },
     { path: '/x/authors', component: XAuthorsView },
     { path: '/x/settings', component: SettingsView },
+    { path: '/tiktok/tasks', component: PlatformTasksView, props: { platform: 'tiktok' } },
+    { path: '/tiktok/settings', component: SettingsView },
     { path: '/:pathMatch(.*)*', redirect: '/douyin/tasks' },
   ],
 })

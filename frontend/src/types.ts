@@ -42,4 +42,10 @@ export interface XTask {
   created_at: string;
 }
 export interface XAuthor { id: number; username: string; display_name?: string; avatar_url?: string; is_subscribed: boolean; total_downloads: number; account_status_label?: string; last_error?: string }
+export interface PlatformTask {
+  id: number; platform: string; source_key: string; source_url: string; status: string;
+  phase?: string; engine_name?: string; file_count: number; downloaded_media_count: number;
+  progress_percent: number; error_message?: string; error_code?: string; last_log_line?: string;
+  preview_count: number; retry_count: number; created_at: string;
+}
 export interface MediaItem { url: string; type: 'image' | 'video'; title?: string }

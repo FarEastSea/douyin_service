@@ -18,6 +18,7 @@ _MEDIA_PATH_PATTERNS = (
     re.compile(r"^/api/tasks/\d+/preview$"),
     re.compile(r"^/api/authors/\d+/avatar$"),
     re.compile(r"^/api/x/media/\d+/(?:preview|download)$"),
+    re.compile(r"^/api/platform-downloads/[a-z0-9_-]+/media/\d+/(?:preview|download)$"),
 )
 
 

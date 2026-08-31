@@ -37,6 +37,7 @@ class Settings(BaseModel):
     DOWNLOAD_ROOT: str = "/downloads"
     DOUYIN_DOWNLOAD_SUBDIR: str = "douyin"
     X_DOWNLOAD_SUBDIR: str = "X"
+    TIKTOK_DOWNLOAD_SUBDIR: str = "TikTok"
 
     @cached_property
     def DOWNLOAD_DIR(self) -> str:
@@ -152,6 +153,14 @@ class Settings(BaseModel):
     X_TASK_LOG_MAX_LINES: int = 400
     X_TASK_LOG_TTL_SECONDS: int = 7 * 24 * 3600
     X_TASK_STATE_TTL_SECONDS: int = 24 * 3600
+
+    # TikTok 首批复用 gallery-dl；账号配置仍由网页设置中心维护。
+    @cached_property
+    def TIKTOK_DOWNLOAD_DIR(self) -> str:
+        return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.TIKTOK_DOWNLOAD_SUBDIR)
+    TIKTOK_DOWNLOAD_ENGINE: str = "gallery-dl"
+    TIKTOK_COOKIE: Optional[str] = None
+    TIKTOK_COOKIE_FILE: Optional[str] = None
     
 class WebSettings:
     """动态读取网页配置，并用可跨进程失效的进程内快照加速。"""
@@ -251,6 +260,7 @@ def ensure_download_dir():
         "DOWNLOAD_ROOT": current.DOWNLOAD_ROOT,
         "DOUYIN_DOWNLOAD_SUBDIR": current.DOUYIN_DOWNLOAD_SUBDIR,
         "X_DOWNLOAD_SUBDIR": current.X_DOWNLOAD_SUBDIR,
+        "TIKTOK_DOWNLOAD_SUBDIR": current.TIKTOK_DOWNLOAD_SUBDIR,
     }
     error = env_config.check_download_directory(values)
     if error:
@@ -260,5 +270,6 @@ def ensure_download_dir():
     # 根目录必须由管理员预先创建；仅平台子目录由应用按配置自动创建。
     (root / current.DOUYIN_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.X_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
+    (root / current.TIKTOK_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     return root
 

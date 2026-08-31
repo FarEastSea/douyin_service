@@ -19,6 +19,7 @@ let statsTimer: number | null = null
 const fallbackPlatforms: MediaPlatform[] = [
   { id: 'douyin', name: '抖音', short_name: '抖音', route_prefix: '/douyin', icon_text: '抖', domains: [], capabilities: { tasks: true, authors: true, works: true, subscriptions: true, subscription_reports: true, settings: true, profile_download: false, work_download: true } },
   { id: 'x', name: 'X/Twitter', short_name: 'X', route_prefix: '/x', icon_text: '@', domains: [], capabilities: { tasks: true, authors: true, works: false, subscriptions: true, subscription_reports: false, settings: true, profile_download: true, work_download: false } },
+  { id: 'tiktok', name: 'TikTok', short_name: 'TikTok', route_prefix: '/tiktok', icon_text: 'T', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: false } },
 ]
 const platforms = computed(() => store.platforms.length ? store.platforms : fallbackPlatforms)
 const platform = computed(() => platforms.value.find(item => route.path === item.route_prefix || route.path.startsWith(`${item.route_prefix}/`)) || platforms.value[0])
@@ -74,7 +75,7 @@ onBeforeUnmount(() => {
     <main class="main-area">
       <header class="topbar"><button class="icon-btn mobile-menu" @click="store.sidebarOpen = true"><Menu /></button><div><span>{{ platform.name }}媒体运营</span><strong>媒体下载管理系统</strong></div><div class="topbar-actions"><a class="icon-btn" href="/docs" target="_blank" title="API 文档"><BookOpen /></a><button class="profile-button" title="管理凭据" @click="authOpen = true"><UserRound /></button></div></header>
       <RiskBanner />
-      <section v-if="!route.path.includes('/works')" class="summary-grid">
+      <section v-if="platform.id === 'douyin' && !route.path.includes('/works')" class="summary-grid">
         <article><span>作者总数</span><strong>{{ store.stats.total_authors.toLocaleString() }}</strong><i data-tone="violet" /></article>
         <article><span>已订阅</span><strong>{{ store.stats.subscribed_authors.toLocaleString() }}</strong><i data-tone="green" /></article>
         <article><span>待处理</span><strong>{{ store.stats.pending_tasks.toLocaleString() }}</strong><i data-tone="amber" /></article>

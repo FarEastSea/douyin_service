@@ -20,6 +20,7 @@ celery_app = Celery(
         "app.tasks.download_tasks",
         "app.tasks.x_download_tasks",
         "app.tasks.notification_tasks",
+        "app.tasks.platform_download_tasks",
     ]
 )
 

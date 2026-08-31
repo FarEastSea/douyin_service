@@ -232,6 +232,9 @@ X_COOKIE_KEY = "x:cookie_file"
 X_TASK_LOG_PREFIX = "x:task:log:"
 X_TASK_PID_PREFIX = "x:task:pid:"
 X_TASK_STATE_PREFIX = "x:task:state:"
+PLATFORM_TASK_LOG_PREFIX = "platform:task:log:"
+PLATFORM_TASK_PID_PREFIX = "platform:task:pid:"
+PLATFORM_TASK_STATE_PREFIX = "platform:task:state:"
 def _x_task_log_max() -> int:
     from app.core.config import settings
 
@@ -661,4 +664,83 @@ def get_x_task_pid(task_id: int) -> Optional[int]:
 def delete_x_task_pid(task_id: int) -> None:
     """删除 X 任务 PID"""
     redis_client.delete(f"{X_TASK_PID_PREFIX}{task_id}")
+
+
+def _platform_task_key(prefix: str, platform: str, task_id: int) -> str:
+    normalized = "".join(char for char in str(platform).lower() if char.isalnum() or char in "_-")
+    if not normalized:
+        raise ValueError("平台 ID 不能为空")
+    return f"{prefix}{normalized}:{int(task_id)}"
+
+
+def append_platform_task_log(platform: str, task_id: int, line: str) -> None:
+    key = _platform_task_key(PLATFORM_TASK_LOG_PREFIX, platform, task_id)
+    pipe = redis_client.pipeline()
+    pipe.rpush(key, line)
+    pipe.ltrim(key, -_x_task_log_max(), -1)
+    pipe.expire(key, _x_task_log_ttl())
+    pipe.execute()
+
+
+def get_platform_task_log(platform: str, task_id: int, start: int = 0) -> list:
+    return redis_client.lrange(
+        _platform_task_key(PLATFORM_TASK_LOG_PREFIX, platform, task_id), start, -1
+    )
+
+
+def get_platform_task_log_size(platform: str, task_id: int) -> int:
+    return redis_client.llen(_platform_task_key(PLATFORM_TASK_LOG_PREFIX, platform, task_id))
+
+
+def delete_platform_task_log(platform: str, task_id: int) -> None:
+    redis_client.delete(_platform_task_key(PLATFORM_TASK_LOG_PREFIX, platform, task_id))
+
+
+def update_platform_task_state(platform: str, task_id: int, data: Dict[str, Any]) -> None:
+    key = _platform_task_key(PLATFORM_TASK_STATE_PREFIX, platform, task_id)
+    serialized: Dict[str, str] = {}
+    for field_name, value in data.items():
+        if value is None:
+            continue
+        serialized[field_name] = value.isoformat() if isinstance(value, datetime) else str(value)
+    if serialized:
+        redis_client.hset(key, mapping=serialized)
+        redis_client.expire(key, _x_task_state_ttl())
+
+
+def get_platform_task_state(platform: str, task_id: int) -> Optional[Dict[str, Any]]:
+    raw = redis_client.hgetall(_platform_task_key(PLATFORM_TASK_STATE_PREFIX, platform, task_id))
+    return _deserialize_x_task_state(raw)
+
+
+def get_platform_task_states(platform: str, task_ids: Iterable[int]) -> Dict[int, Optional[Dict[str, Any]]]:
+    normalized_ids = [int(task_id) for task_id in task_ids]
+    if not normalized_ids:
+        return {}
+    pipe = redis_client.pipeline(transaction=False)
+    for task_id in normalized_ids:
+        pipe.hgetall(_platform_task_key(PLATFORM_TASK_STATE_PREFIX, platform, task_id))
+    return {
+        task_id: _deserialize_x_task_state(raw)
+        for task_id, raw in zip(normalized_ids, pipe.execute())
+    }
+
+
+def delete_platform_task_state(platform: str, task_id: int) -> None:
+    redis_client.delete(_platform_task_key(PLATFORM_TASK_STATE_PREFIX, platform, task_id))
+
+
+def set_platform_task_pid(platform: str, task_id: int, pid: int) -> None:
+    key = _platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id)
+    redis_client.set(key, str(pid))
+    redis_client.expire(key, 24 * 3600)
+
+
+def get_platform_task_pid(platform: str, task_id: int) -> Optional[int]:
+    value = redis_client.get(_platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id))
+    return int(value) if value else None
+
+
+def delete_platform_task_pid(platform: str, task_id: int) -> None:
+    redis_client.delete(_platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id))
 

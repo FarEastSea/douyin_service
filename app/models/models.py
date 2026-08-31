@@ -417,6 +417,78 @@ class XMediaAsset(Base):
     task = relationship("XDownloadTask", back_populates="media_assets")
 
 
+class PlatformDownloadTask(Base):
+    """可由平台注册表驱动的主页媒体下载任务。"""
+    __tablename__ = "platform_download_tasks"
+    __table_args__ = (
+        Index("idx_platform_task_platform_status", "platform", "status", "created_at"),
+        Index("idx_platform_task_source", "platform", "source_key"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    source_key = Column(String(255), nullable=False)
+    source_url = Column(Text, nullable=False)
+    status = Column(String(16), default="pending", index=True)
+    phase = Column(String(32), default="queued")
+    engine_name = Column(String(32), default="gallery-dl")
+    celery_task_id = Column(String(64), index=True)
+    download_dir = Column(Text)
+    file_count = Column(Integer, default=0)
+    downloaded_media_count = Column(Integer, default=0)
+    progress_percent = Column(Float, default=0)
+    output_log = Column(Text, default="")
+    last_log_line = Column(Text)
+    error_message = Column(Text)
+    error_code = Column(String(64))
+    retry_count = Column(Integer, default=0)
+    created_at = Column(DateTime, server_default=func.now())
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    last_heartbeat_at = Column(DateTime)
+
+    media_assets = relationship(
+        "PlatformMediaAsset", back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class PlatformMediaAsset(Base):
+    """通用平台任务下载得到的本地媒体资源。"""
+    __tablename__ = "platform_media_assets"
+    __table_args__ = (
+        Index("idx_platform_media_task", "task_id", "created_at"),
+        Index("idx_platform_media_platform", "platform", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(
+        Integer,
+        ForeignKey("platform_download_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    platform = Column(String(32), nullable=False, index=True)
+    media_type = Column(String(16), nullable=False)
+    file_path = Column(Text, nullable=False)
+    filename = Column(Text, nullable=False)
+    size_bytes = Column(Integer, default=0)
+    mime_type = Column(String(128))
+    created_at = Column(DateTime, server_default=func.now())
+
+    task = relationship("PlatformDownloadTask", back_populates="media_assets")
+
+
+class PlatformCredential(Base):
+    """非抖音平台的加密登录凭据；接口永不返回密文。"""
+    __tablename__ = "platform_credentials"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), unique=True, nullable=False, index=True)
+    encrypted_cookie = Column(Text, nullable=False)
+    cookie_fingerprint = Column(String(16), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class SystemConfig(Base):
     """非敏感运行配置与任务状态；平台凭据使用独立密文模型。"""
     __tablename__ = "system_config"

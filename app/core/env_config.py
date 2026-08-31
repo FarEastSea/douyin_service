@@ -27,7 +27,7 @@ _LOCAL_CONFIG_GENERATION = 0
 _LOCAL_CONFIG_LOCK = RLock()
 _DOWNLOAD_PATH_ENV_KEYS = {
     "DOWNLOAD_ROOT", "DOWNLOAD_DIR", "X_DOWNLOAD_DIR",
-    "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR",
+    "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR",
 }
 
 
@@ -46,9 +46,10 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="DEBUG", label="调试模式", group="应用", default="false", help="生产环境建议关闭"),
     EnvField(key="ADMIN_TOKEN", label="管理 Token", group="安全", default="", required=True, secret=True, help="所有管理 API 的 Bearer Token；修改后当前浏览器会自动更新登录态"),
     EnvField(key="CORS_ALLOWED_ORIGINS", label="允许的跨域来源", group="安全", default="", help="逗号分隔的完整来源，例如 https://admin.example.com；同源访问无需填写"),
-    EnvField(key="DOWNLOAD_ROOT", label="下载根目录", group="下载目录", default="/downloads", required=True, help="两个平台下载文件的共同根目录"),
+    EnvField(key="DOWNLOAD_ROOT", label="下载根目录", group="下载目录", default="/downloads", required=True, help="所有平台下载文件的共同根目录"),
     EnvField(key="DOUYIN_DOWNLOAD_SUBDIR", label="抖音子目录", group="下载目录", default="douyin", required=True, help="根目录下的相对子目录"),
     EnvField(key="X_DOWNLOAD_SUBDIR", label="X 子目录", group="下载目录", default="X", required=True, help="根目录下的相对子目录"),
+    EnvField(key="TIKTOK_DOWNLOAD_SUBDIR", label="TikTok 子目录", group="下载目录", default="TikTok", help="根目录下的相对子目录"),
     EnvField(key="DB_TYPE", label="数据库类型", group="数据库", default="postgresql", required=True),
     EnvField(key="DB_HOST", label="数据库主机", group="数据库", default="localhost", required=True),
     EnvField(key="DB_PORT", label="数据库端口", group="数据库", default="5432", required=True),
@@ -106,6 +107,9 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="X_TASK_LOG_MAX_LINES", label="X 任务日志最大行数", group="X", default="400"),
     EnvField(key="X_TASK_LOG_TTL_SECONDS", label="X 任务日志保留时间（秒）", group="X", default="604800"),
     EnvField(key="X_TASK_STATE_TTL_SECONDS", label="X 任务状态保留时间（秒）", group="X", default="86400"),
+    EnvField(key="TIKTOK_DOWNLOAD_ENGINE", label="TikTok 下载引擎", group="TikTok", default="gallery-dl"),
+    EnvField(key="TIKTOK_COOKIE", label="TikTok Cookie", group="TikTok", default="", secret=True),
+    EnvField(key="TIKTOK_COOKIE_FILE", label="TikTok Cookie 文件", group="TikTok", default=""),
 ]
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
@@ -263,7 +267,7 @@ def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]
     elif not os.access(root, os.R_OK | os.W_OK | os.X_OK):
         message = "下载根目录不可访问或不可写，请检查目录权限"
     else:
-        for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR"):
+        for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR"):
             value = str(values.get(key) or "").strip()
             if not value:
                 continue

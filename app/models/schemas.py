@@ -372,6 +372,62 @@ class XCookieUpdate(BaseModel):
     cookie: str = Field(..., description="X/Twitter Cookie 内容")
 
 
+# ============ 通用平台主页下载 ============
+
+class PlatformDownloadRequest(BaseModel):
+    source: str = Field(..., min_length=1, max_length=4096, description="平台主页 URL 或用户名")
+
+
+class PlatformDownloadTaskResponse(BaseModel):
+    id: int
+    platform: str
+    source_key: str
+    source_url: str
+    status: str
+    phase: Optional[str] = None
+    engine_name: Optional[str] = None
+    celery_task_id: Optional[str] = None
+    download_dir: Optional[str] = None
+    file_count: int = 0
+    downloaded_media_count: int = 0
+    progress_percent: float = 0
+    last_log_line: Optional[str] = None
+    error_message: Optional[str] = None
+    error_code: Optional[str] = None
+    retry_count: int = 0
+    preview_count: int = 0
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PlatformMediaAssetResponse(BaseModel):
+    id: int
+    task_id: int
+    media_type: str
+    filename: str
+    size_bytes: int = 0
+    mime_type: Optional[str] = None
+    preview_url: str
+    download_url: str
+    created_at: datetime
+
+
+class PaginatedPlatformTasksResponse(BaseModel):
+    items: List[PlatformDownloadTaskResponse]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class PlatformCookieUpdate(BaseModel):
+    cookie: str = Field(..., min_length=1, description="平台 Cookie 内容")
+
+
 # ============ X/Twitter 作者管理 ============
 
 class XAuthorCreate(BaseModel):
