@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia'
 import { api } from '../api'
+import type { MediaPlatform } from '../types'
 
 type Theme = 'auto' | 'light' | 'dark'
 
 export const useAppStore = defineStore('app', {
   state: () => ({
     stats: { total_authors: 0, subscribed_authors: 0, pending_tasks: 0, downloading_tasks: 0, total_downloads: 0 },
+    platforms: [] as MediaPlatform[],
     risk: { active: false, retry_after: 0, error_type: null as string | null, reason: null as string | null, last_seen_at: null as string | null, error_type_label: null as string | null, reason_label: null as string | null, requires_cookie_update: false, requires_account_update: false },
     theme: (localStorage.getItem('media-theme') || 'auto') as Theme,
     toast: null as null | { message: string; tone: 'success' | 'error' | 'info' },
@@ -14,7 +16,10 @@ export const useAppStore = defineStore('app', {
   }),
   actions: {
     async refreshStatus() {
-      await Promise.allSettled([this.refreshStats(), this.refreshRisk()])
+      await Promise.allSettled([this.refreshPlatforms(), this.refreshStats(), this.refreshRisk()])
+    },
+    async refreshPlatforms() {
+      try { this.platforms = (await api<{ items: MediaPlatform[] }>('/platforms')).items || [] } catch { /* 保留当前清单 */ }
     },
     async refreshStats() {
       try { this.stats = await api('/status/stats') } catch { /* auth gate handles it */ }

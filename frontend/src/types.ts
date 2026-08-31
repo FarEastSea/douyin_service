@@ -1,5 +1,14 @@
 export interface PageData<T> { items: T[]; total: number; page: number; page_size: number; pages: number }
 
+export interface PlatformCapabilities {
+  tasks: boolean; authors: boolean; works: boolean; subscriptions: boolean;
+  subscription_reports: boolean; settings: boolean; profile_download: boolean; work_download: boolean;
+}
+export interface MediaPlatform {
+  id: string; name: string; short_name: string; route_prefix: string; icon_text: string;
+  domains: string[]; capabilities: PlatformCapabilities;
+}
+
 export interface Task {
   id: number; file_name?: string; status: string; total_bytes: number; downloaded_bytes: number;
   download_speed: number; progress_percent: number; error_message?: string; retry_count: number;
