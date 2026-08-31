@@ -8,6 +8,7 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,11 @@ from app.services.archive_rules import (
 )
 from app.tasks.download_tasks import download_single_file
 from app.core import redis_client
+from app.core.config import settings
+from app.core.runtime_config import get_runtime_config
+from app.services.douyin_account import get_request_context
+from app.services.douyin_source import build_douyin_source
+from app.services.work_cover_cache import find_cached_work_cover
 
 router = APIRouter(prefix="/works", tags=["作品管理"])
 
@@ -55,6 +61,49 @@ async def _load_work_with_tasks(db: AsyncSession, work_id: int) -> Work:
     if not work:
         raise HTTPException(status_code=404, detail="作品不存在")
     return work
+
+
+@router.get("/{work_id}/cover")
+async def get_work_cover(work_id: int, db: AsyncSession = Depends(get_async_db)):
+    """返回本地缓存的作品封面；缓存缺失时仅请求已入库的受信任图片地址。"""
+    work = await db.scalar(select(Work).where(Work.id == work_id))
+    if not work:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    if not work.cover_url:
+        raise HTTPException(status_code=404, detail="作品暂无封面")
+
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    cached = await asyncio.to_thread(
+        find_cached_work_cover, work.id, current_settings.DOWNLOAD_DIR, work.cover_url,
+    )
+    if cached:
+        return FileResponse(cached, headers={"Cache-Control": "private, max-age=3600"})
+
+    request_context = await get_request_context(db)
+    runtime_config = await get_runtime_config(db)
+
+    def _cache_cover():
+        source = build_douyin_source(
+            request_context.cookie,
+            current_settings.DOWNLOAD_DIR,
+            runtime_config=runtime_config,
+            request_context=request_context,
+        )
+        return source.cache_work_cover(work.id, work.cover_url)
+
+    try:
+        cached = await asyncio.to_thread(_cache_cover)
+    except Exception as exc:
+        # 源地址过期时仍可返回旧缓存；没有缓存才明确失败，让前端显示占位。
+        stale = await asyncio.to_thread(
+            find_cached_work_cover, work.id, current_settings.DOWNLOAD_DIR,
+        )
+        if stale:
+            return FileResponse(stale, headers={"Cache-Control": "private, max-age=300"})
+        raise HTTPException(status_code=502, detail=f"获取作品封面失败: {str(exc)[:200]}") from exc
+    if not cached:
+        raise HTTPException(status_code=404, detail="作品暂无封面")
+    return FileResponse(cached, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.get("/{work_id}/stats", response_model=List[WorkStatsSnapshotResponse])

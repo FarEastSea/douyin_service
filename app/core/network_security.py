@@ -8,6 +8,13 @@ from urllib.parse import urljoin, urlsplit
 
 
 DOUYIN_ALLOWED_DOMAINS = ("douyin.com", "iesdouyin.com")
+DOUYIN_MEDIA_ALLOWED_DOMAINS = (
+    "douyinpic.com",
+    "douyincdn.com",
+    "byteimg.com",
+    "ibytedtos.com",
+    "snssdk.com",
+)
 _CLOUD_METADATA_ADDRESSES = {
     ipaddress.ip_address("169.254.169.254"),
     ipaddress.ip_address("169.254.170.2"),
@@ -45,6 +52,44 @@ def is_allowed_douyin_hostname(hostname: str) -> bool:
     """只接受官方根域及其真正的子域，避免 evildouyin.com 一类后缀绕过。"""
     host = _normalized_hostname(hostname)
     return any(host == domain or host.endswith(f".{domain}") for domain in DOUYIN_ALLOWED_DOMAINS)
+
+
+def validate_douyin_media_url(url: str) -> str:
+    """只允许访问抖音官方图片 CDN，并拒绝私网解析和跨域重定向入口。"""
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("抖音图片地址格式不正确") from exc
+
+    hostname = _normalized_hostname(parsed.hostname or "")
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        raise ValueError("抖音图片地址必须是无账号信息的 HTTPS 地址")
+    if not any(hostname == domain or hostname.endswith(f".{domain}") for domain in DOUYIN_MEDIA_ALLOWED_DOMAINS):
+        raise ValueError("图片源地址不属于受信任的抖音图片域名")
+    if (port or 443) != 443:
+        raise ValueError("抖音图片地址只能使用 HTTPS 标准端口")
+    if any(not address.is_global for address in _resolved_addresses(hostname, 443)):
+        raise ValueError("抖音图片地址解析到了非公网地址，已拒绝访问")
+    return parsed.geturl()
+
+
+def get_douyin_media_response(session, url: str, *, timeout: int, max_redirects: int = 3):
+    """流式获取图片，并逐跳验证重定向仍位于受信任 CDN。"""
+    current_url = validate_douyin_media_url(url)
+    for _ in range(max_redirects + 1):
+        response = session.get(
+            current_url, allow_redirects=False, timeout=timeout, stream=True,
+        )
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response, current_url
+        location = response.headers.get("location")
+        if not location:
+            return response, current_url
+        next_url = urljoin(current_url, location)
+        response.close()
+        current_url = validate_douyin_media_url(next_url)
+    raise ValueError("抖音图片重定向次数过多，已停止访问")
 
 
 def validate_douyin_url(url: str) -> str:

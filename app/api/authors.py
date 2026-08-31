@@ -167,7 +167,8 @@ def _build_work_preview_payload(work: Work) -> tuple[Optional[str], List[str], O
     if work.work_type == "video":
         completed_video_task = next(iter(completed_tasks), None)
         video_url = f"/api/tasks/{completed_video_task.id}/preview" if completed_video_task else None
-        return video_url, [], video_url or work.cover_url
+        cover_url = f"/api/works/{work.id}/cover" if work.cover_url else None
+        return video_url, [], cover_url
 
     original_image_urls = work.image_urls or []
     local_image_urls = [

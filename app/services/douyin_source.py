@@ -12,6 +12,7 @@ from typing import Any, Iterable, Literal, Protocol, TypedDict
 from urllib.parse import quote, unquote
 
 from app.services.avatar_cache import ensure_author_avatar_cached
+from app.services.work_cover_cache import ensure_work_cover_cached
 from app.services.douyin_cookie import require_douyin_uifid
 from app.services.downloader import DouyinDownloader
 
@@ -76,6 +77,7 @@ class DouyinSource(Protocol):
     def refresh_assets(self, aweme_id: str) -> dict[str, Any]: ...
     def health_check(self) -> DouyinSourceHealth: ...
     def cache_author_avatar(self, author_id: int, source_url: str | None): ...
+    def cache_work_cover(self, work_id: int, source_url: str | None): ...
     def scan_all_works(
         self, sec_uid: str, known_aweme_ids: Iterable[str] = ()
     ) -> DouyinScanResult: ...
@@ -161,6 +163,15 @@ class DouyinWebAdapter:
     def cache_author_avatar(self, author_id: int, source_url: str | None):
         return ensure_author_avatar_cached(
             author_id,
+            source_url,
+            self._downloader.filepath,
+            self._downloader.session,
+            timeout=self._downloader.download_timeout,
+        )
+
+    def cache_work_cover(self, work_id: int, source_url: str | None):
+        return ensure_work_cover_cached(
+            work_id,
             source_url,
             self._downloader.filepath,
             self._downloader.session,

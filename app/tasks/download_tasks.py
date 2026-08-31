@@ -723,6 +723,7 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                 logger.info(f"任务 {task_id} - URL 已过期(HTTP {probe_status})，刷新中...")
                 fresh = source.refresh_assets(work.aweme_id)
                 if work.work_type == "video":
+                    apply_work_payload(db, work, fresh, preserve_existing=True)
                     refreshed_video_url = latest_video_url(fresh)
                     if refreshed_video_url:
                         url = refreshed_video_url

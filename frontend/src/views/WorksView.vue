@@ -13,6 +13,8 @@ type WorkSort = 'published_desc' | 'published_asc' | 'discovered_desc' | 'discov
 type DownloadFilter = 'all' | 'completed' | 'incomplete' | 'active' | 'failed' | 'not_started'
 type WorkTypeFilter = 'all' | 'video' | 'images'
 const author = ref<Author>(), works = ref<Work[]>([]), loading = ref(false), filter = ref<DownloadFilter>('all'), search = ref(''), selected = ref<number[]>([])
+const failedCovers = ref<Set<number>>(new Set())
+const failedVideoPreviews = ref<Set<number>>(new Set())
 const workType = ref<WorkTypeFilter>('all'), publishedFrom = ref(''), publishedTo = ref('')
 const sort = ref<WorkSort>('published_desc')
 const page = ref(1), pages = ref(1), total = ref(0), pageSize = 30
@@ -28,7 +30,7 @@ async function load() {
   if (search.value.trim()) params.set('q', search.value.trim())
   try {
     const [authorData, data] = await Promise.all([api<Author>(`/authors/${id}`), api<PageData<Work>>(`/authors/${id}/works?${params}`)])
-    author.value = authorData; works.value = data.items; total.value = data.total; pages.value = data.pages; selected.value = []
+    author.value = authorData; works.value = data.items; total.value = data.total; pages.value = data.pages; selected.value = []; failedCovers.value = new Set(); failedVideoPreviews.value = new Set()
   }
   catch (error: any) { store.notify(error.message || '加载作品失败', 'error') }
   finally { loading.value = false }
@@ -77,6 +79,12 @@ function media(work: Work): MediaItem[] {
   return work.image_urls.map(url => ({ url, type: 'image', title: work.title }))
 }
 function preview(work: Work) { const items = media(work); if (items.length) openMedia(items); else store.notify('当前作品暂无可用预览', 'info') }
+function markCoverFailed(workId: number) { failedCovers.value.add(workId) }
+function markVideoPreviewFailed(workId: number) { failedVideoPreviews.value.add(workId) }
+function primeVideoPreview(event: Event) {
+  const video = event.currentTarget as HTMLVideoElement
+  if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = Math.min(0.1, video.duration / 2)
+}
 async function workAction(work: Work, endpoint: string, method = 'POST') {
   try { const result = await api<any>(`/works/${work.id}/${endpoint}`, { method }); store.notify(result.message || '操作成功'); await load() }
   catch (error: any) { store.notify(error.message || '操作失败', 'error') }
@@ -100,7 +108,7 @@ onMounted(load); onBeforeUnmount(() => { if (searchTimer.value != null) window.c
     <div class="works-toolbar"><label class="work-sort"><span>状态</span><select v-model="filter" aria-label="下载状态" @change="changeFilters"><option value="all">全部状态</option><option value="completed">已下载</option><option value="incomplete">未完成</option><option value="active">处理中</option><option value="failed">失败/取消</option><option value="not_started">未创建任务</option></select></label><label class="work-sort"><span>类型</span><select v-model="workType" aria-label="作品类型" @change="changeFilters"><option value="all">全部类型</option><option value="video">视频</option><option value="images">图集</option></select></label><label class="work-sort work-date"><span>从</span><input v-model="publishedFrom" type="date" aria-label="发布日期起始" @change="changeFilters" /></label><label class="work-sort work-date"><span>至</span><input v-model="publishedTo" type="date" aria-label="发布日期结束" @change="changeFilters" /></label><label class="work-sort"><span>排序</span><select v-model="sort" aria-label="作品排序方式" @change="changeSort"><option value="published_desc">作品时间：最新</option><option value="published_asc">作品时间：最早</option><option value="discovered_desc">收录时间：最新</option><option value="discovered_asc">收录时间：最早</option></select></label><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索全部作品" @input="queueSearch" /></label></div>
     <main class="work-grid" :class="{ loading }">
       <article v-for="work in works" :key="work.id" class="work-card">
-        <div class="work-cover" @click="preview(work)"><img v-if="work.primary_preview_url" :src="work.primary_preview_url" alt="" loading="lazy" referrerpolicy="no-referrer" /><Image v-else :size="36" /><span>{{ work.work_type === 'images' ? `${work.image_count} 张` : '视频' }}</span><button class="select-box" :class="{ active: selected.includes(work.id) }" @click.stop="selected = selected.includes(work.id) ? selected.filter(v => v !== work.id) : [...selected, work.id]"><CheckSquare :size="18" /></button></div>
+        <div class="work-cover" @click="preview(work)"><img v-if="work.primary_preview_url && !failedCovers.has(work.id)" :src="work.primary_preview_url" :alt="`${work.title || `作品 ${work.aweme_id}`}的封面`" loading="lazy" @error="markCoverFailed(work.id)" /><video v-else-if="work.work_type === 'video' && work.video_url && !failedVideoPreviews.has(work.id)" :src="work.video_url" muted playsinline preload="metadata" :aria-label="`${work.title || `作品 ${work.aweme_id}`}的视频首帧`" @loadedmetadata="primeVideoPreview" @error="markVideoPreviewFailed(work.id)" /><div v-else class="cover-placeholder"><Image :size="34" /><small>封面暂不可用</small></div><span>{{ work.work_type === 'images' ? `${work.image_count} 张` : '视频' }}</span><button class="select-box" :class="{ active: selected.includes(work.id) }" :aria-label="selected.includes(work.id) ? '取消选择作品' : '选择作品'" @click.stop="selected = selected.includes(work.id) ? selected.filter(v => v !== work.id) : [...selected, work.id]"><CheckSquare :size="18" /></button></div>
         <div class="work-copy">
           <strong :title="work.title">{{ work.title || `作品 ${work.aweme_id}` }}</strong>
           <time v-if="work.published_at" :datetime="work.published_at">作品时间：{{ formatWorkTime(work.published_at) }}</time><span v-else>作品时间：未知</span>
