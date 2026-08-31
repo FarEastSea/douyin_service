@@ -190,6 +190,28 @@ def _release_subscription_lock(token: str) -> None:
         pass
 
 
+def _close_orphaned_subscription_reports(db: Session) -> int:
+    """新批次已取得互斥锁时，收口未正常结束的旧报告。"""
+    reports = db.execute(
+        select(SubscriptionCheckReport).where(SubscriptionCheckReport.status == "running")
+    ).scalars().all()
+    if not reports:
+        return 0
+
+    finished_at = datetime.now()
+    for stale_report in reports:
+        stale_report.status = "interrupted"
+        stale_report.finished_at = finished_at
+        stale_report.summary = (
+            "上一批次未正常写入结束状态，已由后续检查接管"
+            f"；中断前进度：{stale_report.summary}"
+            if stale_report.summary
+            else "上一批次未正常写入结束状态，已由后续检查接管"
+        )
+    db.commit()
+    return len(reports)
+
+
 def _is_probable_rate_limit_error(value: str | None) -> bool:
     """识别抖音常见的限流、验证码和网关伪成功响应。"""
     text = str(value or "").lower()
@@ -1304,15 +1326,33 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 nx=True,
                 ex=2100,
             ))
-        except Exception:
-            # Redis 故障时由 Celery worker 并发提供退化保护。
-            lock_acquired = True
+        except Exception as lock_error:
+            # 无法确认全局锁时必须停止；放行会让多个 Worker 同时扫描作者。
+            logger.error(f"订阅检查无法确认全局互斥锁，已拒绝启动: {lock_error}")
+            try:
+                redis_client.append_activity_log(
+                    "error",
+                    "task",
+                    "订阅检查未启动",
+                    "无法确认全局互斥锁，为避免重复请求已安全停止",
+                )
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "skipped": True,
+                "reason": "global_lock_unavailable",
+            }
         if not lock_acquired:
             return {
                 "success": True,
                 "skipped": True,
                 "reason": "global_lock",
             }
+
+        orphaned_reports = _close_orphaned_subscription_reports(db)
+        if orphaned_reports:
+            logger.warning(f"已收口 {orphaned_reports} 条未正常结束的订阅检查报告")
 
         if not force and not author_ids:
             # 在真正请求抖音前就标记本轮已开始，失败也进入全局冷却。

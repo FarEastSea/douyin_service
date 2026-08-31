@@ -1084,7 +1084,10 @@ async def get_subscription_reports(
             details = []
         display_status = report.status
         display_summary = report.summary
-        if display_status == "running" and report.started_at and (datetime.now() - report.started_at).total_seconds() > 2100:
+        if display_status == "running" and reports:
+            display_status = "interrupted"
+            display_summary = "该批次未正常写入结束状态，后续批次已经接管续检"
+        elif display_status == "running" and report.started_at and (datetime.now() - report.started_at).total_seconds() > 2100:
             display_status = "interrupted"
             display_summary = "任务超过 35 分钟仍未结束，可能被 Worker 中断；下一轮会继续检查未处理作者"
         reports.append({
