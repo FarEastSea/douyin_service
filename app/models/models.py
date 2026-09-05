@@ -418,7 +418,7 @@ class XMediaAsset(Base):
 
 
 class PlatformDownloadTask(Base):
-    """可由平台注册表驱动的主页媒体下载任务。"""
+    """可由平台注册表驱动的主页或单条作品下载任务。"""
     __tablename__ = "platform_download_tasks"
     __table_args__ = (
         Index("idx_platform_task_platform_status", "platform", "status", "created_at"),
@@ -429,6 +429,7 @@ class PlatformDownloadTask(Base):
     platform = Column(String(32), nullable=False, index=True)
     source_key = Column(String(255), nullable=False)
     source_url = Column(Text, nullable=False)
+    source_type = Column(String(16), nullable=False, default="profile")
     status = Column(String(16), default="pending", index=True)
     phase = Column(String(32), default="queued")
     engine_name = Column(String(32), default="gallery-dl")

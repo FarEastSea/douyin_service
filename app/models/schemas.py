@@ -375,7 +375,7 @@ class XCookieUpdate(BaseModel):
 # ============ 通用平台主页下载 ============
 
 class PlatformDownloadRequest(BaseModel):
-    source: str = Field(..., min_length=1, max_length=4096, description="平台主页 URL 或用户名")
+    source: str = Field(..., min_length=1, max_length=4096, description="平台主页、用户名或单条作品 URL")
 
 
 class PlatformDownloadTaskResponse(BaseModel):
@@ -383,6 +383,7 @@ class PlatformDownloadTaskResponse(BaseModel):
     platform: str
     source_key: str
     source_url: str
+    source_type: str = "profile"
     status: str
     phase: Optional[str] = None
     engine_name: Optional[str] = None

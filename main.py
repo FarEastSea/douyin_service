@@ -33,7 +33,10 @@ if not BOOTSTRAP_MODE:
         from app.core.config import settings, ensure_download_dir
         from app.core.process_manager import process_manager
         from app.api import tasks, authors, system, x_tasks, works, platforms, platform_downloads
-        from app.services.douyin_account import migrate_legacy_account_sync
+        from app.services.douyin_account import (
+            migrate_legacy_account_sync,
+            recover_legacy_signature_isolation_sync,
+        )
         config_errors = get_runtime_errors()
         if config_errors:
             BOOTSTRAP_MODE = True
@@ -78,9 +81,14 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         migrated_account = await asyncio.to_thread(migrate_legacy_account_sync)
+        recovered_signature_state = await asyncio.to_thread(
+            recover_legacy_signature_isolation_sync
+        )
         print("✅ 数据库初始化完成")
         if migrated_account:
             print("✅ 旧抖音 Cookie 已迁移到加密账号档案")
+        if recovered_signature_state:
+            print("✅ 已解除旧版签名错误造成的抖音账号隔离状态")
     except Exception as e:
         BOOTSTRAP_STATUS["ready"] = False
         BOOTSTRAP_STATUS.setdefault("errors", []).append({

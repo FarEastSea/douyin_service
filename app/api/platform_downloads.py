@@ -27,7 +27,7 @@ from app.models.schemas import (
 from app.services.media_paths import resolve_media_path
 from app.services.platform_profile_download import (
     get_profile_platform_spec,
-    resolve_profile_input,
+    resolve_platform_input,
 )
 from app.services.platform_task_service import (
     ACTIVE_PLATFORM_TASK_STATUSES,
@@ -76,7 +76,7 @@ async def create_download(
 ):
     spec = _require_platform(platform)
     try:
-        source_key, source_url = resolve_profile_input(spec.id, request.source)
+        resolved = resolve_platform_input(spec.id, request.source)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -85,7 +85,8 @@ async def create_download(
         .options(selectinload(PlatformDownloadTask.media_assets))
         .where(
             PlatformDownloadTask.platform == spec.id,
-            PlatformDownloadTask.source_key == source_key,
+            PlatformDownloadTask.source_key == resolved.source_key,
+            PlatformDownloadTask.source_type == resolved.source_type,
             PlatformDownloadTask.status.in_(ACTIVE_PLATFORM_TASK_STATUSES),
         )
         .order_by(PlatformDownloadTask.created_at.desc())
@@ -96,7 +97,9 @@ async def create_download(
         )
         return serialize_platform_task(active, state)
 
-    task = create_platform_task(spec.id, source_key, source_url)
+    task = create_platform_task(
+        spec.id, resolved.source_key, resolved.source_url, resolved.source_type
+    )
     db.add(task)
     await db.commit()
     await db.refresh(task, attribute_names=["media_assets"])

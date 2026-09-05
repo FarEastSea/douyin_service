@@ -1,4 +1,4 @@
-"""可复用的主页媒体下载适配层；当前实现 TikTok、微博 + gallery-dl。"""
+"""可复用的平台媒体下载适配层；支持主页与单条作品。"""
 
 from __future__ import annotations
 
@@ -49,6 +49,13 @@ class ProfileDownloadResult:
     error_code: Optional[str] = None
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedPlatformInput:
+    source_key: str
+    source_url: str
+    source_type: str
+
+
 PROFILE_PLATFORM_SPECS = {
     "tiktok": ProfilePlatformSpec(
         id="tiktok",
@@ -78,41 +85,54 @@ def get_profile_platform_spec(platform: str) -> ProfilePlatformSpec:
     try:
         return PROFILE_PLATFORM_SPECS[normalized]
     except KeyError as exc:
-        raise ValueError(f"平台暂不支持主页下载: {normalized or platform}") from exc
+        raise ValueError(f"平台暂不支持媒体下载: {normalized or platform}") from exc
 
 
-def resolve_profile_input(platform: str, raw_input: str) -> tuple[str, str]:
+def resolve_platform_input(platform: str, raw_input: str) -> ResolvedPlatformInput:
     spec = get_profile_platform_spec(platform)
     value = str(raw_input or "").strip()
     if not value:
-        raise ValueError(f"请输入 {spec.name} 用户主页或用户名")
+        raise ValueError(f"请输入 {spec.name} 用户主页、用户名或单条作品链接")
     if spec.id == "tiktok":
-        return _resolve_tiktok_profile(value)
+        return _resolve_tiktok_input(value)
     if spec.id == "weibo":
-        return _resolve_weibo_profile(value)
+        return _resolve_weibo_input(value)
     raise ValueError(f"平台解析器尚未实现: {spec.id}")
 
 
-def _resolve_tiktok_profile(value: str) -> tuple[str, str]:
+def _resolve_tiktok_input(value: str) -> ResolvedPlatformInput:
     direct = re.fullmatch(r"@?([A-Za-z0-9._]{1,64})", value)
     if direct:
-        username = direct.group(1)
-    else:
-        candidate = value if re.match(r"^https?://", value, re.I) else f"https://{value}"
-        match = re.match(
-            r"^https?://(?:www\.)?tiktok\.com/@([A-Za-z0-9._]{1,64})(?:[/?#]|$)",
-            candidate,
-            re.I,
-        )
-        if not match:
-            raise ValueError("无法从输入中识别 TikTok 用户名，仅支持用户主页或 @用户名")
-        username = match.group(1)
-    username = username.lower()
-    return username, f"https://www.tiktok.com/@{username}"
+        username = direct.group(1).lower()
+        return ResolvedPlatformInput(username, f"https://www.tiktok.com/@{username}", "profile")
+
+    candidate = value if re.match(r"^https?://", value, re.I) else f"https://{value}"
+    parsed = urlsplit(candidate)
+    host = (parsed.hostname or "").lower()
+    if not (host == "tiktok.com" or host.endswith(".tiktok.com")):
+        raise ValueError("无法识别 TikTok 链接或用户名")
+    work_match = re.fullmatch(
+        r"/@([A-Za-z0-9._]{1,64})/(video|photo)/(\d+)(?:/)?",
+        parsed.path,
+        re.I,
+    )
+    if work_match:
+        username, work_type, work_id = work_match.groups()
+        username = username.lower()
+        canonical = f"https://www.tiktok.com/@{username}/{work_type.lower()}/{work_id}"
+        return ResolvedPlatformInput(f"{username}-{work_type.lower()}-{work_id}", canonical, "work")
+    profile_match = re.fullmatch(r"/@([A-Za-z0-9._]{1,64})(?:/)?", parsed.path, re.I)
+    if profile_match:
+        username = profile_match.group(1).lower()
+        return ResolvedPlatformInput(username, f"https://www.tiktok.com/@{username}", "profile")
+    if host in {"vm.tiktok.com", "vt.tiktok.com"} and parsed.path.strip("/"):
+        digest = sha256(candidate.encode("utf-8")).hexdigest()[:16]
+        return ResolvedPlatformInput(f"share-{digest}", candidate, "work")
+    raise ValueError("无法识别 TikTok 用户主页或单条视频/图文链接")
 
 
-def _resolve_weibo_profile(value: str) -> tuple[str, str]:
-    """接受微博 UID、昵称或官方主页 URL，不解析短链和单条微博。"""
+def _resolve_weibo_input(value: str) -> ResolvedPlatformInput:
+    """接受微博 UID、昵称、官方主页 URL 与单条微博链接。"""
     direct = re.fullmatch(r"@?([^\s/?#]{1,64})", value)
     if direct and "." not in direct.group(1):
         identity = direct.group(1)
@@ -121,15 +141,29 @@ def _resolve_weibo_profile(value: str) -> tuple[str, str]:
         candidate = value if re.match(r"^https?://", value, re.I) else f"https://{value}"
         parsed = urlsplit(candidate)
         host = (parsed.hostname or "").lower()
-        if host not in {"weibo.com", "www.weibo.com", "m.weibo.com", "m.weibo.cn"}:
+        if host not in {
+            "weibo.com", "www.weibo.com", "m.weibo.com",
+            "weibo.cn", "www.weibo.cn", "m.weibo.cn",
+        }:
             raise ValueError("无法识别微博主页，仅支持 UID、昵称或 weibo.com/weibo.cn 用户主页")
         parts = [unquote(item) for item in parsed.path.split("/") if item]
         if not parts:
             raise ValueError("微博主页缺少用户 UID 或昵称")
-        if parts[0].lower() in {"detail", "status"} or (
-            len(parts) > 1 and parts[0].isdecimal()
-        ):
-            raise ValueError("当前仅支持微博用户主页，不支持单条微博链接")
+        if parts[0].lower() in {"detail", "status"}:
+            if len(parts) < 2 or not re.fullmatch(r"[A-Za-z0-9]+", parts[1]):
+                raise ValueError("微博单条动态链接缺少有效动态 ID")
+            work_id = parts[1]
+            return ResolvedPlatformInput(
+                f"status-{work_id}", f"https://{host}/{parts[0].lower()}/{work_id}", "work"
+            )
+        if len(parts) > 1 and parts[0].isdecimal():
+            if not re.fullmatch(r"[A-Za-z0-9]+", parts[1]):
+                raise ValueError("微博单条动态 ID 格式无效")
+            return ResolvedPlatformInput(
+                f"{parts[0]}-status-{parts[1]}",
+                f"https://weibo.com/{parts[0]}/{parts[1]}",
+                "work",
+            )
         if parts[0].lower() in {"u", "n"}:
             if len(parts) < 2:
                 raise ValueError("微博主页缺少用户 UID 或昵称")
@@ -144,7 +178,7 @@ def _resolve_weibo_profile(value: str) -> tuple[str, str]:
         raise ValueError("微博用户 UID 或昵称格式无效")
     encoded = quote(identity, safe="._-")
     path = f"{prefix}/{encoded}" if prefix else encoded
-    return identity, f"https://weibo.com/{path}"
+    return ResolvedPlatformInput(identity, f"https://weibo.com/{path}", "profile")
 
 
 def profile_storage_key(source_key: str) -> str:
@@ -200,6 +234,7 @@ class GalleryDlProfileDownloadEngine:
         spec: ProfilePlatformSpec,
         source_url: str,
         source_key: str,
+        source_type: str,
         destination: str,
         cookie_file: Optional[str] = None,
         on_line: Optional[Callable[[str], None]] = None,
@@ -231,7 +266,7 @@ class GalleryDlProfileDownloadEngine:
             captured.append(line)
             sink(line)
 
-        log(f"[{spec.name}] 用户: @{source_key}")
+        log(f"[{spec.name}] {'单条作品' if source_type == 'work' else '用户主页'}: {source_key}")
         log(f"[{spec.name}] 目标目录: {user_folder}")
         log(f"[{spec.name}] 已启用请求间隔、限流冷却和下载归档")
         before = set(list_media_files(user_folder))
@@ -282,7 +317,7 @@ def _interpret_error(
     """仅按 gallery-dl 已知状态与日志证据分类，未知情况保持通用错误。"""
     evidence = "\n".join(output).lower()
     if return_code == 64:
-        return "invalid_url", "用户主页链接格式无效或当前引擎不支持"
+        return "invalid_url", "主页或单条作品链接格式无效，或当前引擎不支持"
     if return_code == 16 or "authenticationerror" in evidence:
         return "auth_required", f"{spec.name} 要求登录，请在设置中心更新有效 Cookie"
     if "401 unauthorized" in evidence or "redirect to login" in evidence:
@@ -294,7 +329,7 @@ def _interpret_error(
     if any(marker in evidence for marker in (
         "404 not found", "does not exist", "notfounderror", "could not be found",
     )):
-        return "not_found", "用户不存在、已删除或当前账号无权访问"
+        return "not_found", "用户或作品不存在、已删除，或当前账号无权访问"
     if return_code == 4:
         return "request_failed", f"{spec.name} 请求失败，请查看任务日志中的 HTTP 错误"
     return "engine_error", f"gallery-dl 执行失败（退出码 {return_code}），请查看任务日志"

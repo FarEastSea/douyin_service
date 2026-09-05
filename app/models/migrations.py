@@ -123,6 +123,7 @@ ADD_COLUMN_MIGRATIONS = [
     _add_column("0038_works_play_count", "works", "play_count", "ALTER TABLE works ADD COLUMN play_count BIGINT"),
     _add_column("0039_works_raw_data_version", "works", "raw_data_version", "ALTER TABLE works ADD COLUMN raw_data_version INTEGER DEFAULT 1"),
     _add_column("0040_download_tasks_archive_rule_snapshot", "download_tasks", "archive_rule_snapshot", "ALTER TABLE download_tasks ADD COLUMN archive_rule_snapshot TEXT"),
+    _add_column("0041_platform_tasks_source_type", "platform_download_tasks", "source_type", "ALTER TABLE platform_download_tasks ADD COLUMN source_type VARCHAR(16) DEFAULT 'profile' NOT NULL"),
 ]
 
 

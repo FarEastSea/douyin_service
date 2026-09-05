@@ -23,6 +23,7 @@ from app.services.x_task_service import (
     mark_x_task_running,
     sync_x_author,
     update_x_task_runtime,
+    build_x_source_download_dir,
 )
 from app.tasks.celery_app import celery_app
 
@@ -128,10 +129,14 @@ def download_x_profile(self, task_id: int):
                 task_id=task_id,
             )
 
-        task.download_dir = os.path.join(x_download_root, task.username)
+        task.download_dir = build_x_source_download_dir(task.username, task.profile_url)
+        asset_scope = (
+            XMediaAsset.x_author_id == task.x_author_id
+            if task.x_author_id else XMediaAsset.task_id == task.id
+        )
         existing_paths = {
             row[0] for row in db.execute(
-                select(XMediaAsset.file_path).where(XMediaAsset.x_author_id == task.x_author_id)
+                select(XMediaAsset.file_path).where(asset_scope)
             ).all()
         }
         for file_path in result.files:

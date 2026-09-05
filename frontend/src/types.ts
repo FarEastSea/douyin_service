@@ -37,13 +37,13 @@ export interface Work {
 }
 
 export interface XTask {
-  id: number; username: string; status: string; phase?: string; file_count: number;
+  id: number; username: string; profile_url: string; status: string; phase?: string; file_count: number;
   progress_percent: number; error_message?: string; last_log_line?: string; preview_count: number;
   created_at: string;
 }
 export interface XAuthor { id: number; username: string; display_name?: string; avatar_url?: string; is_subscribed: boolean; total_downloads: number; account_status_label?: string; last_error?: string }
 export interface PlatformTask {
-  id: number; platform: string; source_key: string; source_url: string; status: string;
+  id: number; platform: string; source_key: string; source_url: string; source_type: string; status: string;
   phase?: string; engine_name?: string; file_count: number; downloaded_media_count: number;
   progress_percent: number; error_message?: string; error_code?: string; last_log_line?: string;
   preview_count: number; retry_count: number; created_at: string;

@@ -1404,6 +1404,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         consecutive_rate_limited = 0
         stopped_for_timeout = False
         stopped_for_rate_limit = False
+        stopped_for_upstream = False
         risk_author_id = None
         risk_error_code = None
         RATE_LIMIT_STOP_THRESHOLD = 3
@@ -1655,10 +1656,14 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 
                 if isinstance(e, DouyinRequestError) and e.code in {
                     "account_isolated", "browser_identity_missing", "argus_blocked", "rate_limited",
+                    "signature_missing", "signature_generation_failed",
                 }:
                     author.last_error = f"{e.user_message} {e.action}"
                     db.commit()
-                    stopped_for_rate_limit = True
+                    stopped_for_upstream = e.code in {
+                        "signature_missing", "signature_generation_failed",
+                    }
+                    stopped_for_rate_limit = not stopped_for_upstream
                     risk_author_id = author.id
                     risk_error_code = e.code
                     results.append({
@@ -1669,7 +1674,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "message": e.user_message,
                     })
                     redis_client.append_activity_log(
-                        "warning", "task", "抖音请求保护已触发，本轮订阅检查立即停止",
+                        "warning", "task", "抖音请求前置条件未满足，本轮订阅检查立即停止",
                         f"author_id={author.id}, 原因={e.user_message}, 后续操作={e.action}",
                     )
                     _notify_event(
@@ -1796,9 +1801,11 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         resume_author_ids = [author.id for author in authors if author.id not in settled_author_ids]
         if risk_author_id is not None and risk_author_id not in resume_author_ids:
             resume_author_ids.insert(0, risk_author_id)
-        if stopped_for_timeout or stopped_for_rate_limit:
+        if stopped_for_timeout or stopped_for_rate_limit or stopped_for_upstream:
             if risk_error_code in {"account_isolated", "browser_identity_missing"}:
                 deferred_reason = "抖音账号请求上下文不可用，重新保存账号档案后优先续检"
+            elif stopped_for_upstream:
+                deferred_reason = "服务端请求签名不可用，修复部署后优先续检"
             else:
                 deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
             for author in authors:
@@ -1811,7 +1818,9 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     })
 
         round_checked = len(completed_author_ids)
-        remaining_count = len(resume_author_ids) if (stopped_for_timeout or stopped_for_rate_limit) else 0
+        remaining_count = len(resume_author_ids) if (
+            stopped_for_timeout or stopped_for_rate_limit or stopped_for_upstream
+        ) else 0
         due_count = round_checked + remaining_count
         status_counts = {}
         for item in results:
@@ -1832,8 +1841,9 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         report.remaining_authors = remaining_count
         report.status = (
             "partial_authentication" if risk_error_code in {"account_isolated", "browser_identity_missing"}
-            else ("partial_rate_limited" if stopped_for_rate_limit
-                  else ("partial_timeout" if stopped_for_timeout else "completed"))
+            else ("partial_upstream" if stopped_for_upstream
+                  else ("partial_rate_limited" if stopped_for_rate_limit
+                        else ("partial_timeout" if stopped_for_timeout else "completed")))
         )
         report.summary = (
             f"本轮已检查 {round_checked} 位，累计已检查 {cumulative_checked}/{cycle_total} 位，"
@@ -1917,6 +1927,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             "skipped": skipped_count,
             "stopped_for_timeout": stopped_for_timeout,
             "stopped_for_rate_limit": stopped_for_rate_limit,
+            "stopped_for_upstream": stopped_for_upstream,
             "report_id": report.id,
             "continuation_task_id": continuation_task_id,
             "results": results,

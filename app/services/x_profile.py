@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 
 _RESERVED_X_PATHS = {
@@ -22,6 +24,43 @@ _RESERVED_X_PATHS = {
 
 _USERNAME_PATTERN = re.compile(r"^@?([a-zA-Z0-9_]{1,15})$")
 _PROFILE_PATTERN = re.compile(r"^(?:https?://)?(?:www\.)?(?:x\.com|twitter\.com)/([^/?#]+)")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedXInput:
+    username: str
+    source_url: str
+    source_type: str
+    work_id: str | None = None
+
+
+def resolve_x_input(raw_value: str) -> ResolvedXInput:
+    """识别 X 用户主页或单条动态，并生成稳定规范地址。"""
+    value = str(raw_value or "").strip()
+    direct_match = _USERNAME_PATTERN.fullmatch(value)
+    if direct_match:
+        username = direct_match.group(1)
+        return ResolvedXInput(username, f"https://x.com/{username}", "profile")
+
+    candidate = value if re.match(r"^https?://", value, re.I) else f"https://{value}"
+    parsed = urlsplit(candidate)
+    host = (parsed.hostname or "").lower()
+    if host not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+        raise ValueError(f"无法识别 X/Twitter 链接: {value}")
+    segments = [item for item in parsed.path.split("/") if item]
+    if len(segments) >= 3 and segments[1].lower() == "status" and segments[2].isdigit():
+        username = segments[0]
+        if not _USERNAME_PATTERN.fullmatch(username):
+            raise ValueError("X/Twitter 单条动态链接中的用户名无效")
+        work_id = segments[2]
+        return ResolvedXInput(username, f"https://x.com/{username}/status/{work_id}", "work", work_id)
+    if len(segments) >= 4 and [item.lower() for item in segments[:3]] == ["i", "web", "status"] and segments[3].isdigit():
+        work_id = segments[3]
+        return ResolvedXInput("tweet", f"https://x.com/i/web/status/{work_id}", "work", work_id)
+    if len(segments) == 1:
+        username = parse_x_username(candidate)
+        return ResolvedXInput(username, f"https://x.com/{username}", "profile")
+    raise ValueError("仅支持 X/Twitter 用户主页或单条动态链接")
 
 
 def parse_x_username(raw_value: str) -> str:

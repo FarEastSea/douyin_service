@@ -196,6 +196,7 @@ platform_registry = _build_registry((
             authors=True,
             subscriptions=True,
             profile_download=True,
+            work_download=True,
         ),
     ),
     PlatformDefinition(
@@ -207,6 +208,7 @@ platform_registry = _build_registry((
         domains=("tiktok.com",),
         capabilities=PlatformCapabilities(
             profile_download=True,
+            work_download=True,
         ),
     ),
     PlatformDefinition(
@@ -218,6 +220,7 @@ platform_registry = _build_registry((
         domains=("weibo.com", "weibo.cn"),
         capabilities=PlatformCapabilities(
             profile_download=True,
+            work_download=True,
         ),
     ),
 ))

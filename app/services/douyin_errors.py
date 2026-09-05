@@ -34,6 +34,16 @@ ERROR_INFO = {
         "抖音安全校验未通过，系统已暂停新的抖音接口请求。",
         "请等待冷却结束；若再次失败，请在设置中更新 Cookie 后手动重试。",
     ),
+    "signature_missing": DouyinErrorInfo(
+        "signature_missing", "upstream",
+        "抖音请求签名缺失或已失效。",
+        "请更新服务端签名实现；重复更新 Cookie 或等待冷却不会恢复。",
+    ),
+    "signature_generation_failed": DouyinErrorInfo(
+        "signature_generation_failed", "upstream",
+        "抖音请求签名生成失败。",
+        "请检查服务端签名依赖与日志，修复后再继续订阅检查。",
+    ),
     "rate_limited": DouyinErrorInfo(
         "rate_limited", "risk_control",
         "抖音请求过于频繁，系统已进入保护性冷却。",
@@ -110,6 +120,8 @@ def classify_douyin_error(*, status_code: Optional[int], body: Any = None,
         return DouyinRequestError(
             "browser_identity_missing", detail=text, status_code=status_code
         )
+    if "signature not found" in lowered or "signature invalid" in lowered:
+        return DouyinRequestError("signature_missing", detail=text, status_code=status_code)
     if "argussecurityplugin" in lowered or (
         "blocked by argus" in lowered and "validate error" in lowered
     ):
@@ -211,6 +223,8 @@ def douyin_error_type_label(code: Optional[str]) -> str:
         "account_isolated": "抖音账号已隔离",
         "credential_decryption_failed": "账号密钥无法解密",
         "browser_identity_missing": "浏览器身份信息缺失",
+        "signature_missing": "抖音请求签名失效",
+        "signature_generation_failed": "抖音请求签名生成失败",
         "argus_blocked": "抖音安全校验拦截",
         "rate_limited": "抖音请求频率受限",
         "cookie_invalid": "抖音登录状态失效",
@@ -225,6 +239,8 @@ def localize_douyin_reason(code: Optional[str], reason: Optional[str]) -> str:
         return "账号请求上下文连续异常，系统已停止使用该账号，等待在设置中心重新保存。"
     if code == "browser_identity_missing" or "uifid not found" in lowered:
         return "请求缺少或未识别 UIFID 浏览器身份标识，抖音安全校验拒绝了本次请求。"
+    if code in {"signature_missing", "signature_generation_failed"}:
+        return "服务端未能生成抖音业务接口所需的有效请求签名，与 Cookie 是否能打开网页无关。"
     if code == "argus_blocked" or "argussecurityplugin" in lowered:
         return "抖音安全校验拒绝了本次请求。"
     if code == "rate_limited":

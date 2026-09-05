@@ -2,6 +2,7 @@ const REPORT_STATUS: Record<string, string> = {
   running: '执行中',
   completed: '已完成',
   partial_rate_limited: '请求受限，等待续检',
+  partial_upstream: '采集服务异常，等待续检',
   partial_timeout: '本轮超时，等待续检',
   partial_authentication: '账号请求上下文不可用',
   failed: '异常终止',

@@ -18,9 +18,9 @@ const previewOpen = ref(false), previewItems = ref<MediaItem[]>([]), previewStar
 let statsTimer: number | null = null
 const fallbackPlatforms: MediaPlatform[] = [
   { id: 'douyin', name: '抖音', short_name: '抖音', route_prefix: '/douyin', icon_text: '抖', domains: [], capabilities: { tasks: true, authors: true, works: true, subscriptions: true, subscription_reports: true, settings: true, profile_download: false, work_download: true } },
-  { id: 'x', name: 'X/Twitter', short_name: 'X', route_prefix: '/x', icon_text: '@', domains: [], capabilities: { tasks: true, authors: true, works: false, subscriptions: true, subscription_reports: false, settings: true, profile_download: true, work_download: false } },
-  { id: 'tiktok', name: 'TikTok', short_name: 'TikTok', route_prefix: '/tiktok', icon_text: 'T', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: false } },
-  { id: 'weibo', name: '微博', short_name: '微博', route_prefix: '/weibo', icon_text: '微', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: false } },
+  { id: 'x', name: 'X/Twitter', short_name: 'X', route_prefix: '/x', icon_text: '@', domains: [], capabilities: { tasks: true, authors: true, works: false, subscriptions: true, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
+  { id: 'tiktok', name: 'TikTok', short_name: 'TikTok', route_prefix: '/tiktok', icon_text: 'T', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
+  { id: 'weibo', name: '微博', short_name: '微博', route_prefix: '/weibo', icon_text: '微', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
 ]
 const platforms = computed(() => store.platforms.length ? store.platforms : fallbackPlatforms)
 const platform = computed(() => platforms.value.find(item => route.path === item.route_prefix || route.path.startsWith(`${item.route_prefix}/`)) || platforms.value[0])

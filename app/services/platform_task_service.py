@@ -12,12 +12,15 @@ from app.services.platform_profile_download import get_profile_platform_spec, pr
 ACTIVE_PLATFORM_TASK_STATUSES = ("pending", "downloading")
 
 
-def create_platform_task(platform: str, source_key: str, source_url: str) -> PlatformDownloadTask:
+def create_platform_task(
+    platform: str, source_key: str, source_url: str, source_type: str = "profile"
+) -> PlatformDownloadTask:
     spec = get_profile_platform_spec(platform)
     return PlatformDownloadTask(
         platform=spec.id,
         source_key=source_key,
         source_url=source_url,
+        source_type=source_type,
         status="pending",
         phase="queued",
         engine_name="gallery-dl",

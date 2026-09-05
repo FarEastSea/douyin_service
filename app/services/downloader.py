@@ -33,6 +33,7 @@ from app.services.douyin_errors import (
     parse_douyin_json_response,
 )
 from app.services.douyin_cookie import add_uifid_to_douyin_api_url
+from app.services.douyin_signature import add_douyin_api_signature
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -369,6 +370,8 @@ class DouyinDownloader:
             )
 
     def _record_risk_error(self, exc: DouyinRequestError) -> None:
+        if exc.code in {"signature_missing", "signature_generation_failed"}:
+            return
         isolated = self._record_account_result(exc.code)
         if isolated:
             exc.retry_after = 0
@@ -437,6 +440,13 @@ class DouyinDownloader:
             )
             self._record_risk_error(error)
             raise error from validation_error
+        try:
+            url = add_douyin_api_signature(url, self.headers.get("user-agent", ""))
+        except Exception as signature_error:
+            error = DouyinRequestError(
+                "signature_generation_failed", detail=str(signature_error)
+            )
+            raise error from signature_error
         # 分页、资料、作品详情和短链解析过去只在各自循环内休眠，多个
         # Celery 进程仍可在同一秒集中请求。这里使用 Redis 统一排队。
         wait_for_douyin_request_slot(self.request_delay)

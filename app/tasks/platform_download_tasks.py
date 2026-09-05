@@ -107,6 +107,7 @@ def download_platform_profile(self, task_id: int):
                 spec=spec,
                 source_url=source_url,
                 source_key=source_key,
+                source_type=task.source_type or "profile",
                 destination=spec.download_root(),
                 cookie_file=cookie_path,
                 on_line=on_line,

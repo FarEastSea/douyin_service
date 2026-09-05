@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Callable, Optional, Protocol
+from urllib.parse import urlsplit
 
 
 MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", ".mov", ".m4v"}
@@ -64,10 +65,19 @@ class GalleryDlXDownloadEngine:
             return XDownloadRunResult(False, 0, -1, error_code="engine_unavailable",
                                       error_message="gallery-dl 未安装，请重新安装 requirements.txt 依赖")
 
+        path_segments = [part for part in urlsplit(profile_url).path.split("/") if part]
+        work_id = next((
+            path_segments[index + 1]
+            for index, part in enumerate(path_segments[:-1])
+            if part == "status" and path_segments[index + 1].isdigit()
+        ), None)
+        is_single_work = work_id is not None
         user_folder = Path(destination).expanduser() / username
+        if is_single_work:
+            user_folder = user_folder / "_single" / work_id
         user_folder.mkdir(parents=True, exist_ok=True)
         archive = user_folder / ".download-archive.sqlite3"
-        media_url = f"https://x.com/{username}/media"
+        media_url = profile_url if is_single_work else f"https://x.com/{username}/media"
         command = [
             sys.executable, "-m", "gallery_dl", media_url,
             "--destination", str(user_folder), "--directory", "",
@@ -79,7 +89,7 @@ class GalleryDlXDownloadEngine:
             command.extend(["--cookies", os.path.abspath(cookie_file)])
 
         log = on_line or (lambda _line: None)
-        log(f"[X] 作者: @{username}")
+        log(f"[X] {'单条动态' if is_single_work else '作者'}: {media_url if is_single_work else '@' + username}")
         log(f"[X] 目标目录: {user_folder}")
         log("[X] 已启用请求间隔、限流冷却、有限重试和下载归档")
         before = set(list_media_files(user_folder))
@@ -114,9 +124,9 @@ def is_media_download_line(line: str) -> bool:
 
 def interpret_gallery_dl_error(code: int) -> tuple[str, str]:
     mapping = {
-        4: ("not_found", "作者不存在、已删除或当前账号无权访问"),
+        4: ("not_found", "作者或动态不存在、已删除，或当前账号无权访问"),
         16: ("auth_required", "X 要求登录，请在设置中心更新有效 Cookie"),
-        64: ("invalid_url", "作者链接格式无效"),
+        64: ("invalid_url", "主页或单条动态链接格式无效"),
     }
     return mapping.get(code, ("engine_error", f"gallery-dl 执行失败（退出码 {code}），请查看任务日志"))
 

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core import redis_client
 from app.core.env_config import write_env_updates
@@ -28,6 +29,7 @@ DEFAULT_USER_AGENT = (
 )
 PROFILE_ID = 1
 KEY_PATH = Path(__file__).resolve().parents[2] / ".runtime" / "douyin-account.key"
+SIGNATURE_RECOVERY_MARKER = "douyin_signature_recovery_20260906"
 
 
 @dataclass(frozen=True)
@@ -411,3 +413,44 @@ def migrate_legacy_account_sync() -> bool:
         except Exception:
             pass
     return migrated
+
+
+def recover_legacy_signature_isolation_sync() -> bool:
+    """一次性解除被旧版错误归类为账号风控的签名失败状态。"""
+    db = get_sync_db()
+    recovered = False
+    try:
+        marker = db.execute(
+            select(SystemConfig).where(SystemConfig.key == SIGNATURE_RECOVERY_MARKER)
+        ).scalar_one_or_none()
+        if marker is not None:
+            return False
+
+        profile = db.execute(
+            select(DouyinAccountProfile).where(DouyinAccountProfile.id == PROFILE_ID)
+        ).scalar_one_or_none()
+        if profile is not None and (
+            profile.isolation_reason == "argus_blocked"
+            or profile.last_failure_code == "argus_blocked"
+        ):
+            profile.status = "unknown"
+            profile.isolation_reason = None
+            profile.consecutive_failures = 0
+            profile.last_failure_code = None
+            recovered = True
+
+        db.add(SystemConfig(key=SIGNATURE_RECOVERY_MARKER, value="completed"))
+        db.commit()
+    except IntegrityError:
+        # 多 Web worker 同时启动时，只允许第一个进程执行一次性恢复。
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+    if recovered:
+        try:
+            redis_client.clear_douyin_risk_state()
+        except Exception:
+            pass
+    return recovered

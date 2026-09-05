@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import os
+import re
 from typing import Any, Mapping, Optional
 
 from app.core.config import settings
@@ -18,6 +19,13 @@ DEFAULT_X_AUTHOR_STATUS_LABEL = "正常"
 def build_x_download_dir(username: str) -> str:
     """构建 X 用户下载目录。"""
     return os.path.join(settings.X_DOWNLOAD_DIR, username)
+
+
+def build_x_source_download_dir(username: str, profile_url: str) -> str:
+    match = re.search(r"/(?:status|web/status)/(\d+)(?:[/?#]|$)", profile_url)
+    if match:
+        return os.path.join(settings.X_DOWNLOAD_DIR, username, "_single", match.group(1))
+    return build_x_download_dir(username)
 
 
 def create_x_author(
@@ -81,6 +89,23 @@ def create_x_download_task(author: XAuthor) -> XDownloadTask:
     )
 
 
+def create_x_work_download_task(username: str, source_url: str) -> XDownloadTask:
+    """创建不写入作者订阅表的单条 X 动态下载任务。"""
+    return XDownloadTask(
+        username=username,
+        profile_url=source_url,
+        x_author_id=None,
+        status="pending",
+        phase="queued",
+        engine_name=settings.X_DOWNLOAD_ENGINE,
+        download_dir=build_x_source_download_dir(username, source_url),
+        total_media_count=0,
+        downloaded_media_count=0,
+        progress_percent=0.0,
+        file_count=0,
+    )
+
+
 def prepare_x_task_for_retry(task: XDownloadTask) -> XDownloadTask:
     """重置任务，供失败/取消后重试。"""
     task.status = "pending"
@@ -97,7 +122,7 @@ def prepare_x_task_for_retry(task: XDownloadTask) -> XDownloadTask:
     task.started_at = None
     task.completed_at = None
     task.celery_task_id = None
-    task.download_dir = build_x_download_dir(task.username)
+    task.download_dir = build_x_source_download_dir(task.username, task.profile_url)
     task.engine_name = task.engine_name or settings.X_DOWNLOAD_ENGINE
     task.retry_count = (task.retry_count or 0) + 1
     return task
@@ -115,7 +140,7 @@ def mark_x_task_running(task: XDownloadTask, celery_task_id: Optional[str]) -> X
     task.error_message = None
     task.error_code = None
     task.engine_name = task.engine_name or settings.X_DOWNLOAD_ENGINE
-    task.download_dir = task.download_dir or build_x_download_dir(task.username)
+    task.download_dir = task.download_dir or build_x_source_download_dir(task.username, task.profile_url)
     task.last_log_line = None
     return task
 

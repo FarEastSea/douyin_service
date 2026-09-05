@@ -22,12 +22,13 @@ from app.models.schemas import (
 )
 from app.tasks.x_download_tasks import download_x_profile, check_x_subscriptions
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
-from app.services.x_profile import parse_x_username, normalize_x_profile_url
+from app.services.x_profile import parse_x_username, normalize_x_profile_url, resolve_x_input
 from app.services.x_task_service import (
     ACTIVE_X_TASK_STATUSES,
     cancel_x_task as cancel_x_task_record,
     create_x_author,
     create_x_download_task,
+    create_x_work_download_task,
     prepare_x_task_for_retry,
     serialize_x_author,
     serialize_x_task,
@@ -45,12 +46,30 @@ async def create_x_download(
     request: XDownloadRequest,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """创建 X/Twitter 下载任务，自动添加用户到用户管理"""
+    """创建 X/Twitter 主页或单条动态下载任务；只有主页任务写入用户管理。"""
     try:
-        username = parse_x_username(request.profile_url)
-        profile_url = normalize_x_profile_url(request.profile_url, username)
+        resolved = resolve_x_input(request.profile_url)
+        username = resolved.username
+        profile_url = resolved.source_url
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if resolved.source_type == "work":
+        active_task = (await db.execute(
+            select(XDownloadTask).where(
+                XDownloadTask.profile_url == profile_url,
+                XDownloadTask.status.in_(ACTIVE_X_TASK_STATUSES),
+            ).order_by(XDownloadTask.created_at.desc())
+        )).scalars().first()
+        if active_task:
+            live_state = await asyncio.to_thread(redis_client.get_x_task_state, active_task.id)
+            return serialize_x_task(active_task, live_state)
+        task = create_x_work_download_task(username, profile_url)
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        await asyncio.to_thread(download_x_profile.delay, task.id)
+        return serialize_x_task(task)
 
     result = await db.execute(select(XAuthor).where(XAuthor.username == username))
     author = result.scalar_one_or_none()
