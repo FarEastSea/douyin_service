@@ -33,7 +33,7 @@ from app.services.douyin_errors import (
     parse_douyin_json_response,
 )
 from app.services.douyin_cookie import add_uifid_to_douyin_api_url
-from app.services.douyin_signature import add_douyin_api_signature
+from app.services.douyin_signature import add_douyin_api_signature, douyin_browser_name
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -334,6 +334,7 @@ class DouyinDownloader:
             'sec-fetch-site': 'same-origin',
             'user-agent': context_user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
         }
+        self.douyin_browser_name = douyin_browser_name(self.headers['user-agent'])
         self.runtime_config = runtime_config or get_cached_runtime_config()
         self.download_timeout = int(self.runtime_config.get("download_timeout", settings.DOWNLOAD_TIMEOUT))
         self.download_retry_count = int(self.runtime_config.get("download_retry_count", settings.DOWNLOAD_RETRY_COUNT))
@@ -410,9 +411,10 @@ class DouyinDownloader:
             return data
         except DouyinRequestError as exc:
             self._record_risk_error(exc)
+            endpoint_path = urlsplit(str(getattr(response, "url", "") or "")).path
             logger.warning(
-                "抖音接口请求被分类为 %s: HTTP=%s detail=%s",
-                exc.code, exc.status_code, exc.detail[:300],
+                "抖音接口请求被分类为 %s: endpoint=%s HTTP=%s detail=%s",
+                exc.code, endpoint_path or "unknown", exc.status_code, exc.detail[:300],
             )
             raise
 
@@ -769,7 +771,8 @@ class DouyinDownloader:
             包含 aweme_list, has_more, max_cursor 的字典
         """
         encoded_sec_uid = quote(str(sec_uid), safe='')
-        url = f"https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id={encoded_sec_uid}&max_cursor={max_cursor}&locate_query=false&show_live_replay_strategy=1&need_time_list=1&time_list_query=0&count={count}&publish_video_strategy_type=2&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Edge"
+        browser_name = quote(self.douyin_browser_name, safe='')
+        url = f"https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id={encoded_sec_uid}&max_cursor={max_cursor}&locate_query=false&show_live_replay_strategy=1&need_time_list=1&time_list_query=0&count={count}&publish_video_strategy_type=2&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name={browser_name}"
         
         res, _ = self._get_douyin_response(url)
         data = self._parse_json_response(res, expected_keys=("aweme_list",))

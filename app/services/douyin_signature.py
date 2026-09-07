@@ -7,6 +7,18 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 from app.services.vendor.douyin_abogus import ABogus, BrowserFingerprintGenerator
 
 
+def douyin_browser_name(user_agent: str) -> str:
+    """返回与 User-Agent 一致的抖音 Web 浏览器名称。"""
+    normalized = str(user_agent or "")
+    if "Edg/" in normalized:
+        return "Edge"
+    if "Firefox/" in normalized:
+        return "Firefox"
+    if "Safari/" in normalized and "Chrome/" not in normalized:
+        return "Safari"
+    return "Chrome"
+
+
 def add_douyin_api_signature(url: str, user_agent: str) -> str:
     """为抖音业务 API 的最终查询串生成 a_bogus。"""
     parsed = urlsplit(url)
@@ -18,7 +30,11 @@ def add_douyin_api_signature(url: str, user_agent: str) -> str:
     if not parsed.query:
         raise ValueError("抖音业务 API 缺少可签名的查询参数")
 
-    fingerprint = BrowserFingerprintGenerator.generate_fingerprint("Edge")
+    # Cookie、User-Agent、查询参数和 a_bogus 必须描述同一个浏览器环境。
+    # 不能固定使用 Edge 指纹，否则 Chrome Cookie 会被 Argus 间歇拒绝。
+    fingerprint = BrowserFingerprintGenerator.generate_fingerprint(
+        douyin_browser_name(user_agent)
+    )
     signature = ABogus(
         fp=fingerprint,
         user_agent=str(user_agent or ""),
