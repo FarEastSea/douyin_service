@@ -190,8 +190,12 @@ def _release_subscription_lock(token: str) -> None:
         pass
 
 
-def _close_orphaned_subscription_reports(db: Session) -> int:
-    """新批次已取得互斥锁时，收口未正常结束的旧报告。"""
+def _close_orphaned_subscription_reports(
+    db: Session,
+    *,
+    recovery_reason: str = "已由后续检查接管",
+) -> int:
+    """收口因 Worker 中断而未正常结束的订阅检查报告。"""
     reports = db.execute(
         select(SubscriptionCheckReport).where(SubscriptionCheckReport.status == "running")
     ).scalars().all()
@@ -203,10 +207,10 @@ def _close_orphaned_subscription_reports(db: Session) -> int:
         stale_report.status = "interrupted"
         stale_report.finished_at = finished_at
         stale_report.summary = (
-            "上一批次未正常写入结束状态，已由后续检查接管"
+            f"上一批次未正常写入结束状态，{recovery_reason}"
             f"；中断前进度：{stale_report.summary}"
             if stale_report.summary
-            else "上一批次未正常写入结束状态，已由后续检查接管"
+            else f"上一批次未正常写入结束状态，{recovery_reason}"
         )
     db.commit()
     return len(reports)

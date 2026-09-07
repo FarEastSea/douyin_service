@@ -432,6 +432,11 @@ class DouyinDownloader:
     def _get_douyin_response(self, url: str):
         """统一执行抖音业务请求，并将网络异常转成结构化错误。"""
         self._check_risk_gate()
+        # a_bogus 包含生成时间。必须先完成全局限速排队，再补身份参数并
+        # 生成签名；否则繁忙时会拿着已过期的签名发出请求，被 Argus
+        # 误判为 Signature Not Found / Uifid Not Found。
+        wait_for_douyin_request_slot(self.request_delay)
+        self._check_risk_gate()
         try:
             url = add_uifid_to_douyin_api_url(url, self.headers.get("cookie", ""))
         except ValueError as validation_error:
@@ -447,10 +452,6 @@ class DouyinDownloader:
                 "signature_generation_failed", detail=str(signature_error)
             )
             raise error from signature_error
-        # 分页、资料、作品详情和短链解析过去只在各自循环内休眠，多个
-        # Celery 进程仍可在同一秒集中请求。这里使用 Redis 统一排队。
-        wait_for_douyin_request_slot(self.request_delay)
-        self._check_risk_gate()
         try:
             return get_douyin_response(self.session, url, timeout=self.download_timeout)
         except DouyinRequestError:

@@ -130,6 +130,38 @@ def on_worker_ready(**kwargs):
         # 迁移异常必须进入 Worker 启动日志，不能静默带病继续。
         raise RuntimeError("Celery Worker 数据库迁移失败") from e
 
+    # 部署可能在订阅检查执行中途停止旧 Worker。新 Worker 已就绪且本项目
+    # 只有这一套受管 Worker，此时可安全收口旧报告、释放遗留锁并恢复断点。
+    recovered_reports = 0
+    recovery_db = None
+    try:
+        from app.models.database import get_sync_db
+        from app.tasks.download_tasks import (
+            _close_orphaned_subscription_reports,
+            _reset_subscription_check_cooldown,
+            check_subscriptions,
+        )
+
+        recovery_db = get_sync_db()
+        recovered_reports = _close_orphaned_subscription_reports(
+            recovery_db,
+            recovery_reason="已由 Worker 重启恢复流程接管",
+        )
+        if recovered_reports:
+            _reset_subscription_check_cooldown(recovery_db)
+            check_subscriptions.apply_async(countdown=5)
+    except Exception as e:
+        try:
+            from app.core import redis_client
+            redis_client.append_activity_log(
+                "error", "system", "订阅检查重启恢复失败", str(e)[:200]
+            )
+        except Exception:
+            pass
+    finally:
+        if recovery_db is not None:
+            recovery_db.close()
+
     # Redis 活动日志不影响迁移成功判定；Redis 短暂不可用时 Worker 仍可启动。
     try:
         from app.core import redis_client
@@ -137,7 +169,8 @@ def on_worker_ready(**kwargs):
         redis_client.append_activity_log(
             "info", "system",
             "✅ Celery Worker 已启动并就绪",
-            f"已注册 {len(registered)} 个任务: {', '.join(registered[:15])}"
+            f"已注册 {len(registered)} 个任务: {', '.join(registered[:15])}；"
+            f"已恢复 {recovered_reports} 条中断的订阅检查"
         )
     except Exception:
         pass

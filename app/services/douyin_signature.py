@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-from app.services.vendor.douyin_abogus import ABogus
+from app.services.vendor.douyin_abogus import ABogus, BrowserFingerprintGenerator
 
 
 def add_douyin_api_signature(url: str, user_agent: str) -> str:
     """为抖音业务 API 的最终查询串生成 a_bogus。"""
-    # 保留参数是为了让调用契约与请求上下文绑定；当前上游算法内部使用固定的
-    # 浏览器特征，服务端真实验证表明它可与本项目保存的 User-Agent 配合。
-    del user_agent
     parsed = urlsplit(url)
     if not parsed.path.startswith("/aweme/"):
         return url
@@ -21,7 +18,11 @@ def add_douyin_api_signature(url: str, user_agent: str) -> str:
     if not parsed.query:
         raise ValueError("抖音业务 API 缺少可签名的查询参数")
 
-    signature = ABogus(platform="Win32").get_value(parsed.query)
+    fingerprint = BrowserFingerprintGenerator.generate_fingerprint("Edge")
+    signature = ABogus(
+        fp=fingerprint,
+        user_agent=str(user_agent or ""),
+    ).generate_abogus(parsed.query)[1]
     if not signature:
         raise ValueError("抖音 a_bogus 签名生成结果为空")
 
