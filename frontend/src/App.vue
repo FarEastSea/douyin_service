@@ -21,6 +21,7 @@ const fallbackPlatforms: MediaPlatform[] = [
   { id: 'x', name: 'X/Twitter', short_name: 'X', route_prefix: '/x', icon_text: '@', domains: [], capabilities: { tasks: true, authors: true, works: false, subscriptions: true, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
   { id: 'tiktok', name: 'TikTok', short_name: 'TikTok', route_prefix: '/tiktok', icon_text: 'T', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
   { id: 'weibo', name: '微博', short_name: '微博', route_prefix: '/weibo', icon_text: '微', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
+  { id: 'bilibili', name: '哔哩哔哩', short_name: 'B站', route_prefix: '/bilibili', icon_text: '哔', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
 ]
 const platforms = computed(() => store.platforms.length ? store.platforms : fallbackPlatforms)
 const platform = computed(() => platforms.value.find(item => route.path === item.route_prefix || route.path.startsWith(`${item.route_prefix}/`)) || platforms.value[0])
@@ -67,7 +68,7 @@ onBeforeUnmount(() => {
   <div v-else class="app-shell" :class="{ collapsed, 'mobile-open': store.sidebarOpen }">
     <aside class="sidebar">
       <header class="brand"><div class="brand-mark"><Download /></div><div><small>MEDIA OPS</small><strong>媒体控制台</strong></div><button class="collapse-btn" @click="toggleSidebar"><ChevronLeft /></button></header>
-      <div class="platform-switch" :style="{ gridTemplateColumns: `repeat(${platforms.length}, minmax(0, 1fr))` }"><button v-for="item in platforms" :key="item.id" :class="{ active: platform.id === item.id }" @click="switchPlatform(item)"><span>{{ item.icon_text }}</span><b>{{ item.short_name }}</b></button></div>
+      <div class="platform-switch"><button v-for="item in platforms" :key="item.id" :class="{ active: platform.id === item.id }" @click="switchPlatform(item)"><span>{{ item.icon_text }}</span><b>{{ item.short_name }}</b></button></div>
       <nav class="main-nav"><span class="nav-label">工作区</span><RouterLink v-for="item in nav" :key="item.path" :to="item.path" @click="store.sidebarOpen = false"><component :is="item.icon" /><span>{{ item.label }}</span></RouterLink></nav>
       <footer><div class="service-state"><i /><span>服务在线</span></div><button class="icon-btn" :title="`主题：${store.theme}`" @click="store.cycleTheme"><component :is="themeIcon" /></button></footer>
     </aside>

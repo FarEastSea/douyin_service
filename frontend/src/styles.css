@@ -29,7 +29,7 @@ svg { flex:0 0 auto }
 .collapse-btn { margin-left:auto; width:28px; height:28px; display:grid; place-items:center; border:0; border-radius:8px; background:transparent; color:var(--muted); cursor:pointer }
 .collapse-btn:hover { background:var(--surface-3); color:var(--text) }
 .collapse-btn svg { width:16px; transition:transform .22s }
-.platform-switch { margin:24px 0 28px; padding:4px; display:grid; grid-template-columns:1fr 1fr; gap:4px; border:1px solid var(--line); border-radius:12px; background:var(--surface) }
+.platform-switch { margin:24px 0 28px; padding:4px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; border:1px solid var(--line); border-radius:12px; background:var(--surface) }
 .platform-switch button { height:39px; display:flex; justify-content:center; align-items:center; gap:7px; border:0; border-radius:9px; background:transparent; color:var(--muted); cursor:pointer }
 .platform-switch button.active { color:var(--text); background:var(--surface-3); box-shadow:0 4px 14px rgba(0,0,0,.1) }
 .platform-switch span { width:22px; height:22px; display:grid; place-items:center; border-radius:7px; background:#111; color:#fff; font-size:12px; font-weight:800 }

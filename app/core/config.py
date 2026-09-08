@@ -39,6 +39,7 @@ class Settings(BaseModel):
     X_DOWNLOAD_SUBDIR: str = "X"
     TIKTOK_DOWNLOAD_SUBDIR: str = "TikTok"
     WEIBO_DOWNLOAD_SUBDIR: str = "Weibo"
+    BILIBILI_DOWNLOAD_SUBDIR: str = "Bilibili"
 
     @cached_property
     def DOWNLOAD_DIR(self) -> str:
@@ -169,6 +170,13 @@ class Settings(BaseModel):
     WEIBO_DOWNLOAD_ENGINE: str = "gallery-dl"
     WEIBO_COOKIE: Optional[str] = None
     WEIBO_COOKIE_FILE: Optional[str] = None
+
+    @cached_property
+    def BILIBILI_DOWNLOAD_DIR(self) -> str:
+        return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.BILIBILI_DOWNLOAD_SUBDIR)
+    BILIBILI_DOWNLOAD_ENGINE: str = "yt-dlp"
+    BILIBILI_COOKIE: Optional[str] = None
+    BILIBILI_COOKIE_FILE: Optional[str] = None
     
 class WebSettings:
     """动态读取网页配置，并用可跨进程失效的进程内快照加速。"""
@@ -270,6 +278,7 @@ def ensure_download_dir():
         "X_DOWNLOAD_SUBDIR": current.X_DOWNLOAD_SUBDIR,
         "TIKTOK_DOWNLOAD_SUBDIR": current.TIKTOK_DOWNLOAD_SUBDIR,
         "WEIBO_DOWNLOAD_SUBDIR": current.WEIBO_DOWNLOAD_SUBDIR,
+        "BILIBILI_DOWNLOAD_SUBDIR": current.BILIBILI_DOWNLOAD_SUBDIR,
     }
     error = env_config.check_download_directory(values)
     if error:
@@ -281,5 +290,6 @@ def ensure_download_dir():
     (root / current.X_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.TIKTOK_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.WEIBO_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
+    (root / current.BILIBILI_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     return root
 

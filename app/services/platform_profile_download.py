@@ -9,11 +9,12 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Callable, Optional
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from app.core.config import settings
 from app.services.platform_credentials import get_platform_cookie_sync
@@ -33,6 +34,7 @@ class ProfilePlatformSpec:
     engine_env_key: str
     download_subdir_env_key: str
     default_download_subdir: str
+    default_engine: str
 
     def download_root(self) -> str:
         current = settings.snapshot()
@@ -66,6 +68,7 @@ PROFILE_PLATFORM_SPECS = {
         engine_env_key="TIKTOK_DOWNLOAD_ENGINE",
         download_subdir_env_key="TIKTOK_DOWNLOAD_SUBDIR",
         default_download_subdir="TikTok",
+        default_engine="gallery-dl",
     ),
     "weibo": ProfilePlatformSpec(
         id="weibo",
@@ -76,6 +79,18 @@ PROFILE_PLATFORM_SPECS = {
         engine_env_key="WEIBO_DOWNLOAD_ENGINE",
         download_subdir_env_key="WEIBO_DOWNLOAD_SUBDIR",
         default_download_subdir="Weibo",
+        default_engine="gallery-dl",
+    ),
+    "bilibili": ProfilePlatformSpec(
+        id="bilibili",
+        name="哔哩哔哩",
+        cookie_domain=".bilibili.com",
+        cookie_env_key="BILIBILI_COOKIE",
+        cookie_file_env_key="BILIBILI_COOKIE_FILE",
+        engine_env_key="BILIBILI_DOWNLOAD_ENGINE",
+        download_subdir_env_key="BILIBILI_DOWNLOAD_SUBDIR",
+        default_download_subdir="Bilibili",
+        default_engine="yt-dlp",
     ),
 }
 
@@ -97,6 +112,8 @@ def resolve_platform_input(platform: str, raw_input: str) -> ResolvedPlatformInp
         return _resolve_tiktok_input(value)
     if spec.id == "weibo":
         return _resolve_weibo_input(value)
+    if spec.id == "bilibili":
+        return _resolve_bilibili_input(value)
     raise ValueError(f"平台解析器尚未实现: {spec.id}")
 
 
@@ -179,6 +196,77 @@ def _resolve_weibo_input(value: str) -> ResolvedPlatformInput:
     encoded = quote(identity, safe="._-")
     path = f"{prefix}/{encoded}" if prefix else encoded
     return ResolvedPlatformInput(identity, f"https://weibo.com/{path}", "profile")
+
+
+def _resolve_bilibili_input(value: str) -> ResolvedPlatformInput:
+    """接受 UP 主 UID/空间、BV/av 视频、分P链接和包含视频的动态链接。"""
+    direct_video = re.fullmatch(r"(BV[0-9A-Za-z]{10}|av\d+)", value, re.I)
+    if direct_video:
+        video_id = _normalize_bilibili_video_id(direct_video.group(1))
+        return ResolvedPlatformInput(
+            video_id, f"https://www.bilibili.com/video/{video_id}", "work"
+        )
+    if value.isdecimal():
+        return ResolvedPlatformInput(
+            value, f"https://space.bilibili.com/{value}/video", "profile"
+        )
+
+    candidate = value if re.match(r"^https?://", value, re.I) else f"https://{value}"
+    parsed = urlsplit(candidate)
+    host = (parsed.hostname or "").lower()
+    is_bilibili = host == "bilibili.com" or host.endswith(".bilibili.com")
+    if not is_bilibili and host != "b23.tv":
+        raise ValueError("无法识别 B站链接或 UP 主 UID")
+
+    if host == "b23.tv":
+        if not parsed.path.strip("/"):
+            raise ValueError("B站短链接缺少有效标识")
+        short_url = f"https://b23.tv/{parsed.path.strip('/')}"
+        digest = sha256(short_url.encode("utf-8")).hexdigest()[:16]
+        return ResolvedPlatformInput(f"share-{digest}", short_url, "work")
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if host == "space.bilibili.com":
+        if not parts or not parts[0].isdecimal():
+            raise ValueError("B站 UP 空间链接缺少数字 UID")
+        if parts[1:] not in ([], ["video"], ["upload", "video"]):
+            raise ValueError("仅支持 B站 UP 空间主页或投稿视频页")
+        uid = parts[0]
+        return ResolvedPlatformInput(
+            uid, f"https://space.bilibili.com/{uid}/video", "profile"
+        )
+
+    video_match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av\d+)(?:/)?", parsed.path, re.I)
+    if video_match:
+        video_id = _normalize_bilibili_video_id(video_match.group(1))
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        page_values = query.get("p", [])
+        if page_values and (len(page_values) != 1 or not page_values[0].isdigit() or int(page_values[0]) < 1):
+            raise ValueError("B站分P参数 p 必须是正整数")
+        page = page_values[0] if page_values else None
+        suffix = f"?p={int(page)}" if page and int(page) > 0 else ""
+        source_key = f"{video_id}-p{int(page)}" if suffix else video_id
+        return ResolvedPlatformInput(
+            source_key, f"https://www.bilibili.com/video/{video_id}{suffix}", "work"
+        )
+
+    dynamic_match = re.fullmatch(r"/(\d+)(?:/)?", parsed.path)
+    if host == "t.bilibili.com" and dynamic_match:
+        dynamic_id = dynamic_match.group(1)
+        return ResolvedPlatformInput(
+            f"dynamic-{dynamic_id}", f"https://t.bilibili.com/{dynamic_id}", "work"
+        )
+    opus_match = re.fullmatch(r"/opus/(\d+)(?:/)?", parsed.path, re.I)
+    if opus_match:
+        dynamic_id = opus_match.group(1)
+        return ResolvedPlatformInput(
+            f"dynamic-{dynamic_id}", f"https://www.bilibili.com/opus/{dynamic_id}", "work"
+        )
+    raise ValueError("仅支持 B站 UP 空间、BV/av 视频、分P或包含视频的动态链接")
+
+
+def _normalize_bilibili_video_id(value: str) -> str:
+    return f"BV{value[2:]}" if value[:2].lower() == "bv" else f"av{value[2:]}"
 
 
 def profile_storage_key(source_key: str) -> str:
@@ -302,13 +390,110 @@ class GalleryDlProfileDownloadEngine:
             )
 
 
+class YtDlpProfileDownloadEngine:
+    name = "yt-dlp"
+
+    def download_profile(
+        self,
+        *,
+        spec: ProfilePlatformSpec,
+        source_url: str,
+        source_key: str,
+        source_type: str,
+        destination: str,
+        cookie_file: Optional[str] = None,
+        on_line: Optional[Callable[[str], None]] = None,
+        on_process: Optional[Callable[[int], None]] = None,
+    ) -> ProfileDownloadResult:
+        if importlib.util.find_spec("yt_dlp") is None:
+            return ProfileDownloadResult(
+                False, 0, -1, error_code="engine_unavailable",
+                error_message="yt-dlp 未安装，请重新安装 requirements.txt 依赖",
+            )
+
+        user_folder = Path(destination).expanduser() / profile_storage_key(source_key)
+        user_folder.mkdir(parents=True, exist_ok=True)
+        archive = user_folder / ".download-archive.txt"
+        has_ffmpeg = shutil.which("ffmpeg") is not None
+        command = [
+            sys.executable, "-m", "yt_dlp", source_url,
+            "--paths", str(user_folder),
+            "--output", "%(upload_date>%Y-%m-%d)s_%(title).180B_[%(id)s].%(ext)s",
+            "--download-archive", str(archive),
+            "--continue", "--no-overwrites",
+            "--retries", "3", "--fragment-retries", "3",
+            "--retry-sleep", "http:linear=5::30",
+            "--retry-sleep", "fragment:linear=5::30",
+            "--sleep-requests", "3", "--sleep-interval", "2",
+            "--max-sleep-interval", "5", "--concurrent-fragments", "1",
+            "--socket-timeout", "30",
+            "--format", "bestvideo*+bestaudio/best" if has_ffmpeg else "best[ext=mp4]/best[ext=webm]",
+            "--write-thumbnail", "--write-info-json", "--no-write-playlist-metafiles",
+            "--newline",
+        ]
+        if has_ffmpeg:
+            command.extend(["--merge-output-format", "mp4"])
+        if cookie_file and os.path.isfile(cookie_file):
+            command.extend(["--cookies", os.path.abspath(cookie_file)])
+
+        captured: deque[str] = deque(maxlen=80)
+        sink = on_line or (lambda _line: None)
+
+        def log(line: str) -> None:
+            captured.append(line)
+            sink(line)
+
+        log(f"[{spec.name}] {'单条视频/动态' if source_type == 'work' else 'UP 主空间'}: {source_key}")
+        log(f"[{spec.name}] 目标目录: {user_folder}")
+        log(f"[{spec.name}] 已启用单并发分片、请求间隔、有限重试和下载归档")
+        if not has_ffmpeg:
+            log(f"[{spec.name}] 未检测到 FFmpeg，将下载可直接播放的单文件格式，最高画质可能受限")
+        before = set(list_media_files(user_folder))
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            if on_process:
+                on_process(process.pid)
+            if process.stdout:
+                for line in process.stdout:
+                    log(line.rstrip())
+            return_code = process.wait()
+            files = list_media_files(user_folder)
+            if return_code == 0:
+                log(f"[{spec.name}] 完成：本次新增 {len(set(files) - before)}，目录共 {len(files)} 个媒体")
+                return ProfileDownloadResult(True, len(files), 0, files=files)
+            code, message = _interpret_yt_dlp_error(spec, return_code, captured)
+            return ProfileDownloadResult(
+                False, len(files), return_code, files=files,
+                error_code=code, error_message=message,
+            )
+        except Exception as exc:
+            return ProfileDownloadResult(
+                False, 0, -1, error_code="engine_exception",
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+
+
+def get_configured_profile_engine_name(spec: ProfilePlatformSpec) -> str:
+    current = settings.snapshot()
+    return str(getattr(current, spec.engine_env_key, spec.default_engine)).strip().lower()
+
+
 def build_profile_download_engine(platform: str, engine_name: Optional[str] = None):
     spec = get_profile_platform_spec(platform)
-    current = settings.snapshot()
-    normalized = str(engine_name or getattr(current, spec.engine_env_key, "gallery-dl")).strip().lower()
-    if normalized != "gallery-dl":
-        raise ValueError(f"{spec.name} 不支持下载引擎: {normalized}")
-    return GalleryDlProfileDownloadEngine()
+    normalized = str(engine_name or get_configured_profile_engine_name(spec)).strip().lower()
+    if normalized == "gallery-dl" and spec.default_engine == "gallery-dl":
+        return GalleryDlProfileDownloadEngine()
+    if normalized == "yt-dlp" and spec.default_engine == "yt-dlp":
+        return YtDlpProfileDownloadEngine()
+    raise ValueError(f"{spec.name} 不支持下载引擎: {normalized}")
 
 
 def _interpret_error(
@@ -333,3 +518,32 @@ def _interpret_error(
     if return_code == 4:
         return "request_failed", f"{spec.name} 请求失败，请查看任务日志中的 HTTP 错误"
     return "engine_error", f"gallery-dl 执行失败（退出码 {return_code}），请查看任务日志"
+
+
+def _interpret_yt_dlp_error(
+    spec: ProfilePlatformSpec, return_code: int, output: list[str] | deque[str]
+) -> tuple[str, str]:
+    """依据 yt-dlp 明确错误证据分类，未知错误保留原始任务日志供排查。"""
+    evidence = "\n".join(output).lower()
+    if "ffmpeg" in evidence and any(marker in evidence for marker in ("not found", "not installed")):
+        return "dependency_missing", "B站视频合并需要 FFmpeg，请在服务器安装后重试"
+    if "no valid video url found" in evidence:
+        return "no_video", "该 B站动态不包含可下载视频；图片或纯文字动态暂不支持"
+    if any(marker in evidence for marker in (
+        "request is blocked by server (352)", "request is blocked by server (412)",
+        "http error 412", "http error 429", "too many requests", "exceeded rate limit",
+    )):
+        return "rate_limited", "B站请求受限，请等待后重试；不要连续提交任务"
+    if any(marker in evidence for marker in (
+        "login required", "you need to login", "sign in to confirm", "cookies are no longer valid",
+    )):
+        return "auth_required", "B站要求登录，请在设置中心更新有效 Cookie"
+    if "http error 403" in evidence or "403 forbidden" in evidence:
+        return "access_denied", "B站拒绝访问，请检查 Cookie、账号权限或稍后重试"
+    if "unsupported url" in evidence:
+        return "invalid_url", "B站链接格式无效，或该页面不包含可下载视频"
+    if any(marker in evidence for marker in (
+        "video is no longer available", "video has been deleted", "http error 404",
+    )):
+        return "not_found", "B站视频不存在、已删除，或当前账号无权访问"
+    return "engine_error", f"yt-dlp 执行失败（退出码 {return_code}），请查看任务日志"

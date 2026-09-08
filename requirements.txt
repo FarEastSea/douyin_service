@@ -34,7 +34,7 @@ cryptography>=49,<50
 gallery-dl>=1.30,<2.0
 # 抖音 Web API a_bogus 签名使用；算法实现来源见 THIRD_PARTY_NOTICES.md。
 gmssl>=3.2.2,<4.0
-# gallery-dl 的微博 HLS 视频和后续 B站适配共用该媒体引擎。
+# 微博 HLS 视频解析与 B站下载使用该媒体引擎。
 yt-dlp>=2026.8.19,<2027
 
 # 版本更新（纯 Python git，规避受限环境无法执行 shell 的问题）

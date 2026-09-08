@@ -118,7 +118,7 @@ class PlatformRegistry:
             return None
         return PlatformDetection(
             platform_id=platform_id,
-            input_kind=_classify_input(platform_id, path),
+            input_kind=_classify_input(platform_id, path, host),
             matched_domain=host,
         )
 
@@ -133,7 +133,7 @@ def _extract_host_and_path(value: str) -> tuple[str, str]:
     return _normalize_domain(parsed.hostname or ""), parsed.path or "/"
 
 
-def _classify_input(platform_id: str, path: str) -> PlatformInputKind:
+def _classify_input(platform_id: str, path: str, host: str = "") -> PlatformInputKind:
     normalized_path = path.lower()
     if platform_id == "douyin":
         if normalized_path.startswith("/user/"):
@@ -158,6 +158,17 @@ def _classify_input(platform_id: str, path: str) -> PlatformInputKind:
         if len(segments) >= 2 and segments[0].isdigit():
             return "work"
         if segments:
+            return "author"
+    elif platform_id == "bilibili":
+        if host == "b23.tv":
+            return "work"
+        if re.fullmatch(r"/video/(?:bv[0-9a-z]{10}|av\d+)/?", normalized_path):
+            return "work"
+        if re.fullmatch(r"/opus/\d+/?", normalized_path):
+            return "work"
+        if host == "t.bilibili.com" and re.fullmatch(r"/\d+/?", normalized_path):
+            return "work"
+        if host == "space.bilibili.com" and re.match(r"/\d+(?:/|$)", normalized_path):
             return "author"
     return "unknown"
 
@@ -218,6 +229,18 @@ platform_registry = _build_registry((
         route_prefix="/weibo",
         icon_text="微",
         domains=("weibo.com", "weibo.cn"),
+        capabilities=PlatformCapabilities(
+            profile_download=True,
+            work_download=True,
+        ),
+    ),
+    PlatformDefinition(
+        id="bilibili",
+        name="哔哩哔哩",
+        short_name="B站",
+        route_prefix="/bilibili",
+        icon_text="哔",
+        domains=("bilibili.com", "b23.tv"),
         capabilities=PlatformCapabilities(
             profile_download=True,
             work_download=True,

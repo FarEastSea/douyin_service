@@ -6,7 +6,11 @@ from typing import Any, Mapping, Optional
 
 from app.models.models import PlatformDownloadTask
 from app.models.schemas import PlatformDownloadTaskResponse
-from app.services.platform_profile_download import get_profile_platform_spec, profile_storage_key
+from app.services.platform_profile_download import (
+    get_configured_profile_engine_name,
+    get_profile_platform_spec,
+    profile_storage_key,
+)
 
 
 ACTIVE_PLATFORM_TASK_STATUSES = ("pending", "downloading")
@@ -23,7 +27,7 @@ def create_platform_task(
         source_type=source_type,
         status="pending",
         phase="queued",
-        engine_name="gallery-dl",
+        engine_name=get_configured_profile_engine_name(spec),
         download_dir=os.path.join(spec.download_root(), profile_storage_key(source_key)),
     )
 
@@ -44,6 +48,7 @@ def prepare_platform_task_for_retry(task: PlatformDownloadTask) -> None:
     task.completed_at = None
     task.last_heartbeat_at = None
     task.retry_count = (task.retry_count or 0) + 1
+    task.engine_name = get_configured_profile_engine_name(spec)
     task.download_dir = os.path.join(spec.download_root(), profile_storage_key(task.source_key))
 
 
