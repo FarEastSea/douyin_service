@@ -1406,12 +1406,13 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         skipped_count = 0
         checked_count = 0
         consecutive_rate_limited = 0
+        consecutive_signature_rejected = 0
         stopped_for_timeout = False
         stopped_for_rate_limit = False
         stopped_for_upstream = False
         risk_author_id = None
         risk_error_code = None
-        RATE_LIMIT_STOP_THRESHOLD = 3
+        REQUEST_FAILURE_STOP_THRESHOLD = 3
 
         def _result_sets() -> tuple[set[int], set[int]]:
             settled_ids: set[int] = set()
@@ -1423,7 +1424,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 status = item.get("status")
                 risk_failure = item.get("error_code") in {
                     "account_isolated", "browser_identity_missing", "argus_blocked", "rate_limited",
-                    "suspected_rate_limit",
+                    "suspected_rate_limit", "signature_missing",
                 }
                 if status != "deferred" and not risk_failure:
                     settled_ids.add(int(author_id))
@@ -1502,6 +1503,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 if profile_result.get("account_status") in TERMINAL_AUTHOR_ACCOUNT_STATUSES:
                     # 成功拿到账号状态，说明与抖音通信正常，不是我方被限流
                     consecutive_rate_limited = 0
+                    consecutive_signature_rejected = 0
                     # 账号异常：sync_author_profile 已写入结构化标记（前端可据此筛选）。
                     # 仅标注、保留订阅状态与历史数据，是否退订由用户手动决定。
                     author.last_check_time = datetime.now()
@@ -1620,6 +1622,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 
                 # 本作者检查成功，重置连续限流计数
                 consecutive_rate_limited = 0
+                consecutive_signature_rejected = 0
 
                 # 更新检查时间
                 author.last_check_time = datetime.now()
@@ -1658,15 +1661,52 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             except Exception as e:
                 error_msg = str(e)
 
+                # 上游偶尔会仅拒绝某一次时间敏感签名。下载器已用全新签名有限
+                # 重试；单个作者最终仍失败时先跳过，只有连续多个作者都失败才
+                # 判定为全局签名链路异常，避免一个作者卡住整个订阅周期。
+                if isinstance(e, DouyinRequestError) and e.code == "signature_missing":
+                    author.last_error = f"{e.user_message} {e.action}"
+                    db.commit()
+                    consecutive_signature_rejected += 1
+                    consecutive_rate_limited = 0
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "status": "failed",
+                        "error_code": e.code,
+                        "message": e.user_message,
+                    })
+                    if consecutive_signature_rejected >= REQUEST_FAILURE_STOP_THRESHOLD:
+                        stopped_for_upstream = True
+                        risk_author_id = author.id
+                        risk_error_code = e.code
+                        redis_client.append_activity_log(
+                            "warning", "task", "连续多个作者的抖音请求签名被拒绝，本轮检查提前停止",
+                            f"连续失败={consecutive_signature_rejected}, 最近 author_id={author.id}",
+                        )
+                        _notify_event(
+                            "douyin_risk",
+                            "订阅检查签名连续被拒绝",
+                            f"连续 {consecutive_signature_rejected} 位作者请求失败，已停止本轮请求等待续检。",
+                            level="warning",
+                            dedupe_key="subscription-risk:signature_missing",
+                        )
+                        break
+                    redis_client.append_activity_log(
+                        "info", "task", "单个作者的抖音请求签名被拒绝，继续检查其余作者",
+                        f"连续失败={consecutive_signature_rejected}/{REQUEST_FAILURE_STOP_THRESHOLD}, author_id={author.id}",
+                    )
+                    if author_delay > 0:
+                        time.sleep(author_delay)
+                    continue
+
                 if isinstance(e, DouyinRequestError) and e.code in {
                     "account_isolated", "browser_identity_missing", "argus_blocked", "rate_limited",
-                    "signature_missing", "signature_generation_failed",
+                    "signature_generation_failed",
                 }:
                     author.last_error = f"{e.user_message} {e.action}"
                     db.commit()
-                    stopped_for_upstream = e.code in {
-                        "signature_missing", "signature_generation_failed",
-                    }
+                    stopped_for_upstream = e.code == "signature_generation_failed"
                     stopped_for_rate_limit = not stopped_for_upstream
                     risk_author_id = author.id
                     risk_error_code = e.code
@@ -1701,6 +1741,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     author.last_auto_update_at = author.last_check_time
                     db.commit()
                     consecutive_rate_limited = 0  # 账号异常不是限流，重置计数
+                    consecutive_signature_rejected = 0
                     logger.warning(
                         f"作者账号状态异常，已标注（未退订）: author_id={author.id}, "
                         f"nickname={author.nickname}, status={anomaly_label}"
@@ -1769,7 +1810,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 if probable_rate_limit:
                     results[-1]["error_code"] = "suspected_rate_limit"
                     consecutive_rate_limited += 1
-                    if consecutive_rate_limited >= RATE_LIMIT_STOP_THRESHOLD:
+                    if consecutive_rate_limited >= REQUEST_FAILURE_STOP_THRESHOLD:
                         stopped_for_rate_limit = True
                         risk_author_id = author.id
                         risk_error_code = "suspected_rate_limit"
@@ -1784,11 +1825,13 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "info",
                         "task",
                         "疑似限流，跳过当前作者继续检查其余作者",
-                        f"连续失败={consecutive_rate_limited}/{RATE_LIMIT_STOP_THRESHOLD}, author_id={author.id}",
+                        f"连续失败={consecutive_rate_limited}/{REQUEST_FAILURE_STOP_THRESHOLD}, author_id={author.id}",
                     )
                 else:
                     # 非限流类错误不累计限流计数
                     consecutive_rate_limited = 0
+                if not isinstance(e, DouyinRequestError) or e.code != "signature_missing":
+                    consecutive_signature_rejected = 0
             finally:
                 # 每位作者完成后即持久化报告和跨轮累计进度，页面无需等整轮结束。
                 _update_running_progress()
@@ -1802,6 +1845,16 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             _reset_subscription_check_cooldown(db)
 
         settled_author_ids, completed_author_ids = _result_sets()
+        # 单个、非连续的签名拒绝已经在本轮尝试完成，不应让进度永久少一位；
+        # 但一旦达到连续失败阈值，它们仍全部留在续检集合中等待下轮重试。
+        if not stopped_for_upstream:
+            isolated_signature_failures = {
+                int(item["author_id"])
+                for item in results
+                if item.get("author_id") and item.get("error_code") == "signature_missing"
+            }
+            settled_author_ids.update(isolated_signature_failures)
+            completed_author_ids.update(isolated_signature_failures)
         resume_author_ids = [author.id for author in authors if author.id not in settled_author_ids]
         if risk_author_id is not None and risk_author_id not in resume_author_ids:
             resume_author_ids.insert(0, risk_author_id)
@@ -1809,7 +1862,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             if risk_error_code in {"account_isolated", "browser_identity_missing"}:
                 deferred_reason = "抖音账号请求上下文不可用，重新保存账号档案后优先续检"
             elif stopped_for_upstream:
-                deferred_reason = "服务端请求签名不可用，修复部署后优先续检"
+                deferred_reason = "多个作者的请求签名连续被拒绝，等待下一轮优先续检"
             else:
                 deferred_reason = "疑似限流，等待下一轮优先续检" if stopped_for_rate_limit else "本轮接近超时，等待下一轮优先续检"
             for author in authors:

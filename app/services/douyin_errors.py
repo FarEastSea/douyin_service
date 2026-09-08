@@ -36,8 +36,8 @@ ERROR_INFO = {
     ),
     "signature_missing": DouyinErrorInfo(
         "signature_missing", "upstream",
-        "抖音请求签名缺失或已失效。",
-        "请更新服务端签名实现；重复更新 Cookie 或等待冷却不会恢复。",
+        "抖音拒绝了本次请求签名。",
+        "系统已自动刷新签名并有限重试；若多个作者连续失败，请检查服务端签名依赖与请求参数。",
     ),
     "signature_generation_failed": DouyinErrorInfo(
         "signature_generation_failed", "upstream",
@@ -239,7 +239,9 @@ def localize_douyin_reason(code: Optional[str], reason: Optional[str]) -> str:
         return "账号请求上下文连续异常，系统已停止使用该账号，等待在设置中心重新保存。"
     if code == "browser_identity_missing" or "uifid not found" in lowered:
         return "请求缺少或未识别 UIFID 浏览器身份标识，抖音安全校验拒绝了本次请求。"
-    if code in {"signature_missing", "signature_generation_failed"}:
+    if code == "signature_missing":
+        return "抖音连续拒绝了重新生成的请求签名；系统已停止本轮请求并等待续检。"
+    if code == "signature_generation_failed":
         return "服务端未能生成抖音业务接口所需的有效请求签名，与 Cookie 是否能打开网页无关。"
     if code == "argus_blocked" or "argussecurityplugin" in lowered:
         return "抖音安全校验拒绝了本次请求。"

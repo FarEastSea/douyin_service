@@ -433,34 +433,66 @@ class DouyinDownloader:
 
     def _get_douyin_response(self, url: str):
         """统一执行抖音业务请求，并将网络异常转成结构化错误。"""
-        self._check_risk_gate()
-        # a_bogus 包含生成时间。必须先完成全局限速排队，再补身份参数并
-        # 生成签名；否则繁忙时会拿着已过期的签名发出请求，被 Argus
-        # 误判为 Signature Not Found / Uifid Not Found。
-        wait_for_douyin_request_slot(self.request_delay)
-        self._check_risk_gate()
-        try:
-            url = add_uifid_to_douyin_api_url(url, self.headers.get("cookie", ""))
-        except ValueError as validation_error:
-            error = DouyinRequestError(
-                "browser_identity_missing", detail=str(validation_error)
+        original_url = url
+        is_business_api = urlsplit(original_url).path.startswith("/aweme/")
+        max_attempts = 3 if is_business_api else 1
+
+        for attempt in range(1, max_attempts + 1):
+            self._check_risk_gate()
+            # a_bogus 包含生成时间。每次尝试都必须先完成全局限速排队，再从
+            # 未签名 URL 重新补身份参数和生成签名，不能复用上一次的时间敏感签名。
+            wait_for_douyin_request_slot(self.request_delay)
+            self._check_risk_gate()
+            request_url = original_url
+            try:
+                request_url = add_uifid_to_douyin_api_url(
+                    request_url, self.headers.get("cookie", "")
+                )
+            except ValueError as validation_error:
+                error = DouyinRequestError(
+                    "browser_identity_missing", detail=str(validation_error)
+                )
+                self._record_risk_error(error)
+                raise error from validation_error
+            try:
+                request_url = add_douyin_api_signature(
+                    request_url, self.headers.get("user-agent", "")
+                )
+            except Exception as signature_error:
+                error = DouyinRequestError(
+                    "signature_generation_failed", detail=str(signature_error)
+                )
+                raise error from signature_error
+            try:
+                response, final_url = get_douyin_response(
+                    self.session, request_url, timeout=self.download_timeout
+                )
+            except DouyinRequestError:
+                raise
+            except requests.RequestException as exc:
+                self._record_account_result("network_error")
+                raise DouyinRequestError("network_error", detail=str(exc)) from exc
+
+            response_error = classify_douyin_error(
+                status_code=getattr(response, "status_code", None),
+                body=getattr(response, "text", ""),
             )
-            self._record_risk_error(error)
-            raise error from validation_error
-        try:
-            url = add_douyin_api_signature(url, self.headers.get("user-agent", ""))
-        except Exception as signature_error:
-            error = DouyinRequestError(
-                "signature_generation_failed", detail=str(signature_error)
-            )
-            raise error from signature_error
-        try:
-            return get_douyin_response(self.session, url, timeout=self.download_timeout)
-        except DouyinRequestError:
-            raise
-        except requests.RequestException as exc:
-            self._record_account_result("network_error")
-            raise DouyinRequestError("network_error", detail=str(exc)) from exc
+            if (
+                response_error
+                and response_error.code == "signature_missing"
+                and attempt < max_attempts
+            ):
+                endpoint_path = urlsplit(final_url).path
+                logger.warning(
+                    "抖音拒绝本次请求签名，正在生成新签名重试: "
+                    "endpoint=%s attempt=%s/%s",
+                    endpoint_path or "unknown", attempt, max_attempts,
+                )
+                response.close()
+                continue
+            return response, final_url
+
+        raise RuntimeError("抖音请求重试流程异常结束")
 
     def normalize_work_item(self, item: Dict[str, Any], fallback_sec_uid: str = '') -> Dict[str, Any]:
         """将上游作品数据转换成项目内部结构。仅供采集适配器调用。"""
