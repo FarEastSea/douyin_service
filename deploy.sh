@@ -140,18 +140,33 @@ print(f"Python syntax OK: {len(files)} files")
 PY
         "$BUILD_VENV/bin/python" -c 'import main; assert main.app is not None; print("FastAPI import OK")'
         "$BUILD_VENV/bin/python" - <<'PY'
+import time
+
 from app.core.env_config import validate_env
 
-status = validate_env()
-if not status.get("ready"):
-    problems = [
-        f"{item.get('label') or item.get('key')}: {item.get('message') or '缺少必填配置'}"
-        for item in [*status.get("missing", []), *status.get("errors", [])]
-    ]
-    raise SystemExit(
-        "Runtime preflight failed before stopping the current service:\n- "
-        + "\n- ".join(problems or ["unknown configuration error"])
+attempts = 4
+for attempt in range(1, attempts + 1):
+    status = validate_env()
+    if status.get("ready"):
+        break
+    missing = status.get("missing", [])
+    errors = status.get("errors", [])
+    storage_errors = [item for item in errors if item.get("key") == "DOWNLOAD_ROOT_ACCESS"]
+    other_errors = [item for item in errors if item.get("key") != "DOWNLOAD_ROOT_ACCESS"]
+    if missing or other_errors or not storage_errors or attempt == attempts:
+        problems = [
+            f"{item.get('label') or item.get('key')}: {item.get('message') or '缺少必填配置'}"
+            for item in [*missing, *errors]
+        ]
+        raise SystemExit(
+            "Runtime preflight failed before stopping the current service:\n- "
+            + "\n- ".join(problems or ["unknown configuration error"])
+        )
+    print(
+        f"Download storage is temporarily unavailable; retrying preflight "
+        f"({attempt}/{attempts}) in 5 seconds..."
     )
+    time.sleep(5)
 print("Runtime configuration, database, Redis and download storage OK")
 PY
         "$BUILD_VENV/bin/python" - <<'PY'
