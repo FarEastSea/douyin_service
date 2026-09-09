@@ -170,6 +170,15 @@ def _classify_input(platform_id: str, path: str, host: str = "") -> PlatformInpu
             return "work"
         if host == "space.bilibili.com" and re.match(r"/\d+(?:/|$)", normalized_path):
             return "author"
+    elif platform_id == "xhs":
+        if host == "xhslink.com" or host.endswith(".xhslink.com"):
+            return "work"
+        if re.fullmatch(r"/(?:explore|discovery/item)/[0-9a-z]+/?", normalized_path):
+            return "work"
+        if re.fullmatch(r"/user/profile/[0-9a-z]+/[0-9a-z]+/?", normalized_path):
+            return "work"
+        if re.fullmatch(r"/user/profile/[0-9a-z]+/?", normalized_path):
+            return "author"
     return "unknown"
 
 
@@ -243,6 +252,18 @@ platform_registry = _build_registry((
         domains=("bilibili.com", "b23.tv"),
         capabilities=PlatformCapabilities(
             profile_download=True,
+            work_download=True,
+        ),
+    ),
+    PlatformDefinition(
+        id="xhs",
+        name="小红书",
+        short_name="小红书",
+        route_prefix="/xhs",
+        icon_text="红",
+        domains=("xiaohongshu.com", "xhslink.com"),
+        capabilities=PlatformCapabilities(
+            profile_download=False,
             work_download=True,
         ),
     ),

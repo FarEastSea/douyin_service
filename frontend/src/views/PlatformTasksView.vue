@@ -16,7 +16,12 @@ const definition = computed(() => store.platforms.find(item => item.id === props
 const platformName = computed(() => definition.value?.name || props.platform)
 const inputHint = computed(() => props.platform === 'bilibili'
   ? '输入 B站 UP 空间 UID、主页、BV/av、分P或含视频的动态链接…'
+  : props.platform === 'xhs'
+    ? '粘贴小红书图文、视频或实况笔记分享文本/链接…'
   : `输入 ${platformName.value} 用户主页、@用户名或单条作品链接…`)
+const workspaceDescription = computed(() => props.platform === 'xhs'
+  ? '下载单条图文、视频或实况笔记；主页批量采集将在浏览器会话接入后开放'
+  : '统一处理用户主页与单条视频/动态')
 
 async function load(silent: boolean | Event = false) {
   try {
@@ -28,7 +33,7 @@ async function load(silent: boolean | Event = false) {
   } catch (error: any) { if (silent !== true) store.notify(error.message || `加载 ${platformName.value} 任务失败`, 'error') }
 }
 async function create() {
-  if (!input.value.trim()) return store.notify(`请输入 ${platformName.value} 用户主页、用户名或单条作品链接`, 'error')
+  if (!input.value.trim()) return store.notify(props.platform === 'xhs' ? '请粘贴小红书单条笔记链接' : `请输入 ${platformName.value} 用户主页、用户名或单条作品链接`, 'error')
   try {
     await api(`/platform-downloads/${props.platform}/download`, { method: 'POST', ...jsonBody({ source: input.value.trim() }) })
     input.value = ''; store.notify(`${platformName.value} 下载任务已提交`); await load()
@@ -68,7 +73,7 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (searchTimer != null) cle
 
 <template>
   <section class="workspace-card">
-    <header class="workspace-header"><div><p class="eyebrow">MULTI-PLATFORM PIPELINE</p><h2>{{ platformName }} 下载任务</h2><span>统一处理用户主页与单条视频/动态</span></div><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></header>
+    <header class="workspace-header"><div><p class="eyebrow">MULTI-PLATFORM PIPELINE</p><h2>{{ platformName }} 下载任务</h2><span>{{ workspaceDescription }}</span></div><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></header>
     <form class="command-bar" @submit.prevent="create"><span class="media-icon">{{ definition?.icon_text || 'M' }}</span><input v-model="input" :placeholder="inputHint" /><button class="btn primary">开始下载</button></form>
     <div class="filter-row"><nav class="segmented"><button v-for="item in [['','全部'],['downloading','下载中'],['completed','已完成'],['failed','失败']]" :key="item[0]" :class="{ active: status === item[0] }" @click="status = item[0]; page = 1">{{ item[1] }}</button></nav><label class="search compact-search"><Search :size="15" /><input v-model="search" placeholder="搜索全部任务" /></label></div>
     <div class="table-shell"><table class="data-table"><thead><tr><th>来源与任务</th><th>阶段</th><th>文件</th><th>最近状态</th><th class="actions-col">操作</th></tr></thead><tbody><tr v-for="task in tasks" :key="task.id"><td><div class="media-cell"><span class="media-icon">{{ definition?.icon_text || 'M' }}</span><div><strong>{{ task.source_type === 'work' ? '单条作品' : `@${task.source_key}` }}</strong><span>任务 #{{ task.id }} · {{ platformName }}</span></div></div></td><td><span class="status" :data-tone="task.status">{{ task.status }}</span><small>{{ task.phase || 'queued' }}</small></td><td><strong>{{ task.file_count || 0 }}</strong><span>个媒体文件</span></td><td><span :class="{ 'inline-error': task.error_message }">{{ task.error_message || task.last_log_line || '等待更新' }}</span></td><td><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" @click="preview(task)"><Eye :size="17" /></button><button class="icon-btn" title="复制日志" @click="copyLog(task)"><FileText :size="17" /></button><button v-if="['pending','downloading'].includes(task.status)" class="icon-btn" title="取消" @click="action(task, 'cancel')"><Ban :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button class="icon-btn danger" title="删除记录" @click="remove(task)"><Trash2 :size="17" /></button></div></td></tr></tbody></table><div v-if="!tasks.length" class="empty-state"><strong>暂无 {{ platformName }} 下载任务</strong></div></div>

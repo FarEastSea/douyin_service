@@ -92,6 +92,17 @@ PROFILE_PLATFORM_SPECS = {
         default_download_subdir="Bilibili",
         default_engine="yt-dlp",
     ),
+    "xhs": ProfilePlatformSpec(
+        id="xhs",
+        name="小红书",
+        cookie_domain=".xiaohongshu.com",
+        cookie_env_key="XHS_COOKIE",
+        cookie_file_env_key="XHS_COOKIE_FILE",
+        engine_env_key="XHS_DOWNLOAD_ENGINE",
+        download_subdir_env_key="XHS_DOWNLOAD_SUBDIR",
+        default_download_subdir="Xiaohongshu",
+        default_engine="xhs-api",
+    ),
 }
 
 
@@ -114,6 +125,8 @@ def resolve_platform_input(platform: str, raw_input: str) -> ResolvedPlatformInp
         return _resolve_weibo_input(value)
     if spec.id == "bilibili":
         return _resolve_bilibili_input(value)
+    if spec.id == "xhs":
+        return _resolve_xhs_input(value)
     raise ValueError(f"平台解析器尚未实现: {spec.id}")
 
 
@@ -267,6 +280,47 @@ def _resolve_bilibili_input(value: str) -> ResolvedPlatformInput:
 
 def _normalize_bilibili_video_id(value: str) -> str:
     return f"BV{value[2:]}" if value[:2].lower() == "bv" else f"av{value[2:]}"
+
+
+def _resolve_xhs_input(value: str) -> ResolvedPlatformInput:
+    """接受小红书分享文本、短链及三种官方单笔记链接。"""
+    match = re.search(r"https?://[^\s<>]+", value, re.I)
+    candidate = (match.group(0) if match else value).rstrip("，。！？；;,.!?)）]】")
+    candidate = candidate if re.match(r"^https?://", candidate, re.I) else f"https://{candidate}"
+    parsed = urlsplit(candidate)
+    host = (parsed.hostname or "").lower()
+    if host == "xhslink.com" or host.endswith(".xhslink.com"):
+        if not parsed.path.strip("/"):
+            raise ValueError("小红书短链接缺少分享标识")
+        short_url = f"https://{host}/{parsed.path.strip('/')}"
+        digest = sha256(short_url.encode("utf-8")).hexdigest()[:16]
+        return ResolvedPlatformInput(f"share-{digest}", short_url, "work")
+    if not (host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")):
+        raise ValueError("无法识别小红书笔记链接")
+
+    patterns = (
+        r"/(?:explore|discovery/item)/([0-9A-Za-z]+)(?:/)?",
+        r"/user/profile/[0-9A-Za-z]+/([0-9A-Za-z]+)(?:/)?",
+    )
+    work_id = next(
+        (matched.group(1) for pattern in patterns if (matched := re.fullmatch(pattern, parsed.path, re.I))),
+        None,
+    )
+    if not work_id:
+        if re.fullmatch(r"/user/profile/[0-9A-Za-z]+(?:/)?", parsed.path, re.I):
+            raise ValueError("小红书当前支持单条笔记下载；作者主页批量采集需要浏览器会话，尚未启用")
+        raise ValueError("仅支持小红书 explore、discovery/item、带作品 ID 的用户链接或 xhslink 短链")
+
+    allowed_query = parse_qs(parsed.query, keep_blank_values=False)
+    query_items = []
+    for key in ("xsec_token", "xsec_source"):
+        for item in allowed_query.get(key, [])[:1]:
+            query_items.append(f"{quote(key)}={quote(item, safe='._~-')}")
+    query = "&".join(query_items)
+    canonical = f"https://www.xiaohongshu.com/explore/{work_id}"
+    if query:
+        canonical = f"{canonical}?{query}"
+    return ResolvedPlatformInput(f"note-{work_id}", canonical, "work")
 
 
 def profile_storage_key(source_key: str) -> str:
@@ -493,6 +547,10 @@ def build_profile_download_engine(platform: str, engine_name: Optional[str] = No
         return GalleryDlProfileDownloadEngine()
     if normalized == "yt-dlp" and spec.default_engine == "yt-dlp":
         return YtDlpProfileDownloadEngine()
+    if normalized == "xhs-api" and spec.default_engine == "xhs-api":
+        from app.services.xhs_download import XhsApiDownloadEngine
+
+        return XhsApiDownloadEngine()
     raise ValueError(f"{spec.name} 不支持下载引擎: {normalized}")
 
 

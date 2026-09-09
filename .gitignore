@@ -41,6 +41,7 @@ htmlcov/
 logs/
 log/
 .runtime/
+.xhs-engine/
 downloads/
 celerybeat-schedule
 celerybeat.pid

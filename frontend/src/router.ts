@@ -26,6 +26,8 @@ export const router = createRouter({
     { path: '/weibo/settings', component: SettingsView },
     { path: '/bilibili/tasks', component: PlatformTasksView, props: { platform: 'bilibili' } },
     { path: '/bilibili/settings', component: SettingsView },
+    { path: '/xhs/tasks', component: PlatformTasksView, props: { platform: 'xhs' } },
+    { path: '/xhs/settings', component: SettingsView },
     { path: '/:pathMatch(.*)*', redirect: '/douyin/tasks' },
   ],
 })

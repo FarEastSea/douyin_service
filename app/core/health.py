@@ -52,6 +52,21 @@ async def _read_process_status() -> dict[str, Any]:
     return await asyncio.to_thread(process_manager.get_status)
 
 
+async def _check_xhs_collector() -> None:
+    from urllib.request import urlopen
+
+    from app.services.xhs_download import XHS_INTERNAL_API_URL
+
+    url = XHS_INTERNAL_API_URL + "/health"
+
+    def ping() -> None:
+        with urlopen(url, timeout=2) as response:
+            if response.status != 200:
+                raise RuntimeError("collector health failed")
+
+    await asyncio.to_thread(ping)
+
+
 async def _ping_workers() -> int:
     def ping() -> int:
         from app.tasks.celery_app import celery_app
@@ -80,10 +95,11 @@ async def build_readiness(*, degraded_mode: bool) -> dict[str, Any]:
             "redis": "等待配置完成",
             "worker": "等待配置完成",
             "beat": "等待配置完成",
+            "xhs_collector": "等待配置完成",
         }.items():
             components[name] = {"ok": False, "message": message}
     else:
-        database, redis, process = await asyncio.gather(
+        database, redis, process, xhs_collector = await asyncio.gather(
             _check(
                 _check_database,
                 success_message="数据库可用",
@@ -102,9 +118,16 @@ async def build_readiness(*, degraded_mode: bool) -> dict[str, Any]:
                 failure_message="进程状态不可用",
                 timeout=2.0,
             ),
+            _check(
+                _check_xhs_collector,
+                success_message="小红书采集服务可用",
+                failure_message="小红书采集服务不可用",
+                timeout=3.0,
+            ),
         )
         components["database"] = database
         components["redis"] = redis
+        components["xhs_collector"] = xhs_collector
 
         process_value = process.get("value") if process.get("ok") else {}
         worker_running = bool((process_value or {}).get("worker", {}).get("running"))

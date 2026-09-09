@@ -12,7 +12,7 @@ from typing import Callable, Optional, Protocol
 from urllib.parse import urlsplit
 
 
-MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", ".mov", ".m4v"}
+MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".avif", ".mp4", ".webm", ".mov", ".m4v"}
 
 
 @dataclass(slots=True)

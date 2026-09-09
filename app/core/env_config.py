@@ -28,13 +28,14 @@ _LOCAL_CONFIG_LOCK = RLock()
 _DOWNLOAD_PATH_ENV_KEYS = {
     "DOWNLOAD_ROOT", "DOWNLOAD_DIR", "X_DOWNLOAD_DIR",
     "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR",
-    "WEIBO_DOWNLOAD_SUBDIR", "BILIBILI_DOWNLOAD_SUBDIR",
+    "WEIBO_DOWNLOAD_SUBDIR", "BILIBILI_DOWNLOAD_SUBDIR", "XHS_DOWNLOAD_SUBDIR",
 }
 _DOWNLOAD_ENGINE_VALUES = {
     "X_DOWNLOAD_ENGINE": "gallery-dl",
     "TIKTOK_DOWNLOAD_ENGINE": "gallery-dl",
     "WEIBO_DOWNLOAD_ENGINE": "gallery-dl",
     "BILIBILI_DOWNLOAD_ENGINE": "yt-dlp",
+    "XHS_DOWNLOAD_ENGINE": "xhs-api",
 }
 
 
@@ -59,6 +60,7 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="TIKTOK_DOWNLOAD_SUBDIR", label="TikTok 子目录", group="下载目录", default="TikTok", help="根目录下的相对子目录"),
     EnvField(key="WEIBO_DOWNLOAD_SUBDIR", label="微博子目录", group="下载目录", default="Weibo", help="根目录下的相对子目录"),
     EnvField(key="BILIBILI_DOWNLOAD_SUBDIR", label="B站子目录", group="下载目录", default="Bilibili", help="根目录下的相对子目录"),
+    EnvField(key="XHS_DOWNLOAD_SUBDIR", label="小红书子目录", group="下载目录", default="Xiaohongshu", help="根目录下的相对子目录"),
     EnvField(key="DB_TYPE", label="数据库类型", group="数据库", default="postgresql", required=True),
     EnvField(key="DB_HOST", label="数据库主机", group="数据库", default="localhost", required=True),
     EnvField(key="DB_PORT", label="数据库端口", group="数据库", default="5432", required=True),
@@ -125,6 +127,9 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="BILIBILI_DOWNLOAD_ENGINE", label="B站下载引擎", group="B站", default="yt-dlp"),
     EnvField(key="BILIBILI_COOKIE", label="B站 Cookie", group="B站", default="", secret=True),
     EnvField(key="BILIBILI_COOKIE_FILE", label="B站 Cookie 文件", group="B站", default=""),
+    EnvField(key="XHS_DOWNLOAD_ENGINE", label="小红书下载引擎", group="小红书", default="xhs-api"),
+    EnvField(key="XHS_COOKIE", label="小红书 Cookie", group="小红书", default="", secret=True),
+    EnvField(key="XHS_COOKIE_FILE", label="小红书 Cookie 文件", group="小红书", default=""),
 ]
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}

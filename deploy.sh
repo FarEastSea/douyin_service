@@ -24,6 +24,9 @@ PREVIOUS_SHA=""
 CODE_SWITCHED=0
 ROLLING_BACK=0
 RESTART_REQUIRED=0
+XHS_ENGINE_CANDIDATE=""
+PREVIOUS_XHS_ENGINE=""
+XHS_ENGINE_SWITCHED=0
 
 validate_layout() {
     test -d "$SERVICE_ROOT/.git" || {
@@ -84,6 +87,92 @@ PY
         cd "$CANDIDATE_DIR"
         "$python_bin" -c 'import main; assert main.app is not None; print("BT Panel FastAPI import OK")'
     )
+}
+
+prepare_xhs_engine() {
+    local lock_file="$CANDIDATE_DIR/xhs-engine.lock"
+    local repository=""
+    local revision=""
+    local uv_version=""
+    local engine_root="$SERVICE_ROOT/.xhs-engine"
+    local releases_root="$engine_root/releases"
+    local incomplete=""
+
+    test -f "$lock_file" || {
+        echo "Deploy failed: xhs-engine.lock is missing." >&2
+        return 1
+    }
+    repository="$(sed -n 's/^repository=//p' "$lock_file")"
+    revision="$(sed -n 's/^revision=//p' "$lock_file")"
+    uv_version="$(sed -n 's/^uv_version=//p' "$lock_file")"
+    if [ "$repository" != "https://github.com/Andy-SoulShell/xhs-downloader.git" ] || \
+       ! [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || \
+       ! [[ "$uv_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Deploy failed: xhs-engine.lock contains an invalid or unapproved source." >&2
+        return 1
+    fi
+
+    mkdir -p "$releases_root"
+    XHS_ENGINE_CANDIDATE="$releases_root/$revision"
+    if [ -x "$XHS_ENGINE_CANDIDATE/source/.venv/bin/xhs-api" ]; then
+        echo "Pinned Xiaohongshu collector is already installed: $revision"
+        return 0
+    fi
+
+    if [ -e "$XHS_ENGINE_CANDIDATE" ]; then
+        incomplete="$releases_root/.${revision}.incomplete.$(date +%s)"
+        mv "$XHS_ENGINE_CANDIDATE" "$incomplete"
+        echo "Moved an incomplete collector installation aside: $incomplete"
+    fi
+    mkdir "$XHS_ENGINE_CANDIDATE"
+    echo "Installing pinned Xiaohongshu collector in an isolated environment..."
+    git init "$XHS_ENGINE_CANDIDATE/source"
+    git -C "$XHS_ENGINE_CANDIDATE/source" remote add origin "$repository"
+    git -C "$XHS_ENGINE_CANDIDATE/source" fetch --depth 1 origin "$revision"
+    git -C "$XHS_ENGINE_CANDIDATE/source" checkout --detach FETCH_HEAD
+    test "$(git -C "$XHS_ENGINE_CANDIDATE/source" rev-parse HEAD)" = "$revision" || {
+        echo "Deploy failed: Xiaohongshu collector revision mismatch." >&2
+        return 1
+    }
+    "$RUNTIME_VENV/bin/python" -m pip install "uv==$uv_version"
+    "$RUNTIME_VENV/bin/uv" sync --frozen --no-dev \
+        --project "$XHS_ENGINE_CANDIDATE/source" --package xhs-api \
+        --python "$RUNTIME_VENV/bin/python"
+    test -x "$XHS_ENGINE_CANDIDATE/source/.venv/bin/xhs-api" || {
+        echo "Deploy failed: isolated xhs-api executable was not created." >&2
+        return 1
+    }
+    echo "Xiaohongshu collector dependencies OK: $revision"
+}
+
+activate_xhs_engine() {
+    local engine_root="$SERVICE_ROOT/.xhs-engine"
+    local current="$engine_root/current"
+    local next="$engine_root/.current.next"
+    if [ -e "$current" ] && [ ! -L "$current" ]; then
+        echo "Deploy failed: $current must be a managed symlink." >&2
+        return 1
+    fi
+    PREVIOUS_XHS_ENGINE="$(readlink -f "$current" 2>/dev/null || true)"
+    rm -f "$next"
+    ln -s "$XHS_ENGINE_CANDIDATE" "$next"
+    mv -Tf "$next" "$current"
+    XHS_ENGINE_SWITCHED=1
+}
+
+restore_xhs_engine() {
+    local engine_root="$SERVICE_ROOT/.xhs-engine"
+    local current="$engine_root/current"
+    local next="$engine_root/.current.rollback"
+    [ "$XHS_ENGINE_SWITCHED" -eq 1 ] || return 0
+    rm -f "$next"
+    if [ -n "$PREVIOUS_XHS_ENGINE" ]; then
+        ln -s "$PREVIOUS_XHS_ENGINE" "$next"
+        mv -Tf "$next" "$current"
+    else
+        rm -f "$current"
+    fi
+    XHS_ENGINE_SWITCHED=0
 }
 
 select_build_python() {
@@ -259,6 +348,34 @@ stop_running_instances() {
     return 1
 }
 
+stop_managed_xhs_engine() {
+    local pid_file="$SERVICE_ROOT/logs/xhs-api.pid"
+    local pid=""
+    local cmdline=""
+    [ -f "$pid_file" ] || return 0
+    pid="$(tr -dc '0-9' < "$pid_file")"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$pid_file"
+        return 0
+    fi
+    cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+    if [[ "$cmdline" != *"xhs-api"* ]] || [[ "$cmdline" != *"$SERVICE_ROOT/.xhs-engine/"* ]]; then
+        echo "Deploy failed: xhs-api.pid does not belong to this project." >&2
+        return 1
+    fi
+    echo "Stopping managed Xiaohongshu collector (PID=${pid})..."
+    kill -TERM "$pid"
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$pid_file"
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "Deploy failed: Xiaohongshu collector did not stop in time." >&2
+    return 1
+}
+
 start_runtime() {
     echo "Starting root application with the BT Panel Python environment..."
     APP_PORT="$PORT" VENV_DIR="$RUNTIME_VENV" RUNTIME_DIR="$SERVICE_ROOT" bash "$SERVICE_ROOT/start.sh"
@@ -279,6 +396,7 @@ base = f"http://127.0.0.1:{os.environ['APP_PORT']}"
 allow_legacy_health = os.environ.get("ALLOW_LEGACY_HEALTH") == "1"
 token = settings.ADMIN_TOKEN
 headers = {"Authorization": f"Bearer {token}"} if token else {}
+xhs_api_url = "http://127.0.0.1:5556"
 
 def get(path, auth=False):
     request = urllib.request.Request(base + path, headers=headers if auth else {})
@@ -315,6 +433,10 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                 raise RuntimeError("legacy health payload is not healthy")
         get("/")
         get("/docs")
+        if xhs_api_url:
+            with urllib.request.urlopen(xhs_api_url.rstrip("/") + "/health", timeout=5) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"Xiaohongshu collector returned HTTP {response.status}")
         if token:
             authors = json.loads(get("/api/authors/?page=1&page_size=1", True))
             tasks = json.loads(get("/api/tasks/?page=1&page_size=20", True))
@@ -363,6 +485,8 @@ rollback() {
     ROLLING_BACK=1
     echo "Deploy failed; restoring root worktree to ${PREVIOUS_SHA}..." >&2
     stop_running_instances || true
+    stop_managed_xhs_engine || true
+    restore_xhs_engine
     git reset --hard "$PREVIOUS_SHA"
     start_runtime
     smoke_check 1 30
@@ -394,12 +518,15 @@ fi
 prepare_candidate
 preflight
 prepare_runtime_environment
+prepare_xhs_engine
 
 if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。
     stop_running_instances
+    stop_managed_xhs_engine
     CODE_SWITCHED=1
     RESTART_REQUIRED=1
+    activate_xhs_engine
     git reset --hard "$TARGET_SHA"
 fi
 

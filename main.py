@@ -160,6 +160,7 @@ app = FastAPI(
 - 🌍 TikTok 用户主页媒体下载（gallery-dl）
 - 🔴 微博用户主页媒体下载（gallery-dl）
 - 📺 B站 UP 主空间、视频、分P及含视频动态下载（yt-dlp）
+- 📕 小红书单条图文、视频与实况笔记下载（隔离采集服务）
 
 ## API 文档
 

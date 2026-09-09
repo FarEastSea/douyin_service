@@ -5,6 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_DIR}"
 LOG_DIR="${RUNTIME_DIR}/logs"
 PID_FILE="${LOG_DIR}/gunicorn.pid"
+XHS_PID_FILE="${LOG_DIR}/xhs-api.pid"
 
 matches_project_server() {
     local pid="$1"
@@ -61,6 +62,21 @@ while IFS= read -r PID; do
         FOUND=1
     fi
 done < <(pgrep -f "main:app|main.py" 2>/dev/null || true)
+
+if [ -f "$XHS_PID_FILE" ]; then
+    PID="$(tr -dc '0-9' < "$XHS_PID_FILE")"
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        CMDLINE="$(tr '\0' ' ' < "/proc/${PID}/cmdline" 2>/dev/null || true)"
+        if [[ "$CMDLINE" == *"xhs-api"* ]] && [[ "$CMDLINE" == *"${PROJECT_DIR}/.xhs-engine/"* ]]; then
+            stop_pid "$PID"
+            FOUND=1
+        else
+            echo "Refusing to stop PID ${PID}: xhs-api.pid does not belong to this project." >&2
+            exit 1
+        fi
+    fi
+    rm -f "$XHS_PID_FILE"
+fi
 
 if [ "$FOUND" -eq 0 ]; then
     echo "Service is not running."
