@@ -15,6 +15,7 @@ XHS_ENGINE_DIR="${PROJECT_DIR}/.xhs-engine/current"
 XHS_API_BIN="${XHS_ENGINE_DIR}/source/.venv/bin/xhs-api"
 XHS_PID_FILE="${LOG_DIR}/xhs-api.pid"
 XHS_DATA_DIR="${STATE_DIR}/xhs"
+XHS_BROWSER_CACHE="${PROJECT_DIR}/.xhs-engine/browser-cache"
 
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$XHS_DATA_DIR"
@@ -53,9 +54,21 @@ start_xhs_engine() {
     local xhs_api_url="http://127.0.0.1:5556"
     local pid=""
     local run_as=()
+    local browser_executable=""
 
     [ -x "$XHS_API_BIN" ] || {
         echo "Start failed: isolated xhs-api is unavailable; run Jenkins deployment first." >&2
+        return 1
+    }
+    browser_executable="$(PLAYWRIGHT_BROWSERS_PATH="$XHS_BROWSER_CACHE" \
+        "${XHS_ENGINE_DIR}/source/.venv/bin/python" - <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as playwright:
+    print(playwright.chromium.executable_path)
+PY
+)"
+    [ -x "$browser_executable" ] || {
+        echo "Start failed: managed Chromium is unavailable; run Jenkins deployment first." >&2
         return 1
     }
     if [ -f "$XHS_PID_FILE" ]; then
@@ -85,7 +98,11 @@ start_xhs_engine() {
     nohup "${run_as[@]}" env \
         XHS_WORK_PATH="$XHS_DATA_DIR" \
         XHS_FOLDER_NAME="download" \
-        XHS_ROUTE_STRATEGY="http_only" \
+        PLAYWRIGHT_BROWSERS_PATH="$XHS_BROWSER_CACHE" \
+        XHS_ROUTE_STRATEGY="http_first" \
+        XHS_BROWSER_DRIVER="managed" \
+        XHS_MANAGED_BROWSER_EXECUTABLE="$browser_executable" \
+        XHS_MANAGED_BROWSER_HEADLESS="true" \
         XHS_MAX_CONCURRENCY="1" \
         XHS_LIVE_DOWNLOAD="true" \
         "$XHS_API_BIN" --host "$xhs_host" --port "$xhs_port" \

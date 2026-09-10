@@ -478,6 +478,71 @@ class PlatformMediaAsset(Base):
     task = relationship("PlatformDownloadTask", back_populates="media_assets")
 
 
+class PlatformAuthor(Base):
+    """通用平台作者及订阅状态；不复用抖音专用 sec_uid 字段。"""
+
+    __tablename__ = "platform_authors"
+    __table_args__ = (
+        UniqueConstraint("platform", "external_user_id", name="uq_platform_author_identity"),
+        Index("idx_platform_author_subscription", "platform", "is_subscribed", "last_check_time"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    external_user_id = Column(String(255), nullable=False)
+    profile_url = Column(Text, nullable=False)
+    nickname = Column(String(255))
+    red_id = Column(String(255))
+    avatar_url = Column(Text)
+    description = Column(Text)
+    account_status = Column(String(32), default="unknown", nullable=False, index=True)
+    last_error = Column(Text)
+    is_subscribed = Column(Boolean, default=False, nullable=False)
+    check_interval = Column(Integer, default=21600, nullable=False)
+    last_check_time = Column(DateTime)
+    last_success_at = Column(DateTime)
+    last_full_reconcile_at = Column(DateTime)
+    total_works = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    works = relationship(
+        "PlatformWork", back_populates="author", cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class PlatformWork(Base):
+    """通用平台作品索引；媒体文件仍由 PlatformMediaAsset 管理。"""
+
+    __tablename__ = "platform_works"
+    __table_args__ = (
+        UniqueConstraint("platform", "external_work_id", name="uq_platform_work_identity"),
+        Index("idx_platform_work_author_published", "author_id", "published_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    external_work_id = Column(String(255), nullable=False)
+    author_id = Column(
+        Integer, ForeignKey("platform_authors.id", ondelete="CASCADE"), nullable=False,
+    )
+    download_task_id = Column(
+        Integer, ForeignKey("platform_download_tasks.id", ondelete="SET NULL"), nullable=True,
+    )
+    source_url = Column(Text, nullable=False)
+    xsec_token = Column(Text)
+    title = Column(Text)
+    work_type = Column(String(16), default="unknown", nullable=False)
+    cover_url = Column(Text)
+    published_at = Column(DateTime)
+    is_pinned = Column(Boolean, default=False, nullable=False)
+    discovered_at = Column(DateTime, server_default=func.now())
+    last_seen_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    author = relationship("PlatformAuthor", back_populates="works")
+
+
 class PlatformCredential(Base):
     """非抖音平台的加密登录凭据；接口永不返回密文。"""
     __tablename__ = "platform_credentials"

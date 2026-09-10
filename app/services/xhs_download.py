@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
-from pathlib import Path
 import re
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
 from app.services.x_downloader import list_media_files
-
 
 _ALLOWED_MEDIA_DOMAINS = ("xhscdn.com", "xhsimg.com", "xiaohongshu.com")
 _ALLOWED_SUFFIXES = {"avif", "gif", "heic", "jpeg", "jpg", "mov", "mp4", "png", "webp"}
@@ -27,6 +26,8 @@ class XhsDownloadResult:
     files: list[str] = field(default_factory=list)
     error_message: Optional[str] = None
     error_code: Optional[str] = None
+    author_profile: Optional[dict[str, Any]] = None
+    discovered_works: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _cookie_header(cookie_file: Optional[str]) -> str:
@@ -91,14 +92,29 @@ class XhsApiDownloadEngine:
         cookie_file: Optional[str] = None,
         on_line: Optional[Callable[[str], None]] = None,
         on_process: Optional[Callable[[int], None]] = None,
+        known_work_ids: Iterable[str] = (),
+        max_items: int = 100,
+        max_scrolls: int = 40,
+        known_streak: int = 5,
+        scroll_delay: float = 2.0,
     ) -> XhsDownloadResult:
         del on_process
         log = on_line or (lambda _line: None)
-        if source_type != "work":
-            return XhsDownloadResult(
-                False, 0, 64, error_code="unsupported_profile",
-                error_message="小红书当前支持单条图文、视频或实况笔记；作者主页批量采集需要浏览器会话，尚未启用",
+        if source_type == "profile":
+            return self._download_author(
+                spec=spec,
+                source_url=source_url,
+                destination=destination,
+                cookie_file=cookie_file,
+                log=log,
+                known_work_ids=known_work_ids,
+                max_items=max_items,
+                max_scrolls=max_scrolls,
+                known_streak=known_streak,
+                scroll_delay=scroll_delay,
             )
+        if source_type != "work":
+            return XhsDownloadResult(False, 0, 64, error_code="invalid_url", error_message="不支持的小红书来源类型")
 
         cookie = _cookie_header(cookie_file)
         folder = Path(destination).expanduser() / _safe_segment(source_key, "note")
@@ -200,3 +216,68 @@ class XhsApiDownloadEngine:
             )
         finally:
             session.close()
+
+    def _download_author(
+        self,
+        *,
+        spec,
+        source_url: str,
+        destination: str,
+        cookie_file: Optional[str],
+        log: Callable[[str], None],
+        known_work_ids: Iterable[str],
+        max_items: int,
+        max_scrolls: int,
+        known_streak: int,
+        scroll_delay: float,
+    ) -> XhsDownloadResult:
+        from app.services.xhs_profile import XhsProfileError, collect_profile
+
+        del destination, cookie_file
+
+        log(f"[{spec.name}] 正在通过受管浏览器读取作者主页")
+        try:
+            collected = collect_profile(
+                source_url,
+                known_ids=known_work_ids,
+                max_items=max_items,
+                max_scrolls=max_scrolls,
+                known_streak=known_streak,
+                scroll_delay=scroll_delay,
+            )
+        except XhsProfileError as exc:
+            return XhsDownloadResult(False, 0, -1, error_code=exc.code, error_message=str(exc))
+
+        items = [item for item in collected.get("items", []) if isinstance(item, dict)]
+        profile = collected.get("author") if isinstance(collected.get("author"), dict) else None
+        if not profile:
+            return XhsDownloadResult(
+                False, 0, 2, error_code="invalid_profile_payload",
+                error_message="小红书作者主页没有返回可验证身份",
+            )
+        if not items:
+            log(f"[{spec.name}] 作者主页当前没有作品")
+            return XhsDownloadResult(True, 0, 0, author_profile=profile)
+        log(
+            f"[{spec.name}] 已发现 {len(items)} 条作品，停止原因: "
+            f"{collected.get('stop_reason') or 'unknown'}"
+        )
+        discovered: list[dict[str, Any]] = []
+        for item in items:
+            note_id = str(item.get("note_id") or "").strip()
+            note_url = str(item.get("source_url") or "").strip()
+            if not note_id or not note_url:
+                continue
+            discovered.append(dict(item))
+        if not discovered:
+            return XhsDownloadResult(
+                False, 0, 2, error_code="invalid_profile_payload",
+                error_message="小红书作者主页返回的作品摘要缺少可验证 ID 或地址",
+            )
+        return XhsDownloadResult(
+            True,
+            0,
+            0,
+            author_profile=profile,
+            discovered_works=discovered,
+        )

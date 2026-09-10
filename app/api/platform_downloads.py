@@ -1,10 +1,10 @@
 """平台注册表驱动的主页媒体下载 API。"""
 
-from pathlib import Path
-from datetime import datetime
 import asyncio
 import os
 import signal
+from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -15,16 +15,32 @@ from sqlalchemy.orm import selectinload
 from app.core import redis_client
 from app.core.config import settings
 from app.models.database import get_async_db
-from app.models.models import PlatformDownloadTask, PlatformMediaAsset
+from app.models.models import (
+    PlatformAuthor,
+    PlatformDownloadTask,
+    PlatformMediaAsset,
+    PlatformWork,
+)
 from app.models.schemas import (
     MessageResponse,
+    PaginatedPlatformAuthorsResponse,
     PaginatedPlatformTasksResponse,
+    PaginatedPlatformWorksResponse,
+    PlatformAuthorResponse,
+    PlatformAuthorSubscriptionUpdate,
     PlatformCookieUpdate,
     PlatformDownloadRequest,
     PlatformDownloadTaskResponse,
     PlatformMediaAssetResponse,
+    PlatformWorkResponse,
+    XhsBrowserStatusResponse,
+    XhsLoginQrResponse,
 )
 from app.services.media_paths import resolve_media_path
+from app.services.platform_credentials import (
+    get_platform_credential_status,
+    save_platform_cookie,
+)
 from app.services.platform_profile_download import (
     get_profile_platform_spec,
     resolve_platform_input,
@@ -35,12 +51,13 @@ from app.services.platform_task_service import (
     prepare_platform_task_for_retry,
     serialize_platform_task,
 )
-from app.services.platform_credentials import (
-    get_platform_credential_status,
-    save_platform_cookie,
+from app.services.xhs_profile import (
+    XhsProfileError,
+    ensure_managed_browser,
+    get_browser_login_status,
+    get_login_qrcode,
 )
 from app.tasks.platform_download_tasks import download_platform_profile
-
 
 router = APIRouter(prefix="/platform-downloads", tags=["多平台下载"])
 
@@ -66,6 +83,32 @@ async def _dispatch_download(task: PlatformDownloadTask, db: AsyncSession) -> No
         raise HTTPException(status_code=503, detail=task.error_message) from exc
     task.celery_task_id = queued.id
     await db.commit()
+
+
+def _require_xhs(platform: str) -> None:
+    if _require_platform(platform).id != "xhs":
+        raise HTTPException(status_code=404, detail="该能力当前仅适用于小红书")
+
+
+async def _create_xhs_author_scan(author: PlatformAuthor, db: AsyncSession) -> PlatformDownloadTask:
+    active = (await db.execute(
+        select(PlatformDownloadTask).where(
+            PlatformDownloadTask.platform == "xhs",
+            PlatformDownloadTask.source_key == f"user-{author.external_user_id}",
+            PlatformDownloadTask.source_type == "profile",
+            PlatformDownloadTask.status.in_(ACTIVE_PLATFORM_TASK_STATUSES),
+        ).order_by(PlatformDownloadTask.created_at.desc())
+    )).scalars().first()
+    if active:
+        return active
+    task = create_platform_task(
+        "xhs", f"user-{author.external_user_id}", author.profile_url, "profile",
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    await _dispatch_download(task, db)
+    return task
 
 
 @router.post("/{platform}/download", response_model=PlatformDownloadTaskResponse)
@@ -318,3 +361,133 @@ async def save_cookie(
         message=f"{spec.name} Cookie 已加密保存",
         data=status,
     )
+
+
+@router.get("/{platform}/authors", response_model=PaginatedPlatformAuthorsResponse)
+async def list_platform_authors(
+    platform: str,
+    q: str | None = Query(None, max_length=255),
+    subscribed: bool | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_async_db),
+):
+    _require_xhs(platform)
+    conditions = [PlatformAuthor.platform == "xhs"]
+    if subscribed is not None:
+        conditions.append(PlatformAuthor.is_subscribed == subscribed)
+    search = str(q or "").strip()
+    if search:
+        conditions.append(
+            PlatformAuthor.nickname.contains(search, autoescape=True)
+            | PlatformAuthor.external_user_id.contains(search, autoescape=True)
+            | PlatformAuthor.red_id.contains(search, autoescape=True)
+        )
+    total = int((await db.execute(
+        select(func.count(PlatformAuthor.id)).where(*conditions)
+    )).scalar() or 0)
+    items = (await db.execute(
+        select(PlatformAuthor).where(*conditions)
+        .order_by(PlatformAuthor.updated_at.desc(), PlatformAuthor.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    )).scalars().all()
+    return PaginatedPlatformAuthorsResponse(
+        items=[PlatformAuthorResponse.model_validate(item) for item in items],
+        total=total, page=page, page_size=page_size,
+        pages=max(1, (total + page_size - 1) // page_size),
+    )
+
+
+@router.post("/{platform}/authors/{author_id}/subscription", response_model=PlatformAuthorResponse)
+async def update_platform_author_subscription(
+    platform: str,
+    author_id: int,
+    request: PlatformAuthorSubscriptionUpdate,
+    db: AsyncSession = Depends(get_async_db),
+):
+    _require_xhs(platform)
+    author = (await db.execute(select(PlatformAuthor).where(
+        PlatformAuthor.id == author_id, PlatformAuthor.platform == "xhs",
+    ))).scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="作者不存在")
+    author.is_subscribed = request.is_subscribed
+    if request.check_interval is not None:
+        author.check_interval = request.check_interval
+    await db.commit()
+    await db.refresh(author)
+    return PlatformAuthorResponse.model_validate(author)
+
+
+@router.post("/{platform}/authors/{author_id}/scan", response_model=PlatformDownloadTaskResponse)
+async def scan_platform_author(
+    platform: str,
+    author_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    _require_xhs(platform)
+    author = (await db.execute(select(PlatformAuthor).where(
+        PlatformAuthor.id == author_id, PlatformAuthor.platform == "xhs",
+    ))).scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="作者不存在")
+    task = await _create_xhs_author_scan(author, db)
+    return serialize_platform_task(task)
+
+
+@router.get("/{platform}/authors/{author_id}/works", response_model=PaginatedPlatformWorksResponse)
+async def list_platform_author_works(
+    platform: str,
+    author_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    db: AsyncSession = Depends(get_async_db),
+):
+    _require_xhs(platform)
+    exists = (await db.execute(select(PlatformAuthor.id).where(
+        PlatformAuthor.id == author_id, PlatformAuthor.platform == "xhs",
+    ))).scalar_one_or_none()
+    if not exists:
+        raise HTTPException(status_code=404, detail="作者不存在")
+    conditions = [PlatformWork.platform == "xhs", PlatformWork.author_id == author_id]
+    total = int((await db.execute(
+        select(func.count(PlatformWork.id)).where(*conditions)
+    )).scalar() or 0)
+    items = (await db.execute(
+        select(PlatformWork).where(*conditions)
+        .order_by(PlatformWork.published_at.desc().nullslast(), PlatformWork.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    )).scalars().all()
+    return PaginatedPlatformWorksResponse(
+        items=[PlatformWorkResponse.model_validate(item) for item in items],
+        total=total, page=page, page_size=page_size,
+        pages=max(1, (total + page_size - 1) // page_size),
+    )
+
+
+@router.post("/{platform}/browser/start", response_model=XhsBrowserStatusResponse)
+async def start_xhs_browser(platform: str):
+    _require_xhs(platform)
+    try:
+        await asyncio.to_thread(ensure_managed_browser)
+        return await asyncio.to_thread(get_browser_login_status)
+    except XhsProfileError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/{platform}/browser/status", response_model=XhsBrowserStatusResponse)
+async def xhs_browser_status(platform: str):
+    _require_xhs(platform)
+    try:
+        return await asyncio.to_thread(get_browser_login_status)
+    except XhsProfileError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{platform}/browser/qrcode", response_model=XhsLoginQrResponse)
+async def xhs_browser_qrcode(platform: str):
+    _require_xhs(platform)
+    try:
+        return await asyncio.to_thread(get_login_qrcode)
+    except XhsProfileError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

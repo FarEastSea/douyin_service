@@ -30,3 +30,7 @@ application's Python environment.
 
 The upstream license text remains in the installed source checkout. The source
 and license can also be obtained from the repository link above.
+
+`integrations/xhs_profile_collector.py` follows the public user-profile state
+field contract exposed by that pinned revision. Its collection, validation and
+bounded incremental-scan logic are implemented in this repository.

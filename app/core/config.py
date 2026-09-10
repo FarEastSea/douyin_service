@@ -185,6 +185,10 @@ class Settings(BaseModel):
     XHS_DOWNLOAD_ENGINE: str = "xhs-api"
     XHS_COOKIE: Optional[str] = None
     XHS_COOKIE_FILE: Optional[str] = None
+    XHS_PROFILE_MAX_ITEMS: int = 100
+    XHS_PROFILE_MAX_SCROLLS: int = 40
+    XHS_PROFILE_KNOWN_STREAK: int = 5
+    XHS_PROFILE_SCROLL_DELAY: float = 2.0
     
 class WebSettings:
     """动态读取网页配置，并用可跨进程失效的进程内快照加速。"""

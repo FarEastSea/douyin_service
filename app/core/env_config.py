@@ -293,6 +293,7 @@ def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]
         for key in (
             "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR",
             "TIKTOK_DOWNLOAD_SUBDIR", "WEIBO_DOWNLOAD_SUBDIR", "BILIBILI_DOWNLOAD_SUBDIR",
+            "XHS_DOWNLOAD_SUBDIR",
         ):
             value = str(values.get(key) or "").strip()
             if not value:

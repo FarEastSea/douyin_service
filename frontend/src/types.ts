@@ -48,4 +48,15 @@ export interface PlatformTask {
   progress_percent: number; error_message?: string; error_code?: string; last_log_line?: string;
   preview_count: number; retry_count: number; created_at: string;
 }
+export interface PlatformAuthor {
+  id: number; platform: string; external_user_id: string; profile_url: string;
+  nickname?: string; red_id?: string; avatar_url?: string; description?: string;
+  account_status: string; last_error?: string; is_subscribed: boolean; check_interval: number;
+  last_check_time?: string; last_success_at?: string; total_works: number; created_at: string;
+}
+export interface PlatformWork {
+  id: number; platform: string; external_work_id: string; author_id: number; download_task_id?: number;
+  source_url: string; title?: string; work_type: string; cover_url?: string;
+  published_at?: string; discovered_at: string; last_seen_at: string;
+}
 export interface MediaItem { url: string; type: 'image' | 'video'; title?: string }

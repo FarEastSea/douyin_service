@@ -145,6 +145,50 @@ prepare_xhs_engine() {
     echo "Xiaohongshu collector dependencies OK: $revision"
 }
 
+prepare_xhs_browser() {
+    local python_bin="$XHS_ENGINE_CANDIDATE/source/.venv/bin/python"
+    local browser_cache="$SERVICE_ROOT/.xhs-engine/browser-cache"
+    local deps_marker="$browser_cache/.system-deps-ready"
+    local executable=""
+    test -x "$python_bin" || {
+        echo "Deploy failed: isolated Xiaohongshu Python is unavailable." >&2
+        return 1
+    }
+    mkdir -p "$browser_cache"
+    if [ ! -f "$deps_marker" ]; then
+        if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+            echo "Installing Chromium system dependencies for Xiaohongshu profile collection..."
+            PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" -m playwright install-deps chromium
+            touch "$deps_marker"
+        else
+            echo "Chromium system dependencies were not changed; validating the existing host libraries."
+        fi
+    fi
+    echo "Installing the pinned Playwright Chromium build..."
+    PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" -m playwright install chromium
+    executable="$(PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" - <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as playwright:
+    print(playwright.chromium.executable_path)
+PY
+)"
+    test -x "$executable" || {
+        echo "Deploy failed: Playwright Chromium executable was not created." >&2
+        return 1
+    }
+    PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" - "$executable" <<'PY'
+from playwright.sync_api import sync_playwright
+import sys
+with sync_playwright() as playwright:
+    browser = playwright.chromium.launch(headless=True, executable_path=sys.argv[1])
+    browser.close()
+print("Xiaohongshu Chromium launch check OK")
+PY
+    if id www >/dev/null 2>&1; then
+        chown -R "www:$(id -gn www)" "$browser_cache"
+    fi
+}
+
 activate_xhs_engine() {
     local engine_root="$SERVICE_ROOT/.xhs-engine"
     local current="$engine_root/current"
@@ -222,7 +266,7 @@ preflight() {
         "$BUILD_VENV/bin/python" - <<'PY'
 from pathlib import Path
 
-files = [Path("main.py"), *Path("app").rglob("*.py")]
+files = [Path("main.py"), *Path("app").rglob("*.py"), *Path("integrations").rglob("*.py")]
 for path in files:
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 print(f"Python syntax OK: {len(files)} files")
@@ -519,6 +563,7 @@ prepare_candidate
 preflight
 prepare_runtime_environment
 prepare_xhs_engine
+prepare_xhs_browser
 
 if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。

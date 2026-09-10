@@ -32,6 +32,10 @@ RUNTIME_CONFIG_ENV_KEYS = {
     "subscription_max_pages": "SUBSCRIPTION_MAX_PAGES",
     "subscription_safe_lookback_pages": "SUBSCRIPTION_SAFE_LOOKBACK_PAGES",
     "subscription_full_reconcile_interval": "SUBSCRIPTION_FULL_RECONCILE_INTERVAL",
+    "xhs_profile_max_items": "XHS_PROFILE_MAX_ITEMS",
+    "xhs_profile_max_scrolls": "XHS_PROFILE_MAX_SCROLLS",
+    "xhs_profile_known_streak": "XHS_PROFILE_KNOWN_STREAK",
+    "xhs_profile_scroll_delay": "XHS_PROFILE_SCROLL_DELAY",
 }
 
 
@@ -136,6 +140,35 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
         "min": 24 * 3600,
         "max": 30 * 24 * 3600,
         "label": "作者全量对账间隔",
+        "unit": "秒",
+    },
+    "xhs_profile_max_items": {
+        "type": "int",
+        "default": settings.XHS_PROFILE_MAX_ITEMS,
+        "min": 10,
+        "max": 500,
+        "label": "小红书单次最多采集作品",
+    },
+    "xhs_profile_max_scrolls": {
+        "type": "int",
+        "default": settings.XHS_PROFILE_MAX_SCROLLS,
+        "min": 3,
+        "max": 200,
+        "label": "小红书主页最大滚动轮数",
+    },
+    "xhs_profile_known_streak": {
+        "type": "int",
+        "default": settings.XHS_PROFILE_KNOWN_STREAK,
+        "min": 3,
+        "max": 100,
+        "label": "小红书连续已知作品停止数",
+    },
+    "xhs_profile_scroll_delay": {
+        "type": "float",
+        "default": settings.XHS_PROFILE_SCROLL_DELAY,
+        "min": 0.5,
+        "max": 10.0,
+        "label": "小红书主页滚动间隔",
         "unit": "秒",
     },
 }

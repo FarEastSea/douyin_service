@@ -429,6 +429,82 @@ class PlatformCookieUpdate(BaseModel):
     cookie: str = Field(..., min_length=1, description="平台 Cookie 内容")
 
 
+class PlatformAuthorResponse(BaseModel):
+    id: int
+    platform: str
+    external_user_id: str
+    profile_url: str
+    nickname: Optional[str] = None
+    red_id: Optional[str] = None
+    avatar_url: Optional[str] = None
+    description: Optional[str] = None
+    account_status: str = "unknown"
+    last_error: Optional[str] = None
+    is_subscribed: bool = False
+    check_interval: int = 21600
+    last_check_time: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    total_works: int = 0
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PaginatedPlatformAuthorsResponse(BaseModel):
+    items: List[PlatformAuthorResponse]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class PlatformAuthorSubscriptionUpdate(BaseModel):
+    is_subscribed: bool
+    check_interval: Optional[int] = Field(None, ge=3600, le=7 * 24 * 3600)
+
+
+class PlatformWorkResponse(BaseModel):
+    id: int
+    platform: str
+    external_work_id: str
+    author_id: int
+    download_task_id: Optional[int] = None
+    source_url: str
+    title: Optional[str] = None
+    work_type: str = "unknown"
+    cover_url: Optional[str] = None
+    published_at: Optional[datetime] = None
+    discovered_at: datetime
+    last_seen_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PaginatedPlatformWorksResponse(BaseModel):
+    items: List[PlatformWorkResponse]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class XhsBrowserStatusResponse(BaseModel):
+    installed: bool = False
+    state: str = "stopped"
+    logged_in: bool = False
+    nickname: Optional[str] = None
+    message: str
+
+
+class XhsLoginQrResponse(BaseModel):
+    is_logged_in: bool = False
+    image_data_url: Optional[str] = None
+    expires_at: Optional[str] = None
+    message: str
+
+
 # ============ X/Twitter 作者管理 ============
 
 class XAuthorCreate(BaseModel):

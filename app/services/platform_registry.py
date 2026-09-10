@@ -263,7 +263,10 @@ platform_registry = _build_registry((
         icon_text="红",
         domains=("xiaohongshu.com", "xhslink.com"),
         capabilities=PlatformCapabilities(
-            profile_download=False,
+            authors=True,
+            works=True,
+            subscriptions=True,
+            profile_download=True,
             work_download=True,
         ),
     ),

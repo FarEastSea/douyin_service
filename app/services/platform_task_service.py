@@ -49,7 +49,8 @@ def prepare_platform_task_for_retry(task: PlatformDownloadTask) -> None:
     task.last_heartbeat_at = None
     task.retry_count = (task.retry_count or 0) + 1
     task.engine_name = get_configured_profile_engine_name(spec)
-    task.download_dir = os.path.join(spec.download_root(), profile_storage_key(task.source_key))
+    if not task.download_dir:
+        task.download_dir = os.path.join(spec.download_root(), profile_storage_key(task.source_key))
 
 
 def mark_platform_task_running(task: PlatformDownloadTask, celery_task_id: Optional[str]) -> None:
