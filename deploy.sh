@@ -403,7 +403,8 @@ stop_managed_xhs_engine() {
         return 0
     fi
     cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
-    if [[ "$cmdline" != *"xhs-api"* ]] || [[ "$cmdline" != *"$SERVICE_ROOT/.xhs-engine/"* ]]; then
+    if ! { { [[ "$cmdline" == *"xhs-api"* ]] && [[ "$cmdline" == *"$SERVICE_ROOT/.xhs-engine/"* ]]; } || \
+           [[ "$cmdline" == *"$SERVICE_ROOT/integrations/xhs_api_launcher.py"* ]]; }; then
         echo "Deploy failed: xhs-api.pid does not belong to this project." >&2
         return 1
     fi

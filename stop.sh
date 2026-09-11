@@ -67,7 +67,8 @@ if [ -f "$XHS_PID_FILE" ]; then
     PID="$(tr -dc '0-9' < "$XHS_PID_FILE")"
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         CMDLINE="$(tr '\0' ' ' < "/proc/${PID}/cmdline" 2>/dev/null || true)"
-        if [[ "$CMDLINE" == *"xhs-api"* ]] && [[ "$CMDLINE" == *"${PROJECT_DIR}/.xhs-engine/"* ]]; then
+        if { [[ "$CMDLINE" == *"xhs-api"* ]] && [[ "$CMDLINE" == *"${PROJECT_DIR}/.xhs-engine/"* ]]; } || \
+           [[ "$CMDLINE" == *"${PROJECT_DIR}/integrations/xhs_api_launcher.py"* ]]; then
             stop_pid "$PID"
             FOUND=1
         else

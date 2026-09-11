@@ -175,7 +175,7 @@ async def _read_state(page: Page) -> dict[str, Any]:
     return _record(value)
 
 
-async def _collect(payload: dict[str, Any]) -> dict[str, Any]:
+async def collect_profile(payload: dict[str, Any]) -> dict[str, Any]:
     raw_url = _text(payload.get("url"))
     parsed = urlsplit(raw_url)
     match = _PROFILE_PATH.fullmatch(parsed.path)
@@ -306,7 +306,7 @@ def main() -> None:
         payload = json.loads(sys.stdin.read())
         if not isinstance(payload, dict):
             raise RuntimeError("采集参数格式无效")
-        result = asyncio.run(_collect(payload))
+        result = asyncio.run(collect_profile(payload))
         sys.stdout.write(json.dumps({"ok": True, **result}, ensure_ascii=False))
     except Exception as exc:
         sys.stdout.write(json.dumps({"ok": False, "error": str(exc)[:500]}, ensure_ascii=False))

@@ -2,35 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
 import requests
 
 from app.services.xhs_download import XHS_INTERNAL_API_URL
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-COLLECTOR_SCRIPT = PROJECT_ROOT / "integrations" / "xhs_profile_collector.py"
-XHS_ENGINE_PYTHON = PROJECT_ROOT / ".xhs-engine" / "current" / "source" / ".venv" / "bin" / "python"
-_COLLECTOR_ENV_KEYS = {
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "PATH",
-    "PLAYWRIGHT_NODEJS_PATH",
-    "SYSTEMROOT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "TZ",
-    "XDG_RUNTIME_DIR",
-}
-
 
 class XhsProfileError(RuntimeError):
     """可安全展示的小红书作者采集错误。"""
@@ -48,9 +25,10 @@ def _local_session() -> requests.Session:
 
 def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
     session = _local_session()
+    timeout = kwargs.pop("timeout", (3, 65))
     try:
         response = session.request(
-            method, f"{XHS_INTERNAL_API_URL}{path}", timeout=(3, 65), **kwargs,
+            method, f"{XHS_INTERNAL_API_URL}{path}", timeout=timeout, **kwargs,
         )
         response.raise_for_status()
         payload = response.json()
@@ -151,8 +129,6 @@ def collect_profile(
 ) -> dict[str, Any]:
     """启动受管浏览器并调用隔离环境中的 Playwright 采集脚本。"""
     status = ensure_managed_browser()
-    if not XHS_ENGINE_PYTHON.is_file() or not COLLECTOR_SCRIPT.is_file():
-        raise XhsProfileError("engine_unavailable", "小红书作者采集运行文件缺失，请重新部署")
     payload = {
         "url": source_url,
         "cdp_port": status["cdp_port"],
@@ -162,34 +138,12 @@ def collect_profile(
         "known_streak": known_streak,
         "scroll_delay": scroll_delay,
     }
-    try:
-        collector_env = {
-            key: value
-            for key, value in os.environ.items()
-            if key.upper() in _COLLECTOR_ENV_KEYS
-        }
-        process = subprocess.run(
-            [str(XHS_ENGINE_PYTHON), str(COLLECTOR_SCRIPT)],
-            input=json.dumps(payload, ensure_ascii=False),
-            text=True,
-            capture_output=True,
-            timeout=max(90, int(max_scrolls * scroll_delay * 2 + 60)),
-            cwd=str(PROJECT_ROOT),
-            env=collector_env,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise XhsProfileError("request_timeout", "小红书作者主页采集超时") from exc
-    except OSError as exc:
-        raise XhsProfileError("engine_unavailable", "无法启动小红书作者采集进程") from exc
-    try:
-        result = json.loads(process.stdout)
-    except (TypeError, ValueError) as exc:
-        raise XhsProfileError("invalid_result", "小红书作者采集进程未返回结构化结果") from exc
-    if not isinstance(result, dict) or result.get("ok") is not True:
-        message = str(result.get("error") if isinstance(result, dict) else "")[:300]
-        code = "auth_required" if "未登录" in message else "profile_scan_failed"
-        raise XhsProfileError(code, message or "小红书作者主页采集失败")
+    result = _request(
+        "POST",
+        "/integrations/profile/collect",
+        json=payload,
+        timeout=(3, max(90, int(max_scrolls * scroll_delay * 2 + 60))),
+    )
     if not isinstance(result.get("author"), dict) or not isinstance(result.get("items"), list):
         raise XhsProfileError("invalid_result", "小红书作者采集结果缺少作者或作品列表")
     return result
