@@ -164,6 +164,18 @@ prepare_xhs_browser() {
             echo "Chromium system dependencies were not changed; validating the existing host libraries."
         fi
     fi
+    if ! command -v Xvfb >/dev/null 2>&1 || \
+       ! command -v xvfb-run >/dev/null 2>&1 || \
+       ! command -v xauth >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+            echo "Installing Xvfb for Xiaohongshu browser login..."
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth
+        else
+            echo "Deploy failed: Xvfb is required for Xiaohongshu browser login." >&2
+            return 1
+        fi
+    fi
     echo "Installing the pinned Playwright Chromium build..."
     PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" -m playwright install chromium
     executable="$(PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" - <<'PY'
@@ -176,11 +188,13 @@ PY
         echo "Deploy failed: Playwright Chromium executable was not created." >&2
         return 1
     }
-    PLAYWRIGHT_BROWSERS_PATH="$browser_cache" "$python_bin" - "$executable" <<'PY'
+    PLAYWRIGHT_BROWSERS_PATH="$browser_cache" xvfb-run -a \
+        -s "-screen 0 1280x960x24 -nolisten tcp" \
+        "$python_bin" - "$executable" <<'PY'
 from playwright.sync_api import sync_playwright
 import sys
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch(headless=True, executable_path=sys.argv[1])
+    browser = playwright.chromium.launch(headless=False, executable_path=sys.argv[1])
     browser.close()
 print("Xiaohongshu Chromium launch check OK")
 PY
@@ -394,31 +408,54 @@ stop_running_instances() {
 
 stop_managed_xhs_engine() {
     local pid_file="$SERVICE_ROOT/logs/xhs-api.pid"
+    local xvfb_pid_file="$SERVICE_ROOT/logs/xhs-xvfb.pid"
     local pid=""
     local cmdline=""
-    [ -f "$pid_file" ] || return 0
-    pid="$(tr -dc '0-9' < "$pid_file")"
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        rm -f "$pid_file"
-        return 0
-    fi
-    cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
-    if ! { { [[ "$cmdline" == *"xhs-api"* ]] && [[ "$cmdline" == *"$SERVICE_ROOT/.xhs-engine/"* ]]; } || \
-           [[ "$cmdline" == *"$SERVICE_ROOT/integrations/xhs_api_launcher.py"* ]]; }; then
-        echo "Deploy failed: xhs-api.pid does not belong to this project." >&2
-        return 1
-    fi
-    echo "Stopping managed Xiaohongshu collector (PID=${pid})..."
-    kill -TERM "$pid"
-    for _ in $(seq 1 20); do
-        if ! kill -0 "$pid" 2>/dev/null; then
+    if [ -f "$pid_file" ]; then
+        pid="$(tr -dc '0-9' < "$pid_file")"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+            if ! { { [[ "$cmdline" == *"xhs-api"* ]] && [[ "$cmdline" == *"$SERVICE_ROOT/.xhs-engine/"* ]]; } || \
+                   [[ "$cmdline" == *"$SERVICE_ROOT/integrations/xhs_api_launcher.py"* ]]; }; then
+                echo "Deploy failed: xhs-api.pid does not belong to this project." >&2
+                return 1
+            fi
+            echo "Stopping managed Xiaohongshu collector (PID=${pid})..."
+            kill -TERM "$pid"
+            for _ in $(seq 1 20); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "Deploy failed: Xiaohongshu collector did not stop in time." >&2
+                return 1
+            fi
             rm -f "$pid_file"
-            return 0
         fi
-        sleep 0.5
-    done
-    echo "Deploy failed: Xiaohongshu collector did not stop in time." >&2
-    return 1
+        rm -f "$pid_file"
+    fi
+    if [ -f "$xvfb_pid_file" ]; then
+        pid="$(tr -dc '0-9' < "$xvfb_pid_file")"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+            if [[ "$cmdline" != *"Xvfb :159"* ]]; then
+                echo "Deploy failed: xhs-xvfb.pid does not belong to this project." >&2
+                return 1
+            fi
+            echo "Stopping Xiaohongshu virtual display (PID=${pid})..."
+            kill -TERM "$pid"
+            for _ in $(seq 1 20); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "Deploy failed: Xiaohongshu virtual display did not stop in time." >&2
+                return 1
+            fi
+        fi
+        rm -f "$xvfb_pid_file"
+    fi
+    return 0
 }
 
 start_runtime() {
@@ -449,6 +486,18 @@ def get(path, auth=False):
         if response.status != 200:
             raise RuntimeError(f"{path} returned HTTP {response.status}")
         return response.read()
+
+def post_xhs(path, payload):
+    request = urllib.request.Request(
+        xhs_api_url.rstrip("/") + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=40) as response:
+        if response.status != 200 and response.status != 202:
+            raise RuntimeError(f"Xiaohongshu {path} returned HTTP {response.status}")
+        return json.loads(response.read())
 
 last_error = None
 for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
@@ -482,6 +531,18 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
             with urllib.request.urlopen(xhs_api_url.rstrip("/") + "/health", timeout=5) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Xiaohongshu collector returned HTTP {response.status}")
+            managed_browser = post_xhs("/browser/managed/start", {})
+            if managed_browser.get("state") != "running" or not managed_browser.get("cdp_port"):
+                raise RuntimeError("Xiaohongshu managed browser is not running")
+            login_status = post_xhs(
+                "/xhs/login/status?wait_seconds=30",
+                {"request_id": f"deploy-smoke-{os.getpid()}-{int(time.time())}"},
+            )
+            if login_status.get("status") != "succeeded":
+                raise RuntimeError(
+                    "Xiaohongshu browser login probe failed: "
+                    + str(login_status.get("message") or login_status.get("status"))
+                )
         if token:
             authors = json.loads(get("/api/authors/?page=1&page_size=1", True))
             tasks = json.loads(get("/api/tasks/?page=1&page_size=20", True))
@@ -490,7 +551,7 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                 get(f"/api/tasks/{previewable.get('id')}/preview", True)
             if not isinstance(authors.get("items"), list) or not isinstance(tasks.get("items"), list):
                 raise RuntimeError("management list payload is invalid")
-        print("Smoke checks OK: BT Panel runtime, dependencies, home, docs, tasks, authors, media preview when available")
+        print("Smoke checks OK: BT Panel runtime, managed browser, home, docs, tasks, authors, media preview when available")
         raise SystemExit(0)
     except Exception as exc:
         last_error = exc

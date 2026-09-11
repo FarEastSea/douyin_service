@@ -6,6 +6,7 @@ RUNTIME_DIR="${RUNTIME_DIR:-$PROJECT_DIR}"
 LOG_DIR="${RUNTIME_DIR}/logs"
 PID_FILE="${LOG_DIR}/gunicorn.pid"
 XHS_PID_FILE="${LOG_DIR}/xhs-api.pid"
+XHS_XVFB_PID_FILE="${LOG_DIR}/xhs-xvfb.pid"
 
 matches_project_server() {
     local pid="$1"
@@ -77,6 +78,22 @@ if [ -f "$XHS_PID_FILE" ]; then
         fi
     fi
     rm -f "$XHS_PID_FILE"
+fi
+
+if [ -f "$XHS_XVFB_PID_FILE" ]; then
+    PID="$(tr -dc '0-9' < "$XHS_XVFB_PID_FILE")"
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        CMDLINE="$(tr '\0' ' ' < "/proc/${PID}/cmdline" 2>/dev/null || true)"
+        OWNER="$(ps -o user= -p "$PID" 2>/dev/null | tr -d ' ' || true)"
+        if [[ "$CMDLINE" == *"Xvfb :159"* ]] && [ "$OWNER" = "douyin-xhs" ]; then
+            stop_pid "$PID"
+            FOUND=1
+        else
+            echo "Refusing to stop PID ${PID}: xhs-xvfb.pid does not belong to this project." >&2
+            exit 1
+        fi
+    fi
+    rm -f "$XHS_XVFB_PID_FILE"
 fi
 
 if [ "$FOUND" -eq 0 ]; then
