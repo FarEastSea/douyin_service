@@ -63,7 +63,7 @@ def _media_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"} or not any(
         host == domain or host.endswith(f".{domain}") for domain in _ALLOWED_MEDIA_DOMAINS
     ):
-        raise ValueError("采集服务返回了非小红书媒体地址，已拒绝下载")
+        raise ValueError("解析服务返回了非小红书媒体地址，已拒绝下载")
     return urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, ""))
 
 
@@ -122,7 +122,7 @@ class XhsApiDownloadEngine:
         before = set(list_media_files(folder))
         log(f"[{spec.name}] 单条笔记: {source_key}")
         log(f"[{spec.name}] 目标目录: {folder}")
-        log(f"[{spec.name}] 解析服务仅通过本机回环地址访问，媒体地址限制为小红书官方域名")
+        log(f"[{spec.name}] 单条解析服务仅通过本机回环地址访问，媒体地址限制为小红书官方域名")
 
         session = requests.Session()
         session.trust_env = False
@@ -163,13 +163,13 @@ class XhsApiDownloadEngine:
             if not isinstance(media, list) or not media:
                 return XhsDownloadResult(
                     False, len(before), 2, files=sorted(before), error_code="no_media",
-                    error_message="小红书采集服务未返回可下载媒体；链接可能已过期、作品不可见或 Cookie 权限不足",
+                    error_message="小红书解析服务未返回可下载媒体；链接可能已过期、作品不可见或 Cookie 权限不足",
                 )
 
             stable_id = _safe_segment(str(work_id or source_key), "note")
             for position, item in enumerate(media, start=1):
                 if not isinstance(item, dict):
-                    raise ValueError("媒体列表结构不符合采集服务契约")
+                    raise ValueError("媒体列表结构不符合解析服务契约")
                 index = int(item.get("序号") or position)
                 suffix = str(item.get("扩展名") or "").lower().lstrip(".")
                 if suffix == "":
@@ -202,7 +202,7 @@ class XhsApiDownloadEngine:
         except requests.ConnectionError:
             return XhsDownloadResult(
                 False, len(before), -1, files=sorted(before), error_code="engine_unavailable",
-                error_message="小红书隔离采集服务未启动，请查看 Jenkins 部署日志和 xhs-api.log",
+                error_message="小红书单条下载解析服务未启动，请查看 Jenkins 部署日志和 xhs-api.log",
             )
         except requests.Timeout:
             return XhsDownloadResult(

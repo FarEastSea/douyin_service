@@ -22,7 +22,7 @@ const fallbackPlatforms: MediaPlatform[] = [
   { id: 'tiktok', name: 'TikTok', short_name: 'TikTok', route_prefix: '/tiktok', icon_text: 'T', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
   { id: 'weibo', name: '微博', short_name: '微博', route_prefix: '/weibo', icon_text: '微', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
   { id: 'bilibili', name: '哔哩哔哩', short_name: 'B站', route_prefix: '/bilibili', icon_text: '哔', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
-  { id: 'xhs', name: '小红书', short_name: '小红书', route_prefix: '/xhs', icon_text: '红', domains: [], capabilities: { tasks: true, authors: true, works: true, subscriptions: true, subscription_reports: false, settings: true, profile_download: true, work_download: true } },
+  { id: 'xhs', name: '小红书', short_name: '小红书', route_prefix: '/xhs', icon_text: '红', domains: [], capabilities: { tasks: true, authors: false, works: false, subscriptions: false, subscription_reports: false, settings: true, profile_download: false, work_download: true } },
 ]
 const platforms = computed(() => store.platforms.length ? store.platforms : fallbackPlatforms)
 const platform = computed(() => platforms.value.find(item => route.path === item.route_prefix || route.path.startsWith(`${item.route_prefix}/`)) || platforms.value[0])

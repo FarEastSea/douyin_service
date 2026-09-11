@@ -62,7 +62,7 @@ async def _check_xhs_collector() -> None:
     def ping() -> None:
         with urlopen(url, timeout=2) as response:
             if response.status != 200:
-                raise RuntimeError("collector health failed")
+                raise RuntimeError("downloader health failed")
 
     await asyncio.to_thread(ping)
 
@@ -120,8 +120,8 @@ async def build_readiness(*, degraded_mode: bool) -> dict[str, Any]:
             ),
             _check(
                 _check_xhs_collector,
-                success_message="小红书采集服务可用",
-                failure_message="小红书采集服务不可用",
+                success_message="小红书单条下载服务可用",
+                failure_message="小红书单条下载服务不可用",
                 timeout=3.0,
             ),
         )

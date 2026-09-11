@@ -88,6 +88,10 @@ async def _dispatch_download(task: PlatformDownloadTask, db: AsyncSession) -> No
 def _require_xhs(platform: str) -> None:
     if _require_platform(platform).id != "xhs":
         raise HTTPException(status_code=404, detail="该能力当前仅适用于小红书")
+    raise HTTPException(
+        status_code=410,
+        detail="小红书作者主页批量采集已搁置；当前仅保留单条笔记下载",
+    )
 
 
 async def _create_xhs_author_scan(author: PlatformAuthor, db: AsyncSession) -> PlatformDownloadTask:
@@ -310,6 +314,11 @@ async def retry_task(platform: str, task_id: int, db: AsyncSession = Depends(get
         raise HTTPException(status_code=404, detail="任务不存在")
     if task.status not in ("failed", "cancelled"):
         raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无需重试")
+    if task.platform == "xhs" and task.source_type == "profile":
+        raise HTTPException(
+            status_code=410,
+            detail="小红书作者主页批量采集已搁置；当前仅保留单条笔记下载",
+        )
     prepare_platform_task_for_retry(task)
     await db.commit()
     await asyncio.to_thread(_clear_runtime, spec.id, task.id)

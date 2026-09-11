@@ -17,10 +17,10 @@ const platformName = computed(() => definition.value?.name || props.platform)
 const inputHint = computed(() => props.platform === 'bilibili'
   ? '输入 B站 UP 空间 UID、主页、BV/av、分P或含视频的动态链接…'
   : props.platform === 'xhs'
-    ? '粘贴小红书作者主页，或图文、视频、实况笔记分享文本/链接…'
+    ? '粘贴小红书图文、视频或实况笔记分享文本/链接…'
   : `输入 ${platformName.value} 用户主页、@用户名或单条作品链接…`)
 const workspaceDescription = computed(() => props.platform === 'xhs'
-  ? '单条笔记直接下载；作者主页通过受管浏览器分批发现并增量下载'
+  ? '支持单条图文、视频与实况笔记下载；作者主页批量采集暂不开放'
   : '统一处理用户主页与单条视频/动态')
 
 async function load(silent: boolean | Event = false) {
@@ -33,7 +33,7 @@ async function load(silent: boolean | Event = false) {
   } catch (error: any) { if (silent !== true) store.notify(error.message || `加载 ${platformName.value} 任务失败`, 'error') }
 }
 async function create() {
-  if (!input.value.trim()) return store.notify(`请输入 ${platformName.value} 用户主页、用户名或单条作品链接`, 'error')
+  if (!input.value.trim()) return store.notify(props.platform === 'xhs' ? '请输入小红书单条笔记链接' : `请输入 ${platformName.value} 用户主页、用户名或单条作品链接`, 'error')
   try {
     await api(`/platform-downloads/${props.platform}/download`, { method: 'POST', ...jsonBody({ source: input.value.trim() }) })
     input.value = ''; store.notify(`${platformName.value} 下载任务已提交`); await load()

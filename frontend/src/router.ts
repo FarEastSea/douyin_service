@@ -7,8 +7,6 @@ import SettingsView from './views/SettingsView.vue'
 import XTasksView from './views/XTasksView.vue'
 import XAuthorsView from './views/XAuthorsView.vue'
 import PlatformTasksView from './views/PlatformTasksView.vue'
-import XhsAuthorsView from './views/XhsAuthorsView.vue'
-import XhsWorksView from './views/XhsWorksView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -29,8 +27,6 @@ export const router = createRouter({
     { path: '/bilibili/tasks', component: PlatformTasksView, props: { platform: 'bilibili' } },
     { path: '/bilibili/settings', component: SettingsView },
     { path: '/xhs/tasks', component: PlatformTasksView, props: { platform: 'xhs' } },
-    { path: '/xhs/authors', component: XhsAuthorsView },
-    { path: '/xhs/authors/:id/works', component: XhsWorksView },
     { path: '/xhs/settings', component: SettingsView },
     { path: '/:pathMatch(.*)*', redirect: '/douyin/tasks' },
   ],

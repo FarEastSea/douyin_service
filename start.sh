@@ -16,15 +16,11 @@ PID_FILE="${LOG_DIR}/gunicorn.pid"
 GUNICORN_BIN="${VENV_DIR}/bin/gunicorn"
 XHS_ENGINE_DIR="${PROJECT_DIR}/.xhs-engine/current"
 XHS_API_BIN="${XHS_ENGINE_DIR}/source/.venv/bin/xhs-api"
-XHS_API_LAUNCHER="${PROJECT_DIR}/integrations/xhs_api_launcher.py"
 XHS_PID_FILE="${LOG_DIR}/xhs-api.pid"
-XHS_XVFB_PID_FILE="${LOG_DIR}/xhs-xvfb.pid"
 XHS_SERVICE_USER="douyin-xhs"
-XHS_DISPLAY=":159"
 XHS_DATA_DIR="${STATE_DIR}/xhs"
 XHS_HOME_DIR="${XHS_DATA_DIR}/home"
 XHS_RUNTIME_DIR="${XHS_DATA_DIR}/runtime"
-XHS_BROWSER_CACHE="${PROJECT_DIR}/.xhs-engine/browser-cache"
 
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_DIR" "$STATE_DIR" "$XHS_DATA_DIR" "$XHS_HOME_DIR" "$XHS_RUNTIME_DIR"
@@ -64,29 +60,11 @@ start_xhs_engine() {
     local xhs_api_url="http://127.0.0.1:5556"
     local pid=""
     local run_as=()
-    local browser_executable=""
     local xhs_group=""
     local nologin_shell=""
-    local xvfb_pid=""
-    local xvfb_started=0
 
     [ -x "$XHS_API_BIN" ] || {
         echo "Start failed: isolated xhs-api is unavailable; run Jenkins deployment first." >&2
-        return 1
-    }
-    [ -f "$XHS_API_LAUNCHER" ] || {
-        echo "Start failed: Xiaohongshu integration launcher is unavailable." >&2
-        return 1
-    }
-    browser_executable="$(PLAYWRIGHT_BROWSERS_PATH="$XHS_BROWSER_CACHE" \
-        "${XHS_ENGINE_DIR}/source/.venv/bin/python" - <<'PY'
-from playwright.sync_api import sync_playwright
-with sync_playwright() as playwright:
-    print(playwright.chromium.executable_path)
-PY
-)"
-    [ -x "$browser_executable" ] || {
-        echo "Start failed: managed Chromium is unavailable; run Jenkins deployment first." >&2
         return 1
     }
     if [ -f "$XHS_PID_FILE" ]; then
@@ -95,10 +73,10 @@ PY
             if "$VENV_DIR/bin/python" -c \
                 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + "/health", timeout=3).read()' \
                 "$xhs_api_url"; then
-                echo "Xiaohongshu collector is already running (PID=${pid})."
+                echo "Xiaohongshu downloader is already running (PID=${pid})."
                 return 0
             fi
-            echo "Start failed: managed Xiaohongshu collector is running but unhealthy." >&2
+            echo "Start failed: managed Xiaohongshu downloader is running but unhealthy." >&2
             return 1
         fi
         rm -f "$XHS_PID_FILE"
@@ -133,98 +111,39 @@ PY
         )
     fi
 
-    command -v Xvfb >/dev/null 2>&1 || {
-        echo "Start failed: Xvfb is required for Xiaohongshu browser login." >&2
-        return 1
-    }
-    if [ -f "$XHS_XVFB_PID_FILE" ]; then
-        xvfb_pid="$(tr -dc '0-9' < "$XHS_XVFB_PID_FILE")"
-        if [ -n "$xvfb_pid" ] && kill -0 "$xvfb_pid" 2>/dev/null; then
-            if [[ "$(tr '\0' ' ' < "/proc/${xvfb_pid}/cmdline" 2>/dev/null || true)" != *"Xvfb ${XHS_DISPLAY}"* ]]; then
-                echo "Start failed: xhs-xvfb.pid does not belong to the managed display." >&2
-                return 1
-            fi
-        else
-            rm -f "$XHS_XVFB_PID_FILE"
-            xvfb_pid=""
-        fi
-    fi
-    if [ -z "$xvfb_pid" ]; then
-        if [ -S "/tmp/.X11-unix/X${XHS_DISPLAY#:}" ]; then
-            echo "Start failed: display ${XHS_DISPLAY} is already owned by an unmanaged process." >&2
-            return 1
-        fi
-        echo "Starting Xiaohongshu virtual display ${XHS_DISPLAY}..."
-        nohup "${run_as[@]}" Xvfb "$XHS_DISPLAY" \
-            -screen 0 1280x960x24 -nolisten tcp -noreset \
-            < /dev/null > "$LOG_DIR/xhs-xvfb.log" 2>&1 &
-        xvfb_pid=$!
-        xvfb_started=1
-        printf '%s\n' "$xvfb_pid" > "$XHS_XVFB_PID_FILE"
-        for _ in $(seq 1 30); do
-            if ! kill -0 "$xvfb_pid" 2>/dev/null; then
-                echo "Start failed: Xiaohongshu virtual display exited." >&2
-                rm -f "$XHS_XVFB_PID_FILE"
-                return 1
-            fi
-            [ -S "/tmp/.X11-unix/X${XHS_DISPLAY#:}" ] && break
-            sleep 0.2
-        done
-        if [ ! -S "/tmp/.X11-unix/X${XHS_DISPLAY#:}" ]; then
-            echo "Start failed: Xiaohongshu virtual display did not become ready." >&2
-            kill -TERM "$xvfb_pid" 2>/dev/null || true
-            rm -f "$XHS_XVFB_PID_FILE"
-            return 1
-        fi
-    fi
-
-    echo "Starting isolated Xiaohongshu collector on ${xhs_host}:${xhs_port}..."
+    echo "Starting isolated Xiaohongshu single-note downloader on ${xhs_host}:${xhs_port}..."
     nohup "${run_as[@]}" env \
-        DISPLAY="$XHS_DISPLAY" \
         HOME="$XHS_HOME_DIR" \
         XDG_CONFIG_HOME="$XHS_HOME_DIR/.config" \
         XDG_CACHE_HOME="$XHS_HOME_DIR/.cache" \
         XDG_RUNTIME_DIR="$XHS_RUNTIME_DIR" \
         XHS_WORK_PATH="$XHS_DATA_DIR" \
         XHS_FOLDER_NAME="download" \
-        PLAYWRIGHT_BROWSERS_PATH="$XHS_BROWSER_CACHE" \
-        XHS_ROUTE_STRATEGY="http_first" \
-        XHS_BROWSER_DRIVER="managed" \
-        XHS_MANAGED_BROWSER_EXECUTABLE="$browser_executable" \
-        XHS_MANAGED_BROWSER_HEADLESS="false" \
+        XHS_ROUTE_STRATEGY="http_only" \
         XHS_MAX_CONCURRENCY="1" \
         XHS_LIVE_DOWNLOAD="true" \
-        "${XHS_ENGINE_DIR}/source/.venv/bin/python" \
-        "$XHS_API_LAUNCHER" --host "$xhs_host" --port "$xhs_port" \
+        "$XHS_API_BIN" --host "$xhs_host" --port "$xhs_port" \
         < /dev/null > "$LOG_DIR/xhs-api.log" 2>&1 &
     pid=$!
     printf '%s\n' "$pid" > "$XHS_PID_FILE"
 
     for _ in $(seq 1 30); do
         if ! kill -0 "$pid" 2>/dev/null; then
-            echo "Start failed: Xiaohongshu collector exited; check $LOG_DIR/xhs-api.log." >&2
+            echo "Start failed: Xiaohongshu downloader exited; check $LOG_DIR/xhs-api.log." >&2
             rm -f "$XHS_PID_FILE"
-            if [ "$xvfb_started" -eq 1 ]; then
-                kill -TERM "$xvfb_pid" 2>/dev/null || true
-                rm -f "$XHS_XVFB_PID_FILE"
-            fi
             return 1
         fi
         if "$VENV_DIR/bin/python" -c \
             'import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + "/health", timeout=3).read()' \
             "$xhs_api_url" 2>/dev/null; then
-            echo "Xiaohongshu collector started (PID=${pid})."
+            echo "Xiaohongshu downloader started (PID=${pid})."
             return 0
         fi
         sleep 1
     done
-    echo "Start failed: Xiaohongshu collector health check timed out." >&2
+    echo "Start failed: Xiaohongshu downloader health check timed out." >&2
     kill -TERM "$pid" 2>/dev/null || true
     rm -f "$XHS_PID_FILE"
-    if [ "$xvfb_started" -eq 1 ]; then
-        kill -TERM "$xvfb_pid" 2>/dev/null || true
-        rm -f "$XHS_XVFB_PID_FILE"
-    fi
     return 1
 }
 

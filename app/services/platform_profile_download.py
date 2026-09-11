@@ -283,7 +283,7 @@ def _normalize_bilibili_video_id(value: str) -> str:
 
 
 def _resolve_xhs_input(value: str) -> ResolvedPlatformInput:
-    """接受小红书分享文本、作者主页、短链及官方单笔记链接。"""
+    """接受小红书分享文本、短链及官方单笔记链接。"""
     match = re.search(r"https?://[^\s<>]+", value, re.I)
     candidate = (match.group(0) if match else value).rstrip("，。！？；;,.!?)）]】")
     candidate = candidate if re.match(r"^https?://", candidate, re.I) else f"https://{candidate}"
@@ -311,16 +311,7 @@ def _resolve_xhs_input(value: str) -> ResolvedPlatformInput:
             r"/user/profile/([0-9A-Za-z._-]{1,128})(?:/)?", parsed.path, re.I,
         )
         if profile_match:
-            user_id = profile_match.group(1)
-            allowed_query = parse_qs(parsed.query, keep_blank_values=False)
-            query_items = []
-            for key in ("xsec_token", "xsec_source"):
-                for item in allowed_query.get(key, [])[:1]:
-                    query_items.append(f"{quote(key)}={quote(item, safe='._~-')}")
-            canonical = f"https://www.xiaohongshu.com/user/profile/{quote(user_id, safe='._~-')}"
-            if query_items:
-                canonical = f"{canonical}?{'&'.join(query_items)}"
-            return ResolvedPlatformInput(f"user-{user_id}", canonical, "profile")
+            raise ValueError("小红书作者主页批量采集已搁置；当前仅支持单条笔记链接")
         raise ValueError("仅支持小红书 explore、discovery/item、带作品 ID 的用户链接或 xhslink 短链")
 
     allowed_query = parse_qs(parsed.query, keep_blank_values=False)

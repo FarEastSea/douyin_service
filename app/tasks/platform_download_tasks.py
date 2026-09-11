@@ -190,6 +190,17 @@ def download_platform_profile(self, task_id: int):
 
         spec = get_profile_platform_spec(task.platform)
         platform_id = task.platform
+        if platform_id == "xhs" and task.source_type == "profile":
+            finalize_platform_task(
+                task,
+                success=False,
+                file_count=task.file_count or 0,
+                error_message="小红书作者主页批量采集已搁置；当前仅保留单条笔记下载",
+                error_code="feature_shelved",
+                output_log=task.output_log or "",
+            )
+            db.commit()
+            return {"success": False, "skipped": True, "reason": "feature_shelved"}
         source_url = task.source_url
         source_key = task.source_key
         engine_name = task.engine_name

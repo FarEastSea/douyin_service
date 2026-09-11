@@ -68,10 +68,6 @@ celery_app.conf.update(
             "task": "app.tasks.x_download_tasks.check_x_subscriptions",
             "schedule": crontab(minute=30),
         },
-        "check-xhs-subscriptions-hourly": {
-            "task": "app.tasks.platform_download_tasks.check_xhs_subscriptions",
-            "schedule": crontab(minute=45),
-        },
         "detect-stuck-tasks": {
             "task": "app.tasks.download_tasks.detect_stuck_tasks",
             "schedule": crontab(minute="*/5"),
