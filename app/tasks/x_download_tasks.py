@@ -16,6 +16,7 @@ from app.models.database import get_sync_db
 from app.models.models import XAuthor, XDownloadTask, XMediaAsset
 from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_cookie_file
 from app.services.x_downloader import build_x_download_engine, is_media_download_line
+from app.services.platform_metadata import fill_missing_media_metadata, metadata_for_media
 from app.services.x_task_service import (
     ACTIVE_X_TASK_STATUSES,
     create_x_download_task,
@@ -134,17 +135,23 @@ def download_x_profile(self, task_id: int):
             XMediaAsset.x_author_id == task.x_author_id
             if task.x_author_id else XMediaAsset.task_id == task.id
         )
-        existing_paths = {
-            row[0] for row in db.execute(
-                select(XMediaAsset.file_path).where(asset_scope)
-            ).all()
+        existing_assets = {
+            item.file_path: item for item in db.execute(
+                select(XMediaAsset).where(asset_scope)
+            ).scalars().all()
         }
         for file_path in result.files:
-            if file_path in existing_paths:
-                continue
             mime_type, _ = mimetypes.guess_type(file_path)
             media_type = "video" if (mime_type or "").startswith("video/") else "image"
             path = Path(file_path)
+            metadata = metadata_for_media(
+                file_path,
+                fallback_title=f"X 动态 @{task.username}",
+                fallback_author=task.x_author.display_name if task.x_author else task.username,
+            )
+            if existing := existing_assets.get(file_path):
+                fill_missing_media_metadata(existing, metadata)
+                continue
             db.add(XMediaAsset(
                 task_id=task.id,
                 x_author_id=task.x_author_id,
@@ -153,6 +160,7 @@ def download_x_profile(self, task_id: int):
                 filename=path.name,
                 size_bytes=path.stat().st_size if path.is_file() else 0,
                 mime_type=mime_type,
+                **metadata.as_model_values(),
             ))
         update_x_task_runtime(
             task,

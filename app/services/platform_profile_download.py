@@ -398,6 +398,7 @@ class GalleryDlProfileDownloadEngine:
             sys.executable, "-m", "gallery_dl", source_url,
             "--destination", str(user_folder), "--directory", "",
             "--download-archive", str(archive),
+            "--write-metadata",
             "--sleep-request", "2-5", "--sleep", "1-3",
             "--sleep-429", "120", "--retries", "3",
         ]

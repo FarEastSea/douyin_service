@@ -353,6 +353,17 @@ class XMediaAssetResponse(BaseModel):
     filename: str
     size_bytes: int = 0
     mime_type: Optional[str] = None
+    title: Optional[str] = None
+    author_name: Optional[str] = None
+    published_at: Optional[datetime] = None
+    cover_url: Optional[str] = None
+    duration_ms: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    view_count: Optional[int] = None
+    like_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    share_count: Optional[int] = None
     preview_url: str
     download_url: str
     created_at: datetime
@@ -412,6 +423,17 @@ class PlatformMediaAssetResponse(BaseModel):
     filename: str
     size_bytes: int = 0
     mime_type: Optional[str] = None
+    title: Optional[str] = None
+    author_name: Optional[str] = None
+    published_at: Optional[datetime] = None
+    cover_url: Optional[str] = None
+    duration_ms: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    view_count: Optional[int] = None
+    like_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    share_count: Optional[int] = None
     preview_url: str
     download_url: str
     created_at: datetime

@@ -464,12 +464,18 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
         if token:
             authors = json.loads(get("/api/authors/?page=1&page_size=1", True))
             tasks = json.loads(get("/api/tasks/?page=1&page_size=20", True))
+            unified = json.loads(get("/api/operations/tasks?page=1&page_size=1", True))
+            platforms = json.loads(get("/api/operations/platform-readiness", True))
             previewable = next((item for item in tasks.get("items", []) if item.get("local_preview_available")), None)
             if previewable:
                 get(f"/api/tasks/{previewable.get('id')}/preview", True)
             if not isinstance(authors.get("items"), list) or not isinstance(tasks.get("items"), list):
                 raise RuntimeError("management list payload is invalid")
-        print("Smoke checks OK: BT Panel runtime, Xiaohongshu downloader, home, docs, tasks, authors, media preview when available")
+            if not isinstance(unified.get("items"), list) or not isinstance(platforms.get("items"), list):
+                raise RuntimeError("cross-platform operations payload is invalid")
+            if len(platforms["items"]) < 6:
+                raise RuntimeError("platform readiness matrix is incomplete")
+        print("Smoke checks OK: BT Panel runtime, Xiaohongshu downloader, home, docs, unified tasks, platform readiness, authors, media preview when available")
         raise SystemExit(0)
     except Exception as exc:
         last_error = exc

@@ -31,6 +31,7 @@ from app.services.platform_task_service import (
     create_platform_task,
     finalize_platform_task,
 )
+from app.services.platform_metadata import fill_missing_media_metadata, metadata_for_media
 from app.services.x_downloader import is_media_download_line
 from app.tasks.celery_app import celery_app
 
@@ -295,16 +296,25 @@ def download_platform_profile(self, task_id: int):
 
         if not task.download_dir:
             task.download_dir = str(Path(spec.download_root()) / profile_storage_key(task.source_key))
-        existing_paths = set(db.execute(
-            select(PlatformMediaAsset.file_path).where(
+        existing_assets = {
+            item.file_path: item for item in db.execute(
+            select(PlatformMediaAsset).where(
                 PlatformMediaAsset.task_id == task.id
             )
-        ).scalars().all())
+        ).scalars().all()
+        }
         for file_path in result.files:
-            if file_path in existing_paths:
-                continue
             path = Path(file_path)
             mime_type, _ = mimetypes.guess_type(file_path)
+            metadata = metadata_for_media(
+                file_path,
+                fallback_title=f"{spec.name} {'作品' if task.source_type == 'work' else '主页媒体'} {task.source_key}",
+                fallback_author=task.source_key if task.source_type == "profile" else None,
+                fallback_data=getattr(result, "metadata", None),
+            )
+            if existing := existing_assets.get(file_path):
+                fill_missing_media_metadata(existing, metadata)
+                continue
             db.add(PlatformMediaAsset(
                 task_id=task.id,
                 platform=task.platform,
@@ -313,6 +323,7 @@ def download_platform_profile(self, task_id: int):
                 filename=path.name,
                 size_bytes=path.stat().st_size if path.is_file() else 0,
                 mime_type=mime_type,
+                **metadata.as_model_values(),
             ))
         child_task_ids = _persist_xhs_profile_result(
             db,

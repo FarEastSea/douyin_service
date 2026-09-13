@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, BookOpen, ChevronLeft, Download, LayoutDashboard, Menu, MoonStar, Settings, Sun, UserRound, Users, X } from '@lucide/vue'
+import { Activity, BookOpen, ChevronLeft, Download, Layers3, LayoutDashboard, Menu, MoonStar, Settings, Sun, UserRound, Users, X } from '@lucide/vue'
 import { api, saveToken } from './api'
 import MediaLightbox from './components/MediaLightbox.vue'
 import RiskBanner from './components/RiskBanner.vue'
@@ -27,7 +27,7 @@ const fallbackPlatforms: MediaPlatform[] = [
 const platforms = computed(() => store.platforms.length ? store.platforms : fallbackPlatforms)
 const platform = computed(() => platforms.value.find(item => route.path === item.route_prefix || route.path.startsWith(`${item.route_prefix}/`)) || platforms.value[0])
 const nav = computed(() => {
-  const current = platform.value, prefix = current.route_prefix, items = []
+  const current = platform.value, prefix = current.route_prefix, items = [{ path: '/operations/tasks', label: '全部任务', icon: Layers3 }]
   if (current.capabilities.tasks) items.push({ path: `${prefix}/tasks`, label: '下载任务', icon: Download })
   if (current.capabilities.authors) items.push({ path: `${prefix}/authors`, label: current.id === 'x' ? '用户管理' : '作者管理', icon: Users })
   if (current.capabilities.subscription_reports) items.push({ path: `${prefix}/updates`, label: '自动更新', icon: Activity })

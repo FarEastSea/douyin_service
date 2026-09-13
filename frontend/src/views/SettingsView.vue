@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Activity, Archive, BellRing, Clipboard, Cookie, Database, Play, RefreshCw, Save, Server, Settings2, Square, Trash2 } from '@lucide/vue'
+import { Activity, Archive, BellRing, Clipboard, Cookie, Database, HardDrive, Play, RefreshCw, Save, Server, Settings2, ShieldCheck, Square, Trash2 } from '@lucide/vue'
 import { useRoute } from 'vue-router'
 import { api, jsonBody } from '../api'
 import { useAppStore } from '../stores/app'
@@ -13,6 +13,8 @@ const runtime = ref<any>({}), limits = ref<any>({}), cookieValue = ref(''), xCoo
 const douyinAccount = ref<any>({ user_agent: '', proxy_enabled: false }), douyinProxyValue = ref('')
 const logs = ref<any[]>([]), logLevels = ref(['info', 'warning', 'error']), live = ref(true), process = ref<any>({})
 const readiness = ref<any>({ components: {} })
+const platformReadiness = ref<any>({ items: [] }), storageAudit = ref<any>(null)
+const platformAuditBusy = ref(false), storageAuditBusy = ref(false)
 const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>()
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
@@ -43,7 +45,7 @@ const generalGroup = ref('')
 const generalGroups = computed(() => [...new Set(generalFields.value.map(field => String(field.group || '其他')))])
 const visibleGeneralFields = computed(() => generalFields.value.filter(field => String(field.group || '其他') === generalGroup.value))
 const xCookieFile = ref('')
-const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['archive', '归档与导出'], ['process', '服务进程'], ['logs', '活动日志'], ['about', '诊断与关于']]
+const tabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['archive', '归档与导出'], ['process', '服务进程'], ['operations', '平台与存储'], ['logs', '活动日志'], ['about', '诊断与关于']]
 const isBooleanField = (field: any) => ['true', 'false'].includes(String(field.default).toLowerCase())
 const booleanFieldValue = (field: any) => String(allValues.value[field.key]?.value).toLowerCase() === 'true'
 const readinessLabel = (name: string) => ({ configuration: '应用配置', database: '数据库', redis: 'Redis', worker: 'Celery Worker', beat: 'Celery Beat', xhs_collector: '小红书下载服务' }[name] || name)
@@ -57,9 +59,11 @@ async function loadPlatformCredentialStatus() { const rows = await Promise.all(m
 async function loadLogs(silent: boolean | Event = false) { try { logs.value = (await api<any>('/logs?start=0&count=500')).logs || [] } catch (e: any) { if (silent !== true) store.notify(e.message, 'error') } }
 async function loadProcess() { process.value = await api('/process/status') }
 async function loadReadiness() { readiness.value = await api('/status/readiness') }
+async function loadPlatformReadiness() { platformAuditBusy.value = true; try { platformReadiness.value = await api('/operations/platform-readiness') } finally { platformAuditBusy.value = false } }
+async function loadStorageAudit() { storageAuditBusy.value = true; try { storageAudit.value = await api('/operations/storage-audit') } catch (error: any) { store.notify(error.message || '存储巡检失败', 'error') } finally { storageAuditBusy.value = false } }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
 async function init() {
-  const requests = [loadRuntime(), loadArchiveRules(), loadDouyinAccount(), loadPlatformCredentialStatus(), loadAll(), loadProcess(), loadReadiness(), loadLogs(), loadUpdateInfo()]
+  const requests = [loadRuntime(), loadArchiveRules(), loadDouyinAccount(), loadPlatformCredentialStatus(), loadAll(), loadProcess(), loadReadiness(), loadPlatformReadiness(), loadLogs(), loadUpdateInfo()]
   try { await Promise.all(requests) }
   catch (error: any) { store.notify(error.message || '加载设置失败', 'error') }
   if (timer.value != null) window.clearInterval(timer.value)
@@ -162,6 +166,8 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 
     <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div><button class="btn ghost" @click="loadReadiness"><RefreshCw :size="15" />检查依赖</button></header><div class="readiness-grid"><article v-for="(component, name) in readiness.components" :key="name" :data-ready="component.ok"><span class="health-dot" :class="{ online: component.ok }" /><div><strong>{{ readinessLabel(String(name)) }}</strong><small>{{ component.message }}</small></div></article></div><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
 
+    <div v-else-if="tab === 'operations'" class="settings-panel operations-panel"><header><ShieldCheck /><div><h3>平台验收与存储维护</h3><p>本地就绪检查与只读文件核对；不会删除文件或修改历史记录</p></div><div class="header-actions"><button class="btn ghost" :disabled="platformAuditBusy" @click="loadPlatformReadiness"><RefreshCw :size="15" />检查平台</button><button class="btn primary" :disabled="storageAuditBusy" @click="loadStorageAudit"><HardDrive :size="15" />扫描存储</button></div></header><div class="platform-audit-grid"><article v-for="item in platformReadiness.items" :key="item.platform" :data-status="item.status"><div class="account-health"><strong>{{ item.name }}</strong><span>{{ item.status === 'ready' ? '本地就绪' : item.status === 'degraded' ? '可用但待完善' : '阻塞' }}</span></div><p>{{ item.engine }} · {{ item.supported_sources.join(' / ') || '未开放下载' }}</p><small>Cookie：{{ item.cookie_configured ? '已配置' : '未配置' }} · FFmpeg：{{ item.ffmpeg_ready ? '可用' : '未安装' }} · 目录：{{ item.download_root.writable ? '可写' : '不可写' }}</small><ul v-if="item.blockers.length || item.warnings.length"><li v-for="message in [...item.blockers, ...item.warnings]" :key="message">{{ message }}</li></ul><em>外部真实链接仍需部署后验收</em></article></div><div class="storage-report"><div><strong>存储只读巡检</strong><span v-if="storageAudit">已扫描 {{ storageAudit.scanned_records }} 条记录、{{ storageAudit.scanned_files }} 个文件</span><span v-else>点击“扫描存储”后显示结果</span></div><template v-if="storageAudit"><div class="storage-metrics"><article><b>{{ storageAudit.disk.used_percent }}%</b><span>磁盘已用</span></article><article><b>{{ storageAudit.missing_records.length }}</b><span>记录缺文件</span></article><article><b>{{ storageAudit.partial_files.length }}</b><span>残留临时文件</span></article><article><b>{{ storageAudit.zero_byte_files.length }}</b><span>空文件</span></article><article><b>{{ storageAudit.orphan_files.length }}</b><span>未关联媒体</span></article></div><details v-if="storageAudit.missing_records.length || storageAudit.partial_files.length || storageAudit.orphan_files.length"><summary>查看问题样本</summary><pre>{{ JSON.stringify({ missing_records: storageAudit.missing_records, partial_files: storageAudit.partial_files, orphan_files: storageAudit.orphan_files }, null, 2) }}</pre></details><small>{{ storageAudit.note }}<template v-if="storageAudit.records_truncated || storageAudit.files_truncated"> 本次达到安全扫描上限，结果可能不完整。</template></small></template></div></div>
+
     <div v-else-if="tab === 'logs'" class="settings-panel log-panel"><header><Activity /><div><h3>活动日志</h3><p>实时查看最近 500 条系统与任务事件</p></div><div class="header-actions"><button type="button" class="setting-switch" :class="{ on: live }" role="switch" :aria-checked="live" @click="live = !live"><span class="switch-track"><i /></span><span>实时刷新</span></button><button class="btn ghost compact" @click="copyLogs"><Clipboard :size="15" />复制</button><button class="btn ghost compact" @click="clearLogs"><Trash2 :size="15" />清空</button><button class="btn ghost compact" @click="loadLogs"><RefreshCw :size="15" />刷新</button></div></header><div class="log-filters"><button v-for="level in ['info','warning','error']" :key="level" :class="{ active: logLevels.includes(level) }" @click="toggleLevel(level)">{{ level }}</button></div><div class="log-console"><article v-for="(item, index) in filteredLogs" :key="`${item.ts}-${index}`" :data-level="item.level"><time>{{ new Date(item.ts * 1000).toLocaleString() }}</time><b>[{{ item.source }}]</b><span>{{ item.msg }}</span><small v-if="item.detail">{{ item.detail }}</small></article><div v-if="!filteredLogs.length" class="empty-state">暂无符合筛选条件的日志</div></div></div>
 
     <div v-else-if="tab === 'about'" class="settings-panel"><header><Database /><div><h3>诊断与关于</h3><p>版本检查、更新诊断与运维入口</p></div></header><div class="about-grid"><article><strong>当前版本 {{ updateInfo.current?.short || '—' }}</strong><p>{{ updateInfo.message || '正在读取本地版本信息' }}<br />分支：{{ updateInfo.branch || '—' }}</p><div class="header-actions"><button class="btn ghost" :disabled="updateBusy" @click="checkUpdate">检查更新</button><button class="btn ghost" @click="diagnoseUpdate">复制诊断</button><button v-if="updateInfo.has_update" class="btn primary" :disabled="updateBusy || !updateInfo.update_supported" @click="applyUpdate">安装更新</button></div></article><article><strong>媒体下载管理系统</strong><p>FastAPI · PostgreSQL · Redis · Celery · Vue 3</p><div class="header-actions"><a class="btn ghost" href="/docs" target="_blank">API 文档</a><a class="btn ghost" href="/legacy">旧版界面</a></div></article></div><pre v-if="diagnostic" class="diagnostic-preview">{{ JSON.stringify(diagnostic, null, 2) }}</pre></div>
@@ -199,7 +205,19 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 .readiness-grid article div { min-width: 0; display: grid; gap: 2px; }
 .readiness-grid article strong { font-size: 11px; }
 .readiness-grid article small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.platform-audit-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.platform-audit-grid article { padding:13px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
+.platform-audit-grid article[data-status="blocked"] { border-color:color-mix(in srgb,var(--red) 45%,var(--line)); }
+.platform-audit-grid p,.platform-audit-grid small,.platform-audit-grid em { display:block; color:var(--muted); font-size:9px; }
+.platform-audit-grid ul { margin:8px 0; padding-left:17px; color:var(--amber); font-size:9px; }
+.storage-report { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
+.storage-report>div:first-child { display:flex; justify-content:space-between; gap:12px; }
+.storage-metrics { margin:12px 0; display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
+.storage-metrics article { padding:10px; display:grid; gap:3px; border:1px solid var(--line); border-radius:8px; }
+.storage-metrics b { font-size:18px; }.storage-metrics span,.storage-report small { color:var(--muted); font-size:9px; }
+.storage-report pre { max-height:260px; overflow:auto; font-size:9px; white-space:pre-wrap; }
 @media(max-width:900px){.notification-test-result{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:900px){.readiness-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){.platform-audit-grid{grid-template-columns:repeat(2,1fr)}.storage-metrics{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:720px){.archive-grid{grid-template-columns:1fr}.archive-pair{grid-template-columns:1fr}}
 </style>

@@ -28,6 +28,7 @@ class XhsDownloadResult:
     error_code: Optional[str] = None
     author_profile: Optional[dict[str, Any]] = None
     discovered_works: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _cookie_header(cookie_file: Optional[str]) -> str:
@@ -198,7 +199,18 @@ class XhsApiDownloadEngine:
 
             files = list_media_files(folder)
             log(f"[{spec.name}] 完成：本次新增 {len(set(files) - before)}，目录共 {len(files)} 个媒体")
-            return XhsDownloadResult(True, len(files), 0, files=files)
+            author = data.get("作者") if isinstance(data.get("作者"), dict) else {}
+            stats = data.get("互动") if isinstance(data.get("互动"), dict) else {}
+            metadata = {
+                "title": data.get("标题") or data.get("描述"),
+                "author": {"name": author.get("昵称") or data.get("作者昵称")},
+                "published_at": data.get("发布时间"),
+                "cover_url": data.get("封面"),
+                "like_count": stats.get("点赞") or data.get("点赞数"),
+                "comment_count": stats.get("评论") or data.get("评论数"),
+                "share_count": stats.get("分享") or data.get("分享数"),
+            }
+            return XhsDownloadResult(True, len(files), 0, files=files, metadata=metadata)
         except requests.ConnectionError:
             return XhsDownloadResult(
                 False, len(before), -1, files=sorted(before), error_code="engine_unavailable",

@@ -48,6 +48,14 @@ export interface PlatformTask {
   progress_percent: number; error_message?: string; error_code?: string; last_log_line?: string;
   preview_count: number; retry_count: number; created_at: string;
 }
+export interface UnifiedTask {
+  key: string; platform: string; id: number; source_type: string; source_label: string;
+  author_name?: string; published_at?: string; media_type?: 'image' | 'video'; cover_url?: string;
+  status: string; phase?: string; progress_percent: number; file_count: number;
+  error_message?: string; error_code?: string; preview_count: number;
+  preview_endpoint?: string; media_endpoint?: string; retry_endpoint?: string; cancel_endpoint?: string;
+  created_at: string; started_at?: string; completed_at?: string;
+}
 export interface PlatformAuthor {
   id: number; platform: string; external_user_id: string; profile_url: string;
   nickname?: string; red_id?: string; avatar_url?: string; description?: string;

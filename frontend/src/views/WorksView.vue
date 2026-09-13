@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { ArrowLeft, CheckSquare, Download, Eye, Image, RefreshCw, Search, Trash2 } from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { ArrowLeft, CheckSquare, Download, Eye, Image, RefreshCw, Search, TrendingUp, Trash2, X } from '@lucide/vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { openMedia } from '../media'
@@ -19,6 +19,26 @@ const workType = ref<WorkTypeFilter>('all'), publishedFrom = ref(''), publishedT
 const sort = ref<WorkSort>('published_desc')
 const page = ref(1), pages = ref(1), total = ref(0), pageSize = 30
 const searchTimer = ref<number>()
+const trendWork = ref<Work>(), trendSnapshots = ref<any[]>([]), trendMetric = ref('digg_count'), trendLoading = ref(false)
+const trendMetrics = [
+  ['digg_count', '点赞'], ['comment_count', '评论'], ['collect_count', '收藏'],
+  ['share_count', '分享'], ['play_count', '播放'],
+]
+const trendSeries = computed(() => [...trendSnapshots.value].reverse().filter(item => item[trendMetric.value] != null))
+const trendSummary = computed(() => {
+  const values = trendSeries.value.map(item => Number(item[trendMetric.value] || 0))
+  const deltas = values.slice(1).map((value, index) => value - values[index])
+  const positives = deltas.filter(value => value > 0).sort((a, b) => a - b)
+  const median = positives.length ? positives[Math.floor(positives.length / 2)] : 0
+  const latestDelta = deltas.at(-1) || 0
+  return { first: values[0] || 0, latest: values.at(-1) || 0, delta: (values.at(-1) || 0) - (values[0] || 0), latestDelta, unusual: positives.length >= 3 && latestDelta > Math.max(100, median * 3) }
+})
+const trendPoints = computed(() => {
+  const values = trendSeries.value.map(item => Number(item[trendMetric.value] || 0))
+  if (!values.length) return ''
+  const min = Math.min(...values), max = Math.max(...values), span = Math.max(1, max - min)
+  return values.map((value, index) => `${values.length === 1 ? 50 : index / (values.length - 1) * 100},${90 - (value - min) / span * 80}`).join(' ')
+})
 const id = Number(route.params.id)
 async function load() {
   loading.value = true
@@ -99,6 +119,12 @@ async function batchDelete() {
   try { const result = await api<any>('/works/batch-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ work_ids: selected.value }) }); store.notify(result.message || '批量删除完成'); selected.value = []; await load() }
   catch (error: any) { store.notify(error.message || '批量删除失败', 'error') }
 }
+async function showTrend(work: Work) {
+  trendWork.value = work; trendLoading.value = true
+  try { trendSnapshots.value = await api<any[]>(`/works/${work.id}/stats`) }
+  catch (error: any) { trendSnapshots.value = []; store.notify(error.message || '加载统计趋势失败', 'error') }
+  finally { trendLoading.value = false }
+}
 onMounted(load); onBeforeUnmount(() => { if (searchTimer.value != null) window.clearTimeout(searchTimer.value) })
 </script>
 
@@ -118,10 +144,22 @@ onMounted(load); onBeforeUnmount(() => { if (searchTimer.value != null) window.c
           <span v-if="work.music_title" class="work-music">音乐：{{ work.music_title }}<template v-if="work.music_author"> · {{ work.music_author }}</template></span>
           <div v-if="hasStats(work)" class="work-stats"><span>赞 {{ formatCount(work.digg_count) }}</span><span>评 {{ formatCount(work.comment_count) }}</span><span>藏 {{ formatCount(work.collect_count) }}</span><span>转 {{ formatCount(work.share_count) }}</span><span v-if="work.play_count != null">播 {{ formatCount(work.play_count) }}</span></div>
         </div>
-        <footer><button class="btn ghost compact" @click="preview(work)"><Eye :size="14" />预览</button><button class="btn ghost compact" @click="workAction(work, 'redownload')"><Download :size="14" />重新下载</button><button v-if="work.download_status === 'failed'" class="btn ghost compact" @click="workAction(work, 'retry-failed')"><RefreshCw :size="14" />重试</button><button class="icon-btn danger" @click="remove(work)"><Trash2 :size="16" /></button></footer>
+        <footer><button class="btn ghost compact" @click="preview(work)"><Eye :size="14" />预览</button><button v-if="hasStats(work)" class="btn ghost compact" @click="showTrend(work)"><TrendingUp :size="14" />趋势</button><button class="btn ghost compact" @click="workAction(work, 'redownload')"><Download :size="14" />重新下载</button><button v-if="work.download_status === 'failed'" class="btn ghost compact" @click="workAction(work, 'retry-failed')"><RefreshCw :size="14" />重试</button><button class="icon-btn danger" @click="remove(work)"><Trash2 :size="16" /></button></footer>
       </article>
       <div v-if="!loading && !works.length" class="empty-state wide"><Image /><strong>没有符合条件的作品</strong></div>
     </main>
     <Pager :page="page" :pages="pages" :total="total" @change="changePage" />
+    <Teleport to="body"><div v-if="trendWork" class="trend-overlay" @click.self="trendWork = undefined"><section class="trend-dialog"><header><div><p class="eyebrow">GROWTH ANALYTICS</p><h3>{{ trendWork.title || `作品 ${trendWork.aweme_id}` }}</h3><span>{{ trendSnapshots.length }} 个统计快照</span></div><button class="icon-btn" @click="trendWork = undefined"><X /></button></header><nav><button v-for="metric in trendMetrics" :key="metric[0]" :class="{ active: trendMetric === metric[0] }" @click="trendMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="trendLoading" class="empty-state">正在读取趋势…</div><template v-else-if="trendSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(trendSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(trendSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="trendSummary.unusual"><strong>+{{ formatCount(trendSummary.latestDelta) }}</strong><span>最近增量{{ trendSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="trendPoints" /></svg><div class="trend-range"><span>{{ new Date(trendSeries[0].observed_at).toLocaleString() }}</span><span>{{ new Date(trendSeries[trendSeries.length - 1].observed_at).toLocaleString() }}</span></div><div class="trend-table"><article v-for="snapshot in [...trendSeries].reverse().slice(0, 20)" :key="snapshot.id"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[trendMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>暂无可绘制的统计历史</strong><span>后续采集到变化后会自动追加快照</span></div></section></div></Teleport>
   </section>
 </template>
+
+<style scoped>
+.trend-overlay { position:fixed; inset:0; z-index:80; display:grid; place-items:center; padding:20px; background:rgba(5,9,18,.72); backdrop-filter:blur(8px); }
+.trend-dialog { width:min(760px,100%); max-height:88vh; overflow:auto; padding:20px; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 24px 80px rgba(0,0,0,.28); }
+.trend-dialog>header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }.trend-dialog h3{margin:3px 0}.trend-dialog header span{color:var(--muted);font-size:10px}
+.trend-dialog nav { margin:16px 0; display:flex; gap:6px; flex-wrap:wrap; }.trend-dialog nav button{padding:7px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--muted);cursor:pointer}.trend-dialog nav button.active{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.trend-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }.trend-kpis article{padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);display:grid;gap:3px}.trend-kpis article[data-alert="true"]{border-color:var(--amber)}.trend-kpis strong{font-size:20px}.trend-kpis span{color:var(--muted);font-size:9px}
+.trend-chart { width:100%; height:230px; margin-top:16px; overflow:visible; }.trend-chart line{stroke:var(--line);stroke-width:.5}.trend-chart polyline{fill:none;stroke:var(--accent);stroke-width:2;vector-effect:non-scaling-stroke;stroke-linecap:round;stroke-linejoin:round}
+.trend-range{display:flex;justify-content:space-between;color:var(--muted);font-size:9px}.trend-table{margin-top:14px;border-top:1px solid var(--line)}.trend-table article{display:grid;grid-template-columns:1fr auto 90px;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:10px}.trend-table span,.trend-table time{color:var(--muted)}
+@media(max-width:600px){.trend-kpis{grid-template-columns:1fr}.trend-chart{height:170px}}
+</style>

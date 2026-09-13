@@ -32,7 +32,16 @@ if not BOOTSTRAP_MODE:
         from app.models.database import init_db
         from app.core.config import settings, ensure_download_dir
         from app.core.process_manager import process_manager
-        from app.api import tasks, authors, system, x_tasks, works, platforms, platform_downloads
+        from app.api import (
+            authors,
+            operations,
+            platform_downloads,
+            platforms,
+            system,
+            tasks,
+            works,
+            x_tasks,
+        )
         from app.services.douyin_account import (
             migrate_legacy_account_sync,
             recover_legacy_signature_isolation_sync,
@@ -157,10 +166,10 @@ app = FastAPI(
 - 📚 下载历史记录
 - 🔔 作者订阅，自动检查新作品
 - 🐦 X/Twitter 媒体下载（gallery-dl）
-- 🌍 TikTok 用户主页媒体下载（gallery-dl）
-- 🔴 微博用户主页媒体下载（gallery-dl）
+- 🌍 TikTok 用户主页及单条作品下载（gallery-dl）
+- 🔴 微博用户主页及单条动态下载（gallery-dl）
 - 📺 B站 UP 主空间、视频、分P及含视频动态下载（yt-dlp）
-- 📕 小红书单条笔记及受管浏览器作者主页批量/增量采集
+- 📕 小红书单条图文、视频与实况笔记下载（作者主页批量采集已搁置）
 
 ## API 文档
 
@@ -221,6 +230,7 @@ if not BOOTSTRAP_MODE:
     app.include_router(works.router, prefix="/api")
     app.include_router(platforms.router, prefix="/api")
     app.include_router(platform_downloads.router, prefix="/api")
+    app.include_router(operations.router, prefix="/api")
 
 
 # 静态文件服务（前端页面）

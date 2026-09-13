@@ -181,6 +181,11 @@ async def list_x_task_media(task_id: int, db: AsyncSession = Depends(get_async_d
     return [XMediaAssetResponse(
         id=item.id, task_id=item.task_id, media_type=item.media_type,
         filename=item.filename, size_bytes=item.size_bytes or 0, mime_type=item.mime_type,
+        title=item.title, author_name=item.author_name, published_at=item.published_at,
+        cover_url=item.cover_url, duration_ms=item.duration_ms,
+        width=item.width, height=item.height, view_count=item.view_count,
+        like_count=item.like_count, comment_count=item.comment_count,
+        share_count=item.share_count,
         preview_url=f"/api/x/media/{item.id}/preview",
         download_url=f"/api/x/media/{item.id}/download", created_at=item.created_at,
     ) for item in assets]

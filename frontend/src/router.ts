@@ -7,11 +7,13 @@ import SettingsView from './views/SettingsView.vue'
 import XTasksView from './views/XTasksView.vue'
 import XAuthorsView from './views/XAuthorsView.vue'
 import PlatformTasksView from './views/PlatformTasksView.vue'
+import UnifiedTasksView from './views/UnifiedTasksView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/douyin/tasks' },
+    { path: '/operations/tasks', component: UnifiedTasksView },
     { path: '/douyin/tasks', component: TasksView },
     { path: '/douyin/authors', component: AuthorsView },
     { path: '/douyin/authors/:id/works', component: WorksView },
