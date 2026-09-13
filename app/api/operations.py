@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import importlib.util
+import logging
 import os
 from pathlib import Path
 import shutil
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,10 +33,13 @@ from app.models.models import (
     XMediaAsset,
 )
 from app.services.platform_registry import platform_registry
+from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
+from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
 
 
 router = APIRouter(prefix="/operations", tags=["统一运维"])
+logger = logging.getLogger(__name__)
 
 
 def _safe_stat(path_value: str | None) -> tuple[bool, int]:
@@ -269,11 +273,82 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
     }
 
 
-def _task_sort_key(item: dict[str, Any]):
-    value = item.get("created_at")
-    if value is None:
-        return datetime.min
-    return value
+VALID_TASK_STATUSES = {
+    "pending", "downloading", "paused", "completed", "skipped", "failed", "cancelled",
+}
+
+
+def _merge_status_rows(target: dict[str, int], rows) -> None:
+    for row in rows:
+        key = str(row.status or "unknown")
+        target[key] = target.get(key, 0) + int(row.task_count or 0)
+
+
+def _serialize_douyin_task(task: DownloadTask) -> dict[str, Any]:
+    work = task.work
+    return {
+        "key": f"douyin:{task.id}", "platform": "douyin", "id": task.id,
+        "source_type": "work", "source_label": work.title or work.aweme_id,
+        "author_name": work.author.nickname if work.author else None,
+        "published_at": work.published_at,
+        "media_type": "image" if work.work_type == "images" else "video",
+        "cover_url": work.cover_url, "status": task.status, "phase": None,
+        "progress_percent": task.progress_percent,
+        "file_count": 1 if task.status == "completed" and task.file_path else 0,
+        "error_message": task.error_message, "error_code": None,
+        "preview_count": 1 if task.status == "completed" and task.file_path else 0,
+        "preview_endpoint": f"/tasks/{task.id}/preview",
+        "retry_endpoint": f"/tasks/{task.id}/retry",
+        "cancel_endpoint": f"/tasks/{task.id}/cancel",
+        "created_at": task.created_at, "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    }
+
+
+def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
+    asset = task.media_assets[0] if task.media_assets else None
+    return {
+        "key": f"x:{task.id}", "platform": "x", "id": task.id,
+        "source_type": "work" if "/status/" in task.profile_url else "profile",
+        "source_label": asset.title if asset and asset.title else f"@{task.username}",
+        "author_name": (
+            asset.author_name if asset and asset.author_name
+            else task.x_author.display_name if task.x_author else task.username
+        ),
+        "published_at": asset.published_at if asset else None,
+        "media_type": asset.media_type if asset else None,
+        "cover_url": asset.cover_url if asset else None,
+        "status": task.status, "phase": task.phase,
+        "progress_percent": task.progress_percent, "file_count": task.file_count,
+        "error_message": task.error_message, "error_code": task.error_code,
+        "preview_count": len(task.media_assets), "media_endpoint": f"/x/tasks/{task.id}/media",
+        "retry_endpoint": f"/x/tasks/{task.id}/retry",
+        "cancel_endpoint": f"/x/tasks/{task.id}/cancel",
+        "created_at": task.created_at, "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    }
+
+
+def _serialize_platform_task(task: PlatformDownloadTask) -> dict[str, Any]:
+    asset = task.media_assets[0] if task.media_assets else None
+    return {
+        "key": f"{task.platform}:{task.id}", "platform": task.platform, "id": task.id,
+        "source_type": task.source_type,
+        "source_label": asset.title if asset and asset.title else task.source_key,
+        "author_name": asset.author_name if asset else None,
+        "published_at": asset.published_at if asset else None,
+        "media_type": asset.media_type if asset else None,
+        "cover_url": asset.cover_url if asset else None,
+        "status": task.status, "phase": task.phase,
+        "progress_percent": task.progress_percent, "file_count": task.file_count,
+        "error_message": task.error_message, "error_code": task.error_code,
+        "preview_count": len(task.media_assets),
+        "media_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/media",
+        "retry_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/retry",
+        "cancel_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/cancel",
+        "created_at": task.created_at, "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    }
 
 
 @router.get("/tasks")
@@ -285,113 +360,180 @@ async def unified_tasks(
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """One stable task contract over the three legacy task stores."""
+    """跨三套任务表统一检索、汇总，并通过数据库联合分页限制内存占用。"""
     wanted = str(platform or "").strip().lower()
     search = str(q or "").strip()
-    fetch_limit = page * page_size
-    items: list[dict[str, Any]] = []
-    totals = 0
+    if status and status not in VALID_TASK_STATUSES:
+        raise HTTPException(status_code=400, detail="不支持的任务状态")
+    known_platforms = {item.id for item in platform_registry.list()}
+    if wanted and wanted not in known_platforms:
+        raise HTTPException(status_code=404, detail="平台不存在")
+
+    key_statements = []
+    status_summary: dict[str, int] = {}
 
     if wanted in {"", "douyin"}:
-        conditions = []
+        base_conditions = []
+        if search:
+            base_conditions.append(or_(
+                Work.title.contains(search, autoescape=True),
+                Work.aweme_id.contains(search, autoescape=True),
+                Author.nickname.contains(search, autoescape=True),
+                DownloadTask.file_name.contains(search, autoescape=True),
+            ))
+        summary_rows = (await db.execute(
+            select(DownloadTask.status, func.count(DownloadTask.id).label("task_count"))
+            .join(DownloadTask.work).join(Work.author)
+            .where(*base_conditions).group_by(DownloadTask.status)
+        )).all()
+        _merge_status_rows(status_summary, summary_rows)
+        conditions = [*base_conditions]
         if status:
             conditions.append(DownloadTask.status == status)
-        if search:
-            conditions.append(or_(Work.title.contains(search, autoescape=True), Author.nickname.contains(search, autoescape=True)))
-        query = (
-            select(DownloadTask)
-            .join(DownloadTask.work)
-            .join(Work.author)
-            .options(selectinload(DownloadTask.work).selectinload(Work.author))
-            .where(*conditions)
-            .order_by(DownloadTask.created_at.desc(), DownloadTask.id.desc())
-            .limit(fetch_limit)
+        key_statements.append(
+            select(
+                literal("douyin").label("platform"), DownloadTask.id.label("task_id"),
+                DownloadTask.created_at.label("created_at"),
+            ).join(DownloadTask.work).join(Work.author).where(*conditions)
         )
-        rows = (await db.execute(query)).scalars().all()
-        totals += int((await db.scalar(
-            select(func.count(DownloadTask.id)).join(DownloadTask.work).join(Work.author).where(*conditions)
-        )) or 0)
-        for task in rows:
-            work = task.work
-            items.append({
-                "key": f"douyin:{task.id}", "platform": "douyin", "id": task.id,
-                "source_type": "work", "source_label": work.title or work.aweme_id,
-                "author_name": work.author.nickname if work.author else None,
-                "published_at": work.published_at,
-                "media_type": "image" if work.work_type == "images" else "video",
-                "cover_url": work.cover_url, "status": task.status, "phase": None,
-                "progress_percent": task.progress_percent, "file_count": 1 if task.status == "completed" else 0,
-                "error_message": task.error_message, "error_code": None,
-                "preview_count": 1 if task.status == "completed" and task.file_path else 0,
-                "preview_endpoint": f"/tasks/{task.id}/preview",
-                "retry_endpoint": f"/tasks/{task.id}/retry", "cancel_endpoint": f"/tasks/{task.id}/cancel",
-                "created_at": task.created_at, "started_at": task.started_at, "completed_at": task.completed_at,
-            })
 
     if wanted in {"", "x"}:
-        conditions = []
+        base_conditions = []
+        if search:
+            base_conditions.append(or_(
+                XDownloadTask.username.contains(search, autoescape=True),
+                XDownloadTask.profile_url.contains(search, autoescape=True),
+                XDownloadTask.media_assets.any(or_(
+                    XMediaAsset.title.contains(search, autoescape=True),
+                    XMediaAsset.author_name.contains(search, autoescape=True),
+                    XMediaAsset.filename.contains(search, autoescape=True),
+                )),
+            ))
+        summary_rows = (await db.execute(
+            select(XDownloadTask.status, func.count(XDownloadTask.id).label("task_count"))
+            .where(*base_conditions).group_by(XDownloadTask.status)
+        )).all()
+        _merge_status_rows(status_summary, summary_rows)
+        conditions = [*base_conditions]
         if status:
             conditions.append(XDownloadTask.status == status)
-        if search:
-            conditions.append(XDownloadTask.username.contains(search, autoescape=True))
-        query = (
-            select(XDownloadTask).options(selectinload(XDownloadTask.x_author), selectinload(XDownloadTask.media_assets))
-            .where(*conditions).order_by(XDownloadTask.created_at.desc(), XDownloadTask.id.desc()).limit(fetch_limit)
+        key_statements.append(
+            select(
+                literal("x").label("platform"), XDownloadTask.id.label("task_id"),
+                XDownloadTask.created_at.label("created_at"),
+            ).where(*conditions)
         )
-        rows = (await db.execute(query)).scalars().all()
-        totals += int((await db.scalar(select(func.count(XDownloadTask.id)).where(*conditions))) or 0)
-        for task in rows:
-            asset = task.media_assets[0] if task.media_assets else None
-            items.append({
-                "key": f"x:{task.id}", "platform": "x", "id": task.id,
-                "source_type": "work" if "/status/" in task.profile_url else "profile",
-                "source_label": asset.title if asset and asset.title else f"@{task.username}",
-                "author_name": asset.author_name if asset and asset.author_name else (task.x_author.display_name if task.x_author else task.username),
-                "published_at": asset.published_at if asset else None,
-                "media_type": asset.media_type if asset else None, "cover_url": asset.cover_url if asset else None,
-                "status": task.status, "phase": task.phase, "progress_percent": task.progress_percent,
-                "file_count": task.file_count, "error_message": task.error_message, "error_code": task.error_code,
-                "preview_count": len(task.media_assets), "media_endpoint": f"/x/tasks/{task.id}/media",
-                "retry_endpoint": f"/x/tasks/{task.id}/retry", "cancel_endpoint": f"/x/tasks/{task.id}/cancel",
-                "created_at": task.created_at, "started_at": task.started_at, "completed_at": task.completed_at,
-            })
 
-    platform_ids = {item.id for item in platform_registry.list()} - {"douyin", "x"}
+    platform_ids = known_platforms - {"douyin", "x"}
     generic_ids = platform_ids if not wanted else ({wanted} if wanted in platform_ids else set())
     if generic_ids:
-        conditions = [PlatformDownloadTask.platform.in_(generic_ids)]
+        base_conditions = [PlatformDownloadTask.platform.in_(generic_ids)]
+        if search:
+            base_conditions.append(or_(
+                PlatformDownloadTask.source_key.contains(search, autoescape=True),
+                PlatformDownloadTask.source_url.contains(search, autoescape=True),
+                PlatformDownloadTask.media_assets.any(or_(
+                    PlatformMediaAsset.title.contains(search, autoescape=True),
+                    PlatformMediaAsset.author_name.contains(search, autoescape=True),
+                    PlatformMediaAsset.filename.contains(search, autoescape=True),
+                )),
+            ))
+        summary_rows = (await db.execute(
+            select(PlatformDownloadTask.status, func.count(PlatformDownloadTask.id).label("task_count"))
+            .where(*base_conditions).group_by(PlatformDownloadTask.status)
+        )).all()
+        _merge_status_rows(status_summary, summary_rows)
+        conditions = [*base_conditions]
         if status:
             conditions.append(PlatformDownloadTask.status == status)
-        if search:
-            conditions.append(PlatformDownloadTask.source_key.contains(search, autoescape=True))
-        query = (
-            select(PlatformDownloadTask).options(selectinload(PlatformDownloadTask.media_assets))
-            .where(*conditions).order_by(PlatformDownloadTask.created_at.desc(), PlatformDownloadTask.id.desc()).limit(fetch_limit)
+        key_statements.append(
+            select(
+                PlatformDownloadTask.platform.label("platform"),
+                PlatformDownloadTask.id.label("task_id"),
+                PlatformDownloadTask.created_at.label("created_at"),
+            ).where(*conditions)
         )
-        rows = (await db.execute(query)).scalars().all()
-        totals += int((await db.scalar(select(func.count(PlatformDownloadTask.id)).where(*conditions))) or 0)
-        for task in rows:
-            asset = task.media_assets[0] if task.media_assets else None
-            items.append({
-                "key": f"{task.platform}:{task.id}", "platform": task.platform, "id": task.id,
-                "source_type": task.source_type, "source_label": asset.title if asset and asset.title else task.source_key,
-                "author_name": asset.author_name if asset else None, "published_at": asset.published_at if asset else None,
-                "media_type": asset.media_type if asset else None, "cover_url": asset.cover_url if asset else None,
-                "status": task.status, "phase": task.phase, "progress_percent": task.progress_percent,
-                "file_count": task.file_count, "error_message": task.error_message, "error_code": task.error_code,
-                "preview_count": len(task.media_assets),
-                "media_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/media",
-                "retry_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/retry",
-                "cancel_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/cancel",
-                "created_at": task.created_at, "started_at": task.started_at, "completed_at": task.completed_at,
-            })
 
-    items.sort(key=_task_sort_key, reverse=True)
-    start = (page - 1) * page_size
+    totals = status_summary.get(status, 0) if status else sum(status_summary.values())
+
+    combined_statement = key_statements[0] if len(key_statements) == 1 else union_all(*key_statements)
+    combined = combined_statement.subquery()
+    page_rows = (await db.execute(
+        select(combined.c.platform, combined.c.task_id, combined.c.created_at)
+        .order_by(combined.c.created_at.desc().nullslast(), combined.c.platform, combined.c.task_id.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    )).all()
+    ordered_keys = [(str(row.platform), int(row.task_id)) for row in page_rows]
+    ids_by_platform: dict[str, list[int]] = {}
+    for item_platform, task_id in ordered_keys:
+        ids_by_platform.setdefault(item_platform, []).append(task_id)
+
+    serialized: dict[tuple[str, int], dict[str, Any]] = {}
+    if ids_by_platform.get("douyin"):
+        rows = (await db.execute(
+            select(DownloadTask).join(DownloadTask.work).join(Work.author)
+            .options(selectinload(DownloadTask.work).selectinload(Work.author))
+            .where(DownloadTask.id.in_(ids_by_platform["douyin"]))
+        )).scalars().all()
+        serialized.update({("douyin", task.id): _serialize_douyin_task(task) for task in rows})
+    if ids_by_platform.get("x"):
+        rows = (await db.execute(
+            select(XDownloadTask)
+            .options(selectinload(XDownloadTask.x_author), selectinload(XDownloadTask.media_assets))
+            .where(XDownloadTask.id.in_(ids_by_platform["x"]))
+        )).scalars().all()
+        serialized.update({("x", task.id): _serialize_x_task(task) for task in rows})
+    generic_task_ids = [
+        task_id for item_platform, task_id in ordered_keys if item_platform not in {"douyin", "x"}
+    ]
+    if generic_task_ids:
+        rows = (await db.execute(
+            select(PlatformDownloadTask).options(selectinload(PlatformDownloadTask.media_assets))
+            .where(PlatformDownloadTask.id.in_(generic_task_ids))
+        )).scalars().all()
+        serialized.update({(task.platform, task.id): _serialize_platform_task(task) for task in rows})
+
+    items = [serialized[key] for key in ordered_keys if key in serialized]
     return {
-        "items": items[start:start + page_size], "total": totals, "page": page,
+        "items": items, "total": totals, "page": page,
         "page_size": page_size, "pages": max(1, (totals + page_size - 1) // page_size),
+        "status_summary": status_summary,
     }
+
+
+@router.post("/tasks/actions", response_model=MessageResponse)
+async def unified_task_actions(
+    request: UnifiedTaskActionRequest,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """对显式选中的跨平台任务执行批量重试或取消，并逐项返回结果。"""
+    task_keys = list(dict.fromkeys(request.task_keys))
+    succeeded: list[str] = []
+    failed: list[dict[str, Any]] = []
+    for task_key in task_keys:
+        try:
+            await operate_task(db, task_key, request.action)
+            succeeded.append(task_key)
+        except TaskOperationError as exc:
+            failed.append({"task_key": task_key, "message": str(exc), "status_code": exc.status_code})
+    action_label = "重试" if request.action == "retry" else "取消"
+    message = f"已{action_label} {len(succeeded)} 个任务"
+    if failed:
+        message += f"，{len(failed)} 个未处理"
+    try:
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "warning" if failed else "info",
+            "unified-tasks",
+            message,
+            ", ".join(succeeded[:20]) or "无成功任务",
+        )
+    except Exception as exc:
+        logger.warning("统一任务操作已完成，但活动日志写入失败: %s", exc)
+    return MessageResponse(
+        success=bool(succeeded), message=message,
+        data={"succeeded": succeeded, "failed": failed},
+    )
 
 
 @router.get("/storage-audit")

@@ -47,6 +47,7 @@ from app.services.archive_rules import (
 )
 from app.services.work_manager import recalc_author_counts
 from app.services.work_metadata import apply_work_payload
+from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.douyin_account import get_request_context
 from app.services.douyin_errors import (
     DouyinCooldownError,
@@ -714,52 +715,20 @@ async def resume_task_api(task_id: int, db: AsyncSession = Depends(get_async_db)
 @router.post("/{task_id}/cancel", response_model=MessageResponse)
 async def cancel_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """取消下载任务"""
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    if task.status == "completed":
-        raise HTTPException(status_code=400, detail="任务已完成，无法取消")
-    
-    # 设置暂停信号（让正在下载的任务停止）
-    await asyncio.to_thread(redis_client.pause_task, task_id)
-    
-    # 更新状态为取消
-    task.status = "cancelled"
-    await db.commit()
-    
-    # 清理 Redis 进度
-    await asyncio.to_thread(redis_client.delete_progress, task_id)
-    
+    try:
+        await operate_task(db, f"douyin:{task_id}", "cancel")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已取消")
 
 
 @router.post("/{task_id}/retry", response_model=MessageResponse)
 async def retry_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """重试失败的任务"""
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    if task.status not in ("failed", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无需重试")
-    
-    # 重置状态
-    task.status = "pending"
-    task.error_message = None
-    await db.commit()
-    
-    # 触发下载任务
-    await asyncio.to_thread(download_single_file.delay, task_id)
-    
+    try:
+        await operate_task(db, f"douyin:{task_id}", "retry")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已重新提交")
 
 

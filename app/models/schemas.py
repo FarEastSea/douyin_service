@@ -8,7 +8,7 @@ Pydantic 数据模型 - 用于 API 请求/响应验证
 """
 
 from pydantic import BaseModel, Field
-from typing import Dict, Optional, List
+from typing import Annotated, Dict, Literal, Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -252,6 +252,15 @@ class MessageResponse(BaseModel):
     success: bool
     message: str
     data: Optional[dict] = None
+
+
+class UnifiedTaskActionRequest(BaseModel):
+    """统一任务批量操作请求；任务键必须显式携带平台与 ID。"""
+
+    action: Literal["retry", "cancel"]
+    task_keys: List[Annotated[str, Field(min_length=3, max_length=64)]] = Field(
+        ..., min_length=1, max_length=100,
+    )
 
 
 class PaginatedResponse(BaseModel):

@@ -25,11 +25,9 @@ from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.services.x_profile import parse_x_username, normalize_x_profile_url, resolve_x_input
 from app.services.x_task_service import (
     ACTIVE_X_TASK_STATUSES,
-    cancel_x_task as cancel_x_task_record,
     create_x_author,
     create_x_download_task,
     create_x_work_download_task,
-    prepare_x_task_for_retry,
     serialize_x_author,
     serialize_x_task,
     sync_x_author,
@@ -37,6 +35,7 @@ from app.services.x_task_service import (
 from app.core import redis_client
 from app.core.config import settings
 from app.core.env_config import write_env_updates
+from app.services.unified_task_operations import TaskOperationError, operate_task
 
 router = APIRouter(prefix="/x", tags=["X/Twitter 下载"])
 
@@ -265,42 +264,20 @@ async def delete_x_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
 @router.post("/tasks/{task_id}/cancel", response_model=MessageResponse)
 async def cancel_x_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """取消 X 下载任务"""
-    result = await db.execute(
-        select(XDownloadTask).where(XDownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    if task.status not in ("downloading", "pending"):
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无法取消")
-
-    await asyncio.to_thread(_kill_x_task, task_id)
-    cancel_x_task_record(task)
-    await db.commit()
-    await asyncio.to_thread(redis_client.delete_x_task_state, task_id)
+    try:
+        await operate_task(db, f"x:{task_id}", "cancel")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已取消")
 
 
 @router.post("/tasks/{task_id}/retry", response_model=MessageResponse)
 async def retry_x_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """重试失败的 X 下载任务"""
-    result = await db.execute(
-        select(XDownloadTask).where(XDownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    if task.status not in ("failed", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无需重试")
-
-    prepare_x_task_for_retry(task)
-    await db.commit()
-
-    await asyncio.to_thread(_clear_x_task_runtime, task_id, False)
-    await asyncio.to_thread(download_x_profile.delay, task_id)
-
+    try:
+        await operate_task(db, f"x:{task_id}", "retry")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已重新提交")
 
 

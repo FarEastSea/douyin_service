@@ -56,6 +56,11 @@ export interface UnifiedTask {
   preview_endpoint?: string; media_endpoint?: string; retry_endpoint?: string; cancel_endpoint?: string;
   created_at: string; started_at?: string; completed_at?: string;
 }
+export interface UnifiedTaskPage extends PageData<UnifiedTask> { status_summary: Record<string, number> }
+export interface UnifiedTaskActionResult {
+  success: boolean; message: string;
+  data?: { succeeded: string[]; failed: Array<{ task_key: string; message: string; status_code: number }> };
+}
 export interface PlatformAuthor {
   id: number; platform: string; external_user_id: string; profile_url: string;
   nickname?: string; red_id?: string; avatar_url?: string; description?: string;

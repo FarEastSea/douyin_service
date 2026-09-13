@@ -48,7 +48,6 @@ from app.services.platform_profile_download import (
 from app.services.platform_task_service import (
     ACTIVE_PLATFORM_TASK_STATUSES,
     create_platform_task,
-    prepare_platform_task_for_retry,
     serialize_platform_task,
 )
 from app.services.xhs_profile import (
@@ -58,6 +57,7 @@ from app.services.xhs_profile import (
     get_login_qrcode,
 )
 from app.tasks.platform_download_tasks import download_platform_profile
+from app.services.unified_task_operations import TaskOperationError, operate_task
 
 router = APIRouter(prefix="/platform-downloads", tags=["多平台下载"])
 
@@ -296,44 +296,19 @@ def _clear_runtime(platform: str, task_id: int, include_log: bool = False) -> No
 
 @router.post("/{platform}/tasks/{task_id}/cancel", response_model=MessageResponse)
 async def cancel_task(platform: str, task_id: int, db: AsyncSession = Depends(get_async_db)):
-    spec = _require_platform(platform)
-    task = (await db.execute(select(PlatformDownloadTask).where(
-        PlatformDownloadTask.id == task_id,
-        PlatformDownloadTask.platform == spec.id,
-    ))).scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if task.status not in ACTIVE_PLATFORM_TASK_STATUSES:
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无法取消")
-    await asyncio.to_thread(_kill_task, spec.id, task.id)
-    task.status = "cancelled"
-    task.phase = "cancelled"
-    task.completed_at = datetime.now()
-    await db.commit()
-    await asyncio.to_thread(_clear_runtime, spec.id, task.id)
+    try:
+        await operate_task(db, f"{platform}:{task_id}", "cancel")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已取消")
 
 
 @router.post("/{platform}/tasks/{task_id}/retry", response_model=MessageResponse)
 async def retry_task(platform: str, task_id: int, db: AsyncSession = Depends(get_async_db)):
-    spec = _require_platform(platform)
-    task = (await db.execute(select(PlatformDownloadTask).where(
-        PlatformDownloadTask.id == task_id,
-        PlatformDownloadTask.platform == spec.id,
-    ))).scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if task.status not in ("failed", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无需重试")
-    if task.platform == "xhs" and task.source_type == "profile":
-        raise HTTPException(
-            status_code=410,
-            detail="小红书作者主页批量采集已搁置；当前仅保留单条笔记下载",
-        )
-    prepare_platform_task_for_retry(task)
-    await db.commit()
-    await asyncio.to_thread(_clear_runtime, spec.id, task.id)
-    await _dispatch_download(task, db)
+    try:
+        await operate_task(db, f"{platform}:{task_id}", "retry")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已重新提交")
 
 
