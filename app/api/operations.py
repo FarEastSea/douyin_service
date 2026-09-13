@@ -40,6 +40,7 @@ from app.services.platform_registry import platform_registry
 from app.services.storage_maintenance import (
     apply_storage_repair_plan,
     build_storage_repair_plan,
+    find_rebase_candidate,
 )
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
@@ -51,7 +52,9 @@ logger = logging.getLogger(__name__)
 
 
 class StorageRepairTarget(BaseModel):
-    issue_type: Literal["missing_record", "zero_byte_file", "partial_file", "orphan_file"]
+    issue_type: Literal[
+        "stale_record_path", "missing_record", "zero_byte_file", "partial_file", "orphan_file",
+    ]
     record_kind: Literal["download_task", "download_history", "x_media", "platform_media"] | None = None
     record_id: int | None = Field(None, ge=1)
     path: str = Field(..., min_length=1, max_length=4096)
@@ -816,6 +819,7 @@ async def storage_audit(
     current = await asyncio.to_thread(settings.snapshot)
     root = Path(current.DOWNLOAD_ROOT).expanduser().resolve(strict=False)
     known: set[str] = set()
+    relinkable: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
     zero_byte: list[dict[str, Any]] = []
     scanned_records = 0
@@ -852,8 +856,20 @@ async def storage_audit(
                 normalized = str(path_value)
             known.add(normalized)
             exists, size = _safe_stat(normalized)
-            if not exists and len(missing) < 200:
-                missing.append({"kind": kind, "id": record_id, "path": normalized})
+            if not exists:
+                rebased = find_rebase_candidate(root, normalized)
+                if rebased is not None:
+                    rebased_path = str(rebased)
+                    known.add(rebased_path)
+                    if len(relinkable) + len(missing) < 200:
+                        relinkable.append({
+                            "kind": kind,
+                            "id": record_id,
+                            "path": normalized,
+                            "suggested_path": rebased_path,
+                        })
+                elif len(relinkable) + len(missing) < 200:
+                    missing.append({"kind": kind, "id": record_id, "path": normalized})
             elif exists and size == 0 and len(zero_byte) < 200:
                 zero_byte.append({"kind": kind, "id": record_id, "path": normalized})
 
@@ -881,10 +897,11 @@ async def storage_audit(
         "root": str(root), "scanned_records": scanned_records, "scanned_files": scanned_files,
         "total_records": total_records, "records_truncated": records_truncated, "files_truncated": scanned_files >= max_files,
         "orphan_scan_reliable": not records_truncated,
+        "relinkable_records": relinkable,
         "missing_records": missing, "zero_byte_files": zero_byte,
         "partial_files": partials, "orphan_files": orphan_files,
         "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "used_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0},
-        "note": "结果仅用于核对；不会自动删除文件或修改历史记录。",
+        "note": "结果仅用于核对；旧根目录记录可在预演确认后回填，文件不会移动。其他问题也不会自动处理。",
     }
 
 
@@ -893,7 +910,7 @@ async def storage_repair(
     request: StorageRepairRequest,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """先预演、再执行可恢复维护；文件只移动到下载根目录内的隔离区。"""
+    """先预演、再回填旧路径或执行可恢复隔离。"""
     current = await asyncio.to_thread(settings.snapshot)
     root = Path(current.DOWNLOAD_ROOT).expanduser().resolve(strict=False)
     if not root.is_dir():
@@ -906,7 +923,7 @@ async def storage_repair(
             "planned": len(plan),
             "eligible": sum(1 for item in plan if item["eligible"]),
             "items": plan,
-            "note": "预演没有修改任何文件或记录；确认后才会执行可恢复隔离。",
+            "note": "预演没有修改任何文件或记录；确认后才会回填旧路径或执行可恢复隔离。",
         }
     result = await apply_storage_repair_plan(db, root, targets)
     try:
@@ -914,12 +931,12 @@ async def storage_repair(
             redis_client.append_activity_log,
             "warning", "storage-maintenance",
             f"存储维护已处理 {result['applied']} 项",
-            f"隔离目录：{result['quarantine_root'] or '无'}；标记任务：{len(result['marked_tasks'])}",
+            f"回填路径：{len(result['relinked'])}；隔离目录：{result['quarantine_root'] or '无'}；标记任务：{len(result['marked_tasks'])}",
         )
     except Exception as exc:
         logger.warning("存储维护已完成，但活动日志写入失败: %s", exc)
     return {
         "dry_run": False,
         **result,
-        "message": "处理完成；文件未删除，可按隔离清单恢复",
+        "message": "处理完成；旧路径已回填，文件未删除，隔离项可按清单恢复",
     }
