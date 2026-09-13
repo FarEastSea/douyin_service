@@ -273,7 +273,7 @@ class DownloadTask(Base):
     celery_task_id = Column(String(64), index=True)  # Celery 任务ID
     
     file_index = Column(Integer, default=0, nullable=False)  # 文件索引（图集中的第几张，从0开始）
-    file_name = Column(String(255))  # 文件名
+    file_name = Column(Text)  # 文件名（多字节标题可能超过 255 个字符）
     
     # 状态: pending, downloading, paused, completed, skipped, failed, cancelled
     status = Column(String(16), default="pending", index=True)

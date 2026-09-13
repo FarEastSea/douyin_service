@@ -406,6 +406,35 @@ def _backfill_counters(engine: Engine) -> dict[str, Any]:
     return processed
 
 
+def _widen_download_task_paths(connection: Connection) -> dict[str, Any]:
+    """升级旧库的任务路径列，避免长标题在写入前被 VARCHAR(255) 拒绝。"""
+    dialect = connection.dialect.name
+    columns = ("file_name", "file_path", "temp_file_path")
+    existing = {item["name"] for item in inspect(connection).get_columns("download_tasks")}
+    missing = [name for name in columns if name not in existing]
+    if missing:
+        raise RuntimeError(f"download_tasks 缺少路径列：{', '.join(missing)}")
+
+    if dialect == "postgresql":
+        connection.execute(text("""
+            ALTER TABLE download_tasks
+                ALTER COLUMN file_name TYPE TEXT,
+                ALTER COLUMN file_path TYPE TEXT,
+                ALTER COLUMN temp_file_path TYPE TEXT
+        """))
+    elif dialect in {"mysql", "mariadb"}:
+        connection.execute(text("""
+            ALTER TABLE download_tasks
+                MODIFY COLUMN file_name TEXT NULL,
+                MODIFY COLUMN file_path TEXT NULL,
+                MODIFY COLUMN temp_file_path TEXT NULL
+        """))
+    else:
+        # SQLite 的 VARCHAR 长度不做运行时强制限制，无需重建整表。
+        logger.info("数据库 %s 不需要扩展 download_tasks 路径列", dialect)
+    return {"dialect": dialect, "columns": list(columns)}
+
+
 DATA_MIGRATIONS = [
     Migration(
         migration_id="0200_deduplicate_download_tasks",
@@ -432,6 +461,12 @@ DATA_MIGRATIONS = [
         migration_type="backfill",
         description="分批回填作品、作者与 X 作者统计状态",
         batched_handler=_backfill_counters,
+    ),
+    Migration(
+        migration_id="0400_widen_download_task_paths",
+        migration_type="backfill",
+        description="将下载任务文件名与路径列扩展为 TEXT",
+        handler=_widen_download_task_paths,
     ),
 ]
 

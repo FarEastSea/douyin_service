@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Download, ExternalLink, Plus, RefreshCw, Search, Trash2, UserRound, Users } from '@lucide/vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api, jsonBody } from '../api'
 import { useAppStore } from '../stores/app'
 import type { Author, PageData } from '../types'
 import Pager from '../components/Pager.vue'
 
-const store = useAppStore(), router = useRouter()
+const store = useAppStore(), router = useRouter(), route = useRoute()
 const authors = ref<Author[]>([]), page = ref(1), pages = ref(1), total = ref(0), loading = ref(false)
 const input = ref(''), search = ref(''), subscribed = ref(''), account = ref('all')
 const searchTimer = ref<number>()
+const highlightTimer = ref<number>()
+const highlightedAuthorId = ref<number>()
+let suppressAutoLoad = false
 
 async function load() {
   loading.value = true
@@ -28,8 +31,33 @@ async function add() {
   if (store.risk.active) return store.notify('抖音接口正在冷却', 'error')
   try {
     const result = await api<any>('/authors/', { method: 'POST', ...jsonBody({ share_url: input.value.trim(), is_subscribed: false, check_interval: 21600 }) })
-    input.value = ''; store.notify(result.already_exists ? '作者已存在，资料已刷新' : '作者已添加'); await load(); await store.refreshStatus()
+    input.value = ''
+    if (result.already_exists) {
+      store.notify('作者已存在，已定位到对应记录', 'info')
+      await locateAuthor(result.id, result.position)
+    } else {
+      store.notify('作者已添加')
+      await load()
+    }
+    await store.refreshStatus()
   } catch (error: any) { store.notify(error.message || '添加作者失败', 'error') }
+}
+async function locateAuthor(authorId: number, position = 0) {
+  suppressAutoLoad = true
+  search.value = ''; subscribed.value = ''; account.value = 'all'
+  page.value = Math.floor(Math.max(0, Number(position) || 0) / 20) + 1
+  await load()
+  suppressAutoLoad = false
+  highlightedAuthorId.value = Number(authorId)
+  await nextTick()
+  const row = document.getElementById(`author-row-${authorId}`)
+  row?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  row?.focus({ preventScroll: true })
+  if (highlightTimer.value != null) window.clearTimeout(highlightTimer.value)
+  highlightTimer.value = window.setTimeout(() => { highlightedAuthorId.value = undefined }, 4200)
+  if (route.query.focus) {
+    await router.replace({ query: { ...route.query, focus: undefined, position: undefined } })
+  }
 }
 async function toggle(author: Author) {
   const endpoint = author.is_subscribed ? 'unsubscribe' : 'subscribe'
@@ -56,10 +84,17 @@ function queueSearch() {
   if (searchTimer.value != null) window.clearTimeout(searchTimer.value)
   searchTimer.value = window.setTimeout(resetAndLoad, 350)
 }
-watch(page, load)
-watch([subscribed, account], resetAndLoad)
-onMounted(load)
-onBeforeUnmount(() => { if (searchTimer.value != null) window.clearTimeout(searchTimer.value) })
+watch(page, () => { if (!suppressAutoLoad) load() })
+watch([subscribed, account], () => { if (!suppressAutoLoad) resetAndLoad() })
+onMounted(async () => {
+  const focusId = Number(route.query.focus)
+  if (Number.isInteger(focusId) && focusId > 0) await locateAuthor(focusId, Number(route.query.position) || 0)
+  else await load()
+})
+onBeforeUnmount(() => {
+  if (searchTimer.value != null) window.clearTimeout(searchTimer.value)
+  if (highlightTimer.value != null) window.clearTimeout(highlightTimer.value)
+})
 </script>
 
 <template>
@@ -75,7 +110,7 @@ onBeforeUnmount(() => { if (searchTimer.value != null) window.clearTimeout(searc
     </div>
     <div class="table-shell" :class="{ loading }">
       <table class="data-table author-table"><thead><tr><th>作者</th><th>媒体库</th><th>自动更新</th><th>订阅</th><th class="actions-col">操作</th></tr></thead><tbody>
-        <tr v-for="author in authors" :key="author.id">
+        <tr v-for="author in authors" :id="`author-row-${author.id}`" :key="author.id" tabindex="-1" :class="{ 'author-highlight': highlightedAuthorId === author.id }">
           <td><div class="author-cell"><span class="avatar"><img v-if="author.avatar_url" :src="`/api/authors/${author.id}/avatar`" alt="" loading="lazy" /><UserRound v-else /></span><div><strong>{{ author.nickname || '未知作者' }}</strong><a v-if="author.share_url" :href="author.share_url" target="_blank" rel="noopener">查看主页 <ExternalLink :size="12" /></a><span v-else>{{ author.sec_uid }}</span></div></div></td>
           <td><strong>{{ author.total_works.toLocaleString() }} 个作品</strong><span>{{ author.downloaded_works.toLocaleString() }} 个已下载</span></td>
           <td><span class="status subtle" :data-tone="author.auto_update_status">{{ author.auto_update_message || (author.is_subscribed ? '等待检查' : '未订阅') }}</span><small v-if="author.last_error" class="inline-error" :title="author.last_error">{{ author.last_error }}</small></td>

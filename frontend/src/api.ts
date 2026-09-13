@@ -29,11 +29,17 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   const response = await fetch(path.startsWith('/api') ? path : `/api${path}`, { ...init, headers })
   const text = await response.text()
   let payload: any = {}
-  try { payload = text ? JSON.parse(text) : {} } catch { payload = { message: text } }
+  const contentType = response.headers.get('content-type') || ''
+  const isHtmlResponse = contentType.includes('text/html') || /^\s*<(?:!doctype|html)/i.test(text)
+  try { payload = text && !isHtmlResponse ? JSON.parse(text) : {} } catch { payload = {} }
   if (!response.ok) {
     const businessAuthError = ['account_isolated', 'browser_identity_missing', 'cookie_invalid'].includes(String(payload.code || ''))
     if (response.status === 401 && !businessAuthError) window.dispatchEvent(new CustomEvent('app:auth-required'))
-    throw new ApiError(payload.message || payload.detail || `请求失败 (${response.status})`, response.status, payload)
+    const gatewayMessage = response.status === 504
+      ? '请求超时，后台操作可能仍在继续，请稍后刷新任务状态'
+      : `服务暂时不可用 (${response.status})`
+    const message = payload.message || payload.detail || (isHtmlResponse ? gatewayMessage : `请求失败 (${response.status})`)
+    throw new ApiError(message, response.status, payload)
   }
   return payload as T
 }

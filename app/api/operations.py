@@ -92,7 +92,7 @@ def _scan_storage_files(
                 continue
             scanned_files += 1
             resolved = str(path.resolve(strict=False))
-            if path.suffix.lower() in {".part", ".tmp"} and len(partials) < 200:
+            if path.suffix.lower() in {".part", ".tmp", ".downloading"} and len(partials) < 200:
                 stat = path.stat()
                 partials.append({
                     "path": resolved, "size_bytes": stat.st_size,

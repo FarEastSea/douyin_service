@@ -9,7 +9,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select, func, or_, update
+from sqlalchemy import and_, select, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
 from typing import List, Optional
@@ -25,13 +25,15 @@ from app.models.schemas import (
     BatchDownloadRequest, BatchDownloadResponse, MessageResponse,
     PaginatedTasksResponse
 )
-from app.tasks.download_tasks import download_single_file, download_author_works, resume_task
+from app.tasks.download_tasks import (
+    download_author_works,
+    download_single_file,
+    refresh_retry_failed_downloads,
+    resume_task,
+)
 from app.core import redis_client
 from app.services.downloader import (
     author_profile_has_identity,
-    latest_video_url,
-    payload_image_urls,
-    payload_live_photo_urls,
     prefer_avatar_url,
 )
 from app.core.config import settings
@@ -125,10 +127,12 @@ def _update_task_runtime(
             redis_client.delete_progress(task_id)
 
 
-def _dispatch_download_tasks(task_ids: List[int]) -> None:
+def _dispatch_download_tasks(task_ids: List[int], *, force_refresh: bool = False) -> None:
     """批量向 Celery 投递任务，避免阻塞 FastAPI 事件循环。"""
     for task_id in task_ids:
-        download_single_file.delay(task_id)
+        download_single_file.apply_async(
+            args=[task_id], kwargs={"force_refresh": force_refresh},
+        )
 
 
 def _build_task_preview_data(
@@ -306,9 +310,10 @@ async def _handle_author_download(
 
     author_position = None
     if author_exists and author_created_at:
-        pos_result = await db.execute(
-            select(func.count(Author.id)).where(Author.created_at > author_created_at)
-        )
+        pos_result = await db.execute(select(func.count(Author.id)).where(or_(
+            Author.created_at > author_created_at,
+            and_(Author.created_at == author_created_at, Author.id > author.id),
+        )))
         author_position = pos_result.scalar() or 0
 
     await asyncio.to_thread(download_author_works.delay, author.id, start_index=1)
@@ -976,9 +981,9 @@ async def pause_all_tasks(db: AsyncSession = Depends(get_async_db)):
     )
 
 
-@router.post("/refresh-retry/{task_id}", response_model=MessageResponse)
+@router.post("/refresh-retry/{task_id}", response_model=MessageResponse, status_code=202)
 async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
-    """重新获取下载链接后重试失败的任务"""
+    """立即提交后台任务，由 Worker 刷新链接后重试。"""
     await _raise_if_douyin_cooling()
     result = await db.execute(
         select(DownloadTask).where(DownloadTask.id == task_id)
@@ -991,144 +996,34 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
     if task.status not in ("failed", "cancelled"):
         raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无需重试")
 
-    # 获取关联的 Work 和 Author
-    work_result = await db.execute(
-        select(Work).where(Work.id == task.work_id)
-    )
-    work = work_result.scalar_one_or_none()
-    if not work:
-        raise HTTPException(status_code=404, detail="关联的作品不存在")
-
-    author_result = await db.execute(
-        select(Author).where(Author.id == work.author_id)
-    )
-    author = author_result.scalar_one_or_none()
-    if not author:
-        raise HTTPException(status_code=404, detail="关联的作者不存在")
-
-    # 刷新下载链接
-    try:
-        current_settings = await asyncio.to_thread(settings.snapshot)
-        request_context = await get_request_context(db)
-
-        runtime_config = await get_runtime_config(db)
-
-        def _refresh():
-            source = build_douyin_source(
-                request_context.cookie, current_settings.DOWNLOAD_DIR,
-                runtime_config=runtime_config, request_context=request_context,
-            )
-            return source.refresh_assets(work.aweme_id)
-
-        fresh = await asyncio.to_thread(_refresh)
-
-        if work.work_type == "video":
-            refreshed_video_url = latest_video_url(fresh)
-            if refreshed_video_url:
-                work.video_url = refreshed_video_url
-        else:
-            image_urls = payload_image_urls(fresh)
-            live_photo_urls = payload_live_photo_urls(fresh)
-            if image_urls:
-                work.image_urls = image_urls
-                work.image_count = len(image_urls)
-                work.live_photo_urls = live_photo_urls
-
-    except DouyinRequestError as e:
-        raise HTTPException(status_code=http_status_for_douyin_error(e), detail=e.as_dict())
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"刷新下载链接失败: {str(e)}")
-
-    # 重置任务状态
+    # 只重置并入队，外部网络访问全部在 Celery Worker 内完成，避免 Nginx 504。
     task.status = "pending"
     task.error_message = None
+    task.completed_at = None
+    task.downloaded_bytes = 0
+    task.download_speed = 0
+    task.temp_file_path = None
     await asyncio.to_thread(redis_client.delete_progress, task_id)
-
     await db.commit()
-
-    await asyncio.to_thread(download_single_file.delay, task_id)
-
-    return MessageResponse(success=True, message=f"已刷新下载链接并重新提交任务（作品: {work.aweme_id}）")
+    await asyncio.to_thread(_dispatch_download_tasks, [task_id], force_refresh=True)
+    return MessageResponse(success=True, message="已提交后台刷新链接并重试")
 
 
-@router.post("/refresh-retry-all-failed", response_model=MessageResponse)
+@router.post("/refresh-retry-all-failed", response_model=MessageResponse, status_code=202)
 async def refresh_retry_all_failed(db: AsyncSession = Depends(get_async_db)):
-    """重新获取所有失败任务的下载链接后重试"""
+    """批量重置失败任务，由 Worker 分别刷新链接后重试。"""
     await _raise_if_douyin_cooling()
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.status.in_(["failed", "cancelled"]))
-    )
-    failed_tasks = result.scalars().all()
-
-    if not failed_tasks:
+    result = await db.execute(select(func.count(DownloadTask.id)).where(
+        DownloadTask.status.in_(["failed", "cancelled"])
+    ))
+    failed_count = int(result.scalar() or 0)
+    if not failed_count:
         return MessageResponse(success=True, message="没有失败的任务需要重试", data={"count": 0})
-
-    current_settings = await asyncio.to_thread(settings.snapshot)
-    request_context = await get_request_context(db)
-
-    runtime_config = await get_runtime_config(db)
-
-    def _create_source():
-        return build_douyin_source(
-            request_context.cookie, current_settings.DOWNLOAD_DIR,
-            runtime_config=runtime_config, request_context=request_context,
-        )
-    source = await asyncio.to_thread(_create_source)
-
-    # 按 work_id 分组，避免同一个作品重复刷新
-    work_ids = set(t.work_id for t in failed_tasks)
-    refreshed_works = {}
-
-    for wid in work_ids:
-        work_result = await db.execute(select(Work).where(Work.id == wid))
-        work = work_result.scalar_one_or_none()
-        if not work:
-            continue
-        try:
-            def _refresh(aweme_id=work.aweme_id):
-                return source.refresh_assets(aweme_id)
-            fresh = await asyncio.to_thread(_refresh)
-
-            if work.work_type == "video":
-                refreshed_video_url = latest_video_url(fresh)
-                if refreshed_video_url:
-                    work.video_url = refreshed_video_url
-            else:
-                image_urls = payload_image_urls(fresh)
-                live_photo_urls = payload_live_photo_urls(fresh)
-                if image_urls:
-                    work.image_urls = image_urls
-                    work.image_count = len(image_urls)
-                    work.live_photo_urls = live_photo_urls
-            refreshed_works[wid] = True
-        except DouyinRequestError as exc:
-            if exc.code in {"account_isolated", "browser_identity_missing", "cookie_invalid", "argus_blocked", "rate_limited"}:
-                raise HTTPException(status_code=http_status_for_douyin_error(exc), detail=exc.as_dict())
-            refreshed_works[wid] = False
-        except Exception:
-            refreshed_works[wid] = False
-
-    count = 0
-    failed_task_ids = [task.id for task in failed_tasks]
-    await asyncio.to_thread(
-        _update_task_runtime, failed_task_ids, clear_progress=True
-    )
-    for task in failed_tasks:
-        task.status = "pending"
-        task.error_message = None
-        count += 1
-
-    await db.commit()
-
-    await asyncio.to_thread(_dispatch_download_tasks, failed_task_ids)
-
-    refreshed_count = sum(1 for v in refreshed_works.values() if v)
+    await asyncio.to_thread(refresh_retry_failed_downloads.delay)
     return MessageResponse(
         success=True,
-        message=f"已刷新 {refreshed_count}/{len(work_ids)} 个作品的链接，重新提交 {count} 个任务",
-        data={"count": count, "refreshed": refreshed_count}
+        message=f"已提交后台处理，预计刷新重试 {failed_count} 个任务",
+        data={"count": failed_count}
     )
 
 

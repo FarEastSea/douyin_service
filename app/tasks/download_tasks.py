@@ -563,7 +563,12 @@ def record_author_profile_history(db: Session, author: Author, profile_result: d
 
 
 @celery_app.task(bind=True, name="app.tasks.download_tasks.download_single_file")
-def download_single_file(self, task_id: int, risk_retry_attempt: int = 0):
+def download_single_file(
+    self,
+    task_id: int,
+    risk_retry_attempt: int = 0,
+    force_refresh: bool = False,
+):
     """
     下载单个文件的 Celery 任务
     
@@ -573,7 +578,12 @@ def download_single_file(self, task_id: int, risk_retry_attempt: int = 0):
     # ---- 顶层安全防护：任何异常都不能让 Worker 进程崩溃 ----
     try:
         with global_download_slot(getattr(self.request, "id", None) or task_id):
-            _download_single_file_impl(self, task_id, risk_retry_attempt=risk_retry_attempt)
+            _download_single_file_impl(
+                self,
+                task_id,
+                risk_retry_attempt=risk_retry_attempt,
+                force_refresh=force_refresh,
+            )
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)[:300]}"
         logger.error(f"任务 {task_id} 顶层异常: {error_msg}\n{traceback.format_exc()}")
@@ -597,7 +607,12 @@ def download_single_file(self, task_id: int, risk_retry_attempt: int = 0):
             pass
 
 
-def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int = 0):
+def _download_single_file_impl(
+    self_task,
+    task_id: int,
+    risk_retry_attempt: int = 0,
+    force_refresh: bool = False,
+):
     """download_single_file 的实际实现"""
     redis_client.append_activity_log("info", "task",
         f"⭐ download_single_file 启动", f"task_id={task_id}")
@@ -704,7 +719,7 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             live_photo_urls = work.live_photo_urls
             # 旧数据没有保存实况元数据。首次重下时主动刷新一次，避免静态封面 URL
             # 仍有效而跳过后面的“过期 URL 刷新”，继续误下成 JPG。
-            if len(live_photo_urls) != len(image_urls):
+            if not force_refresh and len(live_photo_urls) != len(image_urls):
                 try:
                     fresh = source.refresh_assets(work.aweme_id)
                     refreshed_image_urls = payload_image_urls(fresh)
@@ -742,11 +757,13 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
                 is_live_photo=bool(live_photo_url),
             )
         
-        # URL 有效性检测：抖音 URL 会过期，重试任务必须刷新
+        # URL 有效性检测：普通任务仅在直链过期时刷新；用户明确选择
+        # “刷新链接后重试”时，由 Worker 强制刷新，Web 请求不再等待外部接口。
         try:
-            probe_status = media.probe_status(url, timeout=10)
-            if probe_status in (403, 404, 410):
-                logger.info(f"任务 {task_id} - URL 已过期(HTTP {probe_status})，刷新中...")
+            probe_status = None if force_refresh else media.probe_status(url, timeout=10)
+            if force_refresh or probe_status in (403, 404, 410):
+                refresh_reason = "用户请求" if force_refresh else f"HTTP {probe_status}"
+                logger.info(f"任务 {task_id} - {refresh_reason}刷新下载链接中...")
                 fresh = source.refresh_assets(work.aweme_id)
                 if work.work_type == "video":
                     apply_work_payload(db, work, fresh, preserve_existing=True)
@@ -915,7 +932,9 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             task.error_message = f"{e.user_message} 系统将在约 {retry_after} 秒后自动恢复一次。"
             db.commit()
             queued = download_single_file.apply_async(
-                args=[task_id], kwargs={"risk_retry_attempt": 1}, countdown=retry_after,
+                args=[task_id],
+                kwargs={"risk_retry_attempt": 1, "force_refresh": force_refresh},
+                countdown=retry_after,
             )
             task.celery_task_id = queued.id
             db.commit()
@@ -974,6 +993,50 @@ def _download_single_file_impl(self_task, task_id: int, risk_retry_attempt: int 
             db.close()
         except Exception:
             pass
+
+
+@celery_app.task(name="app.tasks.download_tasks.refresh_retry_failed_downloads")
+def refresh_retry_failed_downloads():
+    """在 Worker 内批量重置失败任务并强制刷新链接，避免阻塞 Web 请求。"""
+    db = get_sync_db()
+    try:
+        total = 0
+        while True:
+            failed_tasks = db.execute(
+                select(DownloadTask)
+                .where(DownloadTask.status.in_(("failed", "cancelled")))
+                .order_by(DownloadTask.id)
+                .limit(500)
+            ).scalars().all()
+            if not failed_tasks:
+                break
+
+            task_ids = [task.id for task in failed_tasks]
+            for task in failed_tasks:
+                task.status = "pending"
+                task.error_message = None
+                task.completed_at = None
+                task.downloaded_bytes = 0
+                task.download_speed = 0
+                task.temp_file_path = None
+            db.commit()
+
+            for task_id in task_ids:
+                redis_client.delete_progress(task_id)
+                download_single_file.apply_async(
+                    args=[task_id], kwargs={"force_refresh": True},
+                )
+            total += len(task_ids)
+        redis_client.append_activity_log(
+            "info", "task", f"已提交 {total} 个后台刷新重试任务",
+        )
+        return {"success": True, "count": total}
+    except Exception:
+        db.rollback()
+        logger.exception("批量刷新失败任务入队异常")
+        raise
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True, name="app.tasks.download_tasks.download_author_works")

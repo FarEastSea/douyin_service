@@ -40,6 +40,10 @@ _FILENAME_FIELDS = {
     "work_type", "index", "index_suffix", "ext",
 }
 _INVALID_FILENAME = re.compile(r'[\x00-\x1f\\/:*?"<>|]')
+FILESYSTEM_COMPONENT_MAX_BYTES = 255
+# 下载器会在最终文件名后追加 .downloading。预留最长运行期后缀，确保
+# 中文、emoji 等多字节文件名也不会超过 Linux NAME_MAX。
+MEDIA_FILENAME_MAX_BYTES = FILESYSTEM_COMPONENT_MAX_BYTES - len(".downloading".encode("utf-8"))
 
 
 def _template_fields(template: str) -> set[str]:
@@ -180,19 +184,35 @@ def archive_size_limits(rules: dict[str, Any]) -> tuple[int, int]:
     return int(rules["min_file_size_mb"] * mib), int(rules["max_file_size_mb"] * mib)
 
 
-def _safe_component(value: Any, fallback: str, max_length: int = 120) -> str:
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    if len(value.encode("utf-8")) <= max_bytes:
+        return value
+    return value.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore").rstrip(" .")
+
+
+def _safe_component(value: Any, fallback: str, max_bytes: int = 240) -> str:
     cleaned = _INVALID_FILENAME.sub(" ", str(value or ""))
     cleaned = " ".join(cleaned.split()).strip(" .")
-    return (cleaned or fallback)[:max_length]
+    cleaned = cleaned or fallback
+    if len(cleaned.encode("utf-8")) <= max_bytes:
+        return cleaned
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
+    suffix = f"_{digest}"
+    stem = _truncate_utf8(cleaned, max_bytes - len(suffix.encode("utf-8")))
+    return f"{stem}{suffix}"
 
 
 def _safe_filename(value: Any, fallback: str, ext: str) -> str:
-    cleaned = _safe_component(value, fallback, 1000)
-    if len(cleaned) <= 240:
+    cleaned = _INVALID_FILENAME.sub(" ", str(value or ""))
+    cleaned = " ".join(cleaned.split()).strip(" .") or fallback
+    if len(cleaned.encode("utf-8")) <= MEDIA_FILENAME_MAX_BYTES:
         return cleaned
     digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
-    suffix = f"_{digest}.{ext}"
-    return f"{cleaned[:240 - len(suffix)].rstrip(' .')}{suffix}"
+    extension = f".{ext.lstrip('.')}"
+    stem = cleaned[:-len(extension)] if cleaned.lower().endswith(extension.lower()) else cleaned
+    suffix = f"_{digest}{extension}"
+    stem_budget = MEDIA_FILENAME_MAX_BYTES - len(suffix.encode("utf-8"))
+    return f"{_truncate_utf8(stem, stem_budget)}{suffix}"
 
 
 def build_archive_file_path(

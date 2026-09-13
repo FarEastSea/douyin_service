@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Clipboard, Download, Eye, MoreHorizontal, Pause, Play, RefreshCw, RotateCcw, Search, Trash2 } from '@lucide/vue'
+import { useRouter } from 'vue-router'
 import { api, jsonBody } from '../api'
 import { openMedia } from '../media'
 import { useAppStore } from '../stores/app'
@@ -8,11 +9,14 @@ import type { PageData, Task } from '../types'
 import Pager from '../components/Pager.vue'
 
 const store = useAppStore()
+const router = useRouter()
 const tasks = ref<Task[]>([])
 const total = ref(0), pages = ref(1), page = ref(1)
 const loading = ref(false), status = ref(''), query = ref(''), shareUrl = ref('')
 const timer = ref<number>(), queryTimer = ref<number>()
 const statusCounts = ref<Record<string, number>>({})
+const createBusy = ref(false), bulkBusy = ref(false)
+const busyTaskIds = ref(new Set<number>())
 const statuses = [
   ['', '全部'], ['pending', '待处理'], ['downloading', '下载中'], ['paused', '已暂停'], ['completed', '已完成'], ['skipped', '规则跳过'], ['failed', '失败'], ['cancelled', '已取消'],
 ]
@@ -41,16 +45,30 @@ async function load(silent = false) {
 async function createTask() {
   if (!shareUrl.value.trim()) return store.notify('请粘贴抖音分享链接', 'error')
   if (store.risk.active) return store.notify('抖音接口正在冷却，请等待倒计时结束', 'error')
+  createBusy.value = true
   try {
     const result = await api<any>('/tasks/download', { method: 'POST', ...jsonBody({ share_url: shareUrl.value.trim(), start_index: 1, wait_time: 1 }) })
-    shareUrl.value = ''; store.notify(result.url_type === 'author' ? '作者下载任务已提交' : `已创建 ${result.created_tasks || 0} 个任务`)
+    shareUrl.value = ''
+    if (result.url_type === 'author' && result.author_already_exists && result.author_id) {
+      store.notify('作者已存在，已定位到作者管理中的对应记录', 'info')
+      await router.push({
+        path: '/douyin/authors',
+        query: { focus: String(result.author_id), position: String(result.author_position || 0) },
+      })
+      return
+    }
+    store.notify(result.url_type === 'author' ? '作者下载任务已提交' : `已创建 ${result.created_tasks || 0} 个任务`)
     await load(); await store.refreshStatus()
   } catch (error: any) { store.notify(error.message || '创建任务失败', 'error') }
+  finally { createBusy.value = false }
 }
 async function action(task: Task, verb: string, method = 'POST') {
+  if (busyTaskIds.value.has(task.id)) return
   const path = verb === 'refresh-retry' ? `/tasks/refresh-retry/${task.id}` : `/tasks/${task.id}/${verb}`
+  busyTaskIds.value.add(task.id)
   try { const result = await api<any>(path, { method }); store.notify(result.message || '操作成功'); await load() }
   catch (error: any) { store.notify(error.message || '操作失败', 'error') }
+  finally { busyTaskIds.value.delete(task.id) }
 }
 async function remove(task: Task) {
   if (!confirm(`确定删除任务 #${task.id}？`)) return
@@ -58,9 +76,12 @@ async function remove(task: Task) {
   catch (error: any) { store.notify(error.message || '删除失败', 'error') }
 }
 async function bulk(endpoint: string, confirmText?: string) {
+  if (bulkBusy.value) return
   if (confirmText && !confirm(confirmText)) return
+  bulkBusy.value = true
   try { const result = await api<any>(`/tasks/${endpoint}`, { method: 'POST' }); store.notify(result.message || '操作完成'); await load() }
   catch (error: any) { store.notify(error.message || '批量操作失败', 'error') }
+  finally { bulkBusy.value = false }
 }
 async function copyErrors() {
   try {
@@ -95,16 +116,16 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
         <button v-if="total && (status === 'failed' || failedCount)" class="btn ghost" @click="copyErrors"><Clipboard :size="16" />复制所有失败原因</button>
         <button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button>
         <details class="menu"><summary class="btn ghost"><MoreHorizontal :size="18" />批量操作</summary><div class="menu-popover">
-          <button @click="bulk('pause-all', '确定暂停全部等待中和下载中的任务？')"><Pause :size="15" />全部暂停</button>
-          <button @click="bulk('redispatch-pending')"><Play :size="15" />分发待处理</button>
-          <button @click="bulk('retry-all-failed')"><RotateCcw :size="15" />重试失败</button>
-          <button @click="bulk('refresh-retry-all-failed')"><RefreshCw :size="15" />刷新链接后重试</button>
+          <button :disabled="bulkBusy" @click="bulk('pause-all', '确定暂停全部等待中和下载中的任务？')"><Pause :size="15" />全部暂停</button>
+          <button :disabled="bulkBusy" @click="bulk('redispatch-pending')"><Play :size="15" />分发待处理</button>
+          <button :disabled="bulkBusy" @click="bulk('retry-all-failed')"><RotateCcw :size="15" />重试失败</button>
+          <button :disabled="bulkBusy" @click="bulk('refresh-retry-all-failed')"><RefreshCw :size="15" />{{ bulkBusy ? '正在提交…' : '刷新链接后重试' }}</button>
         </div></details>
       </div>
     </header>
 
     <form class="command-bar" @submit.prevent="createTask">
-      <Download :size="18" /><input v-model="shareUrl" placeholder="粘贴作者主页或单个作品分享链接…" autocomplete="off" /><button class="btn primary" :disabled="store.risk.active">开始下载</button>
+      <Download :size="18" /><input v-model="shareUrl" placeholder="粘贴作者主页或单个作品分享链接…" autocomplete="off" /><button class="btn primary" :disabled="store.risk.active || createBusy">{{ createBusy ? '正在提交…' : '开始下载' }}</button>
     </form>
 
     <div class="filter-row">
@@ -123,9 +144,9 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
             <td><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>
             <td><div class="row-actions">
               <button v-if="task.preview_url" class="icon-btn" title="预览" @click="preview(task)"><Eye :size="17" /></button>
-              <button v-if="task.status === 'downloading' || task.status === 'pending'" class="icon-btn" title="暂停" @click="action(task, 'pause')"><Pause :size="17" /></button>
-              <button v-if="task.status === 'paused'" class="icon-btn" title="恢复" @click="action(task, 'resume')"><Play :size="17" /></button>
-              <button v-if="task.status === 'failed' || task.status === 'cancelled'" class="icon-btn" title="重试" @click="action(task, task.error_category === 'risk_control' ? 'refresh-retry' : 'retry')"><RotateCcw :size="17" /></button>
+               <button v-if="task.status === 'downloading' || task.status === 'pending'" class="icon-btn" title="暂停" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'pause')"><Pause :size="17" /></button>
+               <button v-if="task.status === 'paused'" class="icon-btn" title="恢复" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'resume')"><Play :size="17" /></button>
+               <button v-if="task.status === 'failed' || task.status === 'cancelled'" class="icon-btn" :title="task.error_category === 'risk_control' ? '刷新链接后重试' : '重试'" :disabled="busyTaskIds.has(task.id)" @click="action(task, task.error_category === 'risk_control' ? 'refresh-retry' : 'retry')"><RotateCcw :size="17" /></button>
               <button class="icon-btn danger" title="删除" @click="remove(task)"><Trash2 :size="17" /></button>
             </div></td>
           </tr>

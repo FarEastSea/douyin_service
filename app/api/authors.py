@@ -305,9 +305,10 @@ async def add_author(
             await db.commit()
             await db.refresh(existing)
             # 计算该作者在列表中的位置(0-based)，供前端跳转
-            pos_result = await db.execute(
-                select(func.count(Author.id)).where(Author.created_at > existing.created_at)
-            )
+            pos_result = await db.execute(select(func.count(Author.id)).where(or_(
+                Author.created_at > existing.created_at,
+                and_(Author.created_at == existing.created_at, Author.id > existing.id),
+            )))
             position = pos_result.scalar() or 0
             # 返回已存在的作者信息，而不是报错
             return {
