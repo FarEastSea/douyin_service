@@ -11,7 +11,7 @@ import shutil
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -113,9 +113,76 @@ def _scan_storage_files(
     return partials, orphan_files, scanned_files
 
 
+async def _platform_success_evidence(db: AsyncSession) -> dict[str, dict[str, Any]]:
+    """汇总真实完成且已登记媒体的任务，不把本地预检等同于外部验收。"""
+    evidence: dict[str, dict[str, Any]] = {}
+
+    douyin_row = (await db.execute(
+        select(
+            func.max(DownloadTask.completed_at),
+            func.count(func.distinct(DownloadTask.id)),
+        )
+        .join(DownloadHistory, DownloadHistory.task_id == DownloadTask.id)
+        .where(DownloadTask.status == "completed")
+    )).one()
+    if douyin_row[0]:
+        evidence["douyin"] = {
+            "validated_sources": {"work"},
+            "last_success_at": douyin_row[0],
+            "successful_task_count": int(douyin_row[1] or 0),
+        }
+
+    x_source_type = case(
+        (XDownloadTask.profile_url.ilike("%/status/%"), "work"),
+        else_="profile",
+    )
+    x_rows = (await db.execute(
+        select(
+            x_source_type.label("source_type"),
+            func.max(XDownloadTask.completed_at).label("last_success_at"),
+            func.count(func.distinct(XDownloadTask.id)).label("task_count"),
+        )
+        .join(XMediaAsset, XMediaAsset.task_id == XDownloadTask.id)
+        .where(XDownloadTask.status == "completed")
+        .group_by(x_source_type)
+    )).all()
+    if x_rows:
+        x_success_times = [row.last_success_at for row in x_rows if row.last_success_at]
+        evidence["x"] = {
+            "validated_sources": {str(row.source_type) for row in x_rows},
+            "last_success_at": max(x_success_times, default=None),
+            "successful_task_count": sum(int(row.task_count or 0) for row in x_rows),
+        }
+
+    platform_rows = (await db.execute(
+        select(
+            PlatformDownloadTask.platform,
+            PlatformDownloadTask.source_type,
+            func.max(PlatformDownloadTask.completed_at).label("last_success_at"),
+            func.count(func.distinct(PlatformDownloadTask.id)).label("task_count"),
+        )
+        .join(PlatformMediaAsset, PlatformMediaAsset.task_id == PlatformDownloadTask.id)
+        .where(PlatformDownloadTask.status == "completed")
+        .group_by(PlatformDownloadTask.platform, PlatformDownloadTask.source_type)
+    )).all()
+    for row in platform_rows:
+        item = evidence.setdefault(str(row.platform), {
+            "validated_sources": set(),
+            "last_success_at": None,
+            "successful_task_count": 0,
+        })
+        item["validated_sources"].add(str(row.source_type or "profile"))
+        if row.last_success_at and (
+            item["last_success_at"] is None or row.last_success_at > item["last_success_at"]
+        ):
+            item["last_success_at"] = row.last_success_at
+        item["successful_task_count"] += int(row.task_count or 0)
+    return evidence
+
+
 @router.get("/platform-readiness")
 async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
-    """Local, non-destructive preflight. It does not claim external sites are reachable."""
+    """返回本地就绪状态，以及数据库中可核验的真实成功任务证据。"""
     current = await asyncio.to_thread(settings.snapshot)
     credentials = {
         str(value): True
@@ -129,7 +196,9 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
     }
     ffmpeg = shutil.which("ffmpeg") is not None
     xhs_service = await asyncio.to_thread(_xhs_service_check)
+    success_evidence = await _platform_success_evidence(db)
     items = []
+    external_validation_required = False
     for definition in platform_registry.list():
         platform_id = definition.id
         if platform_id in {"douyin", "x"}:
@@ -160,6 +229,19 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
         if not cookie_configured:
             warnings.append("未配置 Cookie，公开视频可能可用，受限内容无法验收")
         capabilities = definition.to_dict()["capabilities"]
+        supported_sources = [name for name, enabled in {
+            "profile": capabilities["profile_download"],
+            "work": capabilities["work_download"],
+        }.items() if enabled]
+        platform_evidence = success_evidence.get(platform_id, {})
+        validated_sources = sorted(
+            set(platform_evidence.get("validated_sources") or []) & set(supported_sources)
+        )
+        missing_validation = [name for name in supported_sources if name not in validated_sources]
+        external_tested = bool(validated_sources)
+        validation_complete = bool(supported_sources) and not missing_validation
+        external_validation_required = external_validation_required or not validation_complete
+        last_success_at = platform_evidence.get("last_success_at")
         items.append({
             "platform": platform_id,
             "name": definition.name,
@@ -169,18 +251,20 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
             "cookie_configured": cookie_configured,
             "ffmpeg_ready": ffmpeg,
             "download_root": root,
-            "supported_sources": [name for name, enabled in {
-                "profile": capabilities["profile_download"],
-                "work": capabilities["work_download"],
-            }.items() if enabled],
+            "supported_sources": supported_sources,
             "blockers": blockers,
             "warnings": warnings,
-            "external_tested": False,
+            "external_tested": external_tested,
+            "external_validation_complete": validation_complete,
+            "validated_sources": validated_sources,
+            "missing_validation": missing_validation,
+            "last_external_success_at": last_success_at.isoformat() if last_success_at else None,
+            "successful_task_count": int(platform_evidence.get("successful_task_count") or 0),
         })
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
-        "scope": "local_preflight",
-        "external_validation_required": True,
+        "scope": "local_preflight_with_observed_success",
+        "external_validation_required": external_validation_required,
         "items": items,
     }
 
