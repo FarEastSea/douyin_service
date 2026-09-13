@@ -31,7 +31,11 @@ from app.services.platform_task_service import (
     create_platform_task,
     finalize_platform_task,
 )
-from app.services.platform_metadata import fill_missing_media_metadata, metadata_for_media
+from app.services.platform_metadata import (
+    apply_media_metadata,
+    metadata_for_media,
+    record_media_stats_snapshot,
+)
 from app.services.x_downloader import is_media_download_line
 from app.tasks.celery_app import celery_app
 
@@ -313,9 +317,12 @@ def download_platform_profile(self, task_id: int):
                 fallback_data=getattr(result, "metadata", None),
             )
             if existing := existing_assets.get(file_path):
-                fill_missing_media_metadata(existing, metadata)
+                apply_media_metadata(existing, metadata)
+                record_media_stats_snapshot(
+                    db, existing, platform=task.platform, asset_kind="platform_media",
+                )
                 continue
-            db.add(PlatformMediaAsset(
+            asset = PlatformMediaAsset(
                 task_id=task.id,
                 platform=task.platform,
                 media_type="video" if (mime_type or "").startswith("video/") else "image",
@@ -324,7 +331,12 @@ def download_platform_profile(self, task_id: int):
                 size_bytes=path.stat().st_size if path.is_file() else 0,
                 mime_type=mime_type,
                 **metadata.as_model_values(),
-            ))
+            )
+            db.add(asset)
+            db.flush()
+            record_media_stats_snapshot(
+                db, asset, platform=task.platform, asset_kind="platform_media",
+            )
         child_task_ids = _persist_xhs_profile_result(
             db,
             task,

@@ -15,6 +15,7 @@ const logs = ref<any[]>([]), logLevels = ref(['info', 'warning', 'error']), live
 const readiness = ref<any>({ components: {} })
 const platformReadiness = ref<any>({ items: [] }), storageAudit = ref<any>(null)
 const platformAuditBusy = ref(false), storageAuditBusy = ref(false)
+const storageRepairBusy = ref(false), storageRepairPlan = ref<any>(null)
 const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>()
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
@@ -27,6 +28,17 @@ const archiveRules = ref<any>({
   min_file_size_mb: 0, max_file_size_mb: 0, metadata_formats: [],
 })
 const filteredLogs = computed(() => logs.value.filter(item => logLevels.value.includes(item.level)))
+const storageRepairTargets = computed(() => {
+  const report = storageAudit.value
+  if (!report) return []
+  return [
+    ...(report.missing_records || []).map((item: any) => ({ issue_type: 'missing_record', record_kind: item.kind, record_id: item.id, path: item.path })),
+    ...(report.zero_byte_files || []).map((item: any) => ({ issue_type: 'zero_byte_file', record_kind: item.kind, record_id: item.id, path: item.path })),
+    ...(report.partial_files || []).map((item: any) => ({ issue_type: 'partial_file', path: item.path })),
+    ...(report.orphan_files || []).map((path: string) => ({ issue_type: 'orphan_file', path })),
+  ].slice(0, 200)
+})
+const eligibleRepairTargets = computed(() => (storageRepairPlan.value?.items || []).filter((item: any) => item.eligible).map((item: any) => ({ issue_type: item.issue_type, record_kind: item.record_kind, record_id: item.record_id, path: item.path })))
 const managedPlatformCredentials = [
   { id: 'tiktok', name: 'TikTok', cookieKey: 'TIKTOK_COOKIE', fileKey: 'TIKTOK_COOKIE_FILE' },
   { id: 'weibo', name: '微博', cookieKey: 'WEIBO_COOKIE', fileKey: 'WEIBO_COOKIE_FILE' },
@@ -66,7 +78,25 @@ async function loadLogs(silent: boolean | Event = false) { try { logs.value = (a
 async function loadProcess() { process.value = await api('/process/status') }
 async function loadReadiness() { readiness.value = await api('/status/readiness') }
 async function loadPlatformReadiness() { platformAuditBusy.value = true; try { platformReadiness.value = await api('/operations/platform-readiness') } catch (error: any) { store.notify(error.message || '平台验收状态加载失败', 'error') } finally { platformAuditBusy.value = false } }
-async function loadStorageAudit() { storageAuditBusy.value = true; try { storageAudit.value = await api('/operations/storage-audit') } catch (error: any) { store.notify(error.message || '存储巡检失败', 'error') } finally { storageAuditBusy.value = false } }
+async function loadStorageAudit() { storageAuditBusy.value = true; storageRepairPlan.value = null; try { storageAudit.value = await api('/operations/storage-audit') } catch (error: any) { store.notify(error.message || '存储巡检失败', 'error') } finally { storageAuditBusy.value = false } }
+async function previewStorageRepair() {
+  if (!storageRepairTargets.value.length) return store.notify('当前没有需要处理的存储问题', 'info')
+  storageRepairBusy.value = true
+  try { storageRepairPlan.value = await api('/operations/storage-repair', { method: 'POST', ...jsonBody({ dry_run: true, targets: storageRepairTargets.value }) }) }
+  catch (error: any) { store.notify(error.message || '生成修复方案失败', 'error') }
+  finally { storageRepairBusy.value = false }
+}
+async function applyStorageRepair() {
+  const targets = eligibleRepairTargets.value
+  if (!targets.length || !confirm(`确认处理 ${targets.length} 项？文件只会移动到可恢复隔离区，缺失媒体对应任务会标记为失败以便重试。`)) return
+  storageRepairBusy.value = true
+  try {
+    const result = await api<any>('/operations/storage-repair', { method: 'POST', ...jsonBody({ dry_run: false, targets }) })
+    store.notify(result.message || `已处理 ${result.applied} 项`)
+    await loadStorageAudit()
+  } catch (error: any) { store.notify(error.message || '执行存储维护失败', 'error') }
+  finally { storageRepairBusy.value = false }
+}
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
 async function init() {
   const requests = [loadRuntime(), loadArchiveRules(), loadDouyinAccount(), loadPlatformCredentialStatus(), loadAll(), loadProcess(), loadReadiness(), loadPlatformReadiness(), loadLogs(), loadUpdateInfo()]
@@ -172,7 +202,7 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 
     <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div><button class="btn ghost" @click="loadReadiness"><RefreshCw :size="15" />检查依赖</button></header><div class="readiness-grid"><article v-for="(component, name) in readiness.components" :key="name" :data-ready="component.ok"><span class="health-dot" :class="{ online: component.ok }" /><div><strong>{{ readinessLabel(String(name)) }}</strong><small>{{ component.message }}</small></div></article></div><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
 
-    <div v-else-if="tab === 'operations'" class="settings-panel operations-panel"><header><ShieldCheck /><div><h3>平台验收与存储维护</h3><p>区分本地就绪与真实下载证据；存储扫描不会删除文件或修改记录</p></div><div class="header-actions"><button class="btn ghost" :disabled="platformAuditBusy" @click="loadPlatformReadiness"><RefreshCw :size="15" />{{ platformAuditBusy ? '检查中…' : '检查平台' }}</button><button class="btn primary" :disabled="storageAuditBusy" @click="loadStorageAudit"><HardDrive :size="15" />{{ storageAuditBusy ? '扫描中…' : '扫描存储' }}</button></div></header><div class="platform-audit-grid"><article v-for="item in platformReadiness.items" :key="item.platform" :data-status="item.status" :data-validation="item.external_validation_complete ? 'complete' : item.external_tested ? 'partial' : 'none'"><div class="account-health"><strong>{{ item.name }}</strong><span>{{ item.status === 'ready' ? '本地就绪' : item.status === 'degraded' ? '可用但待完善' : '阻塞' }}</span></div><p>{{ item.engine }} · {{ item.supported_sources.map(sourceLabel).join(' / ') || '未开放下载' }}</p><small>Cookie：{{ item.cookie_configured ? '已配置' : '未配置' }} · FFmpeg：{{ item.ffmpeg_ready ? '可用' : '未安装' }} · 目录：{{ item.download_root.writable ? '可写' : '不可写' }}</small><ul v-if="item.blockers.length || item.warnings.length"><li v-for="message in [...item.blockers, ...item.warnings]" :key="message">{{ message }}</li></ul><div class="validation-evidence"><strong>{{ item.external_validation_complete ? '已有完整真实成功记录' : item.external_tested ? '已有部分真实成功记录' : '尚无真实成功记录' }}</strong><span v-if="item.validated_sources?.length">已验证：{{ item.validated_sources.map(sourceLabel).join('、') }} · {{ item.successful_task_count }} 个任务</span><span v-if="item.missing_validation?.length">待验证：{{ item.missing_validation.map(sourceLabel).join('、') }}</span><time>最近成功：{{ displayDateTime(item.last_external_success_at) }}</time></div></article></div><div class="storage-report"><div><strong>存储只读巡检</strong><span v-if="storageAudit">已扫描 {{ storageAudit.scanned_records }} 条记录、{{ storageAudit.scanned_files }} 个文件</span><span v-else>点击“扫描存储”后显示结果</span></div><template v-if="storageAudit"><div class="storage-metrics"><article><b>{{ storageAudit.disk.used_percent }}%</b><span>磁盘已用</span></article><article><b>{{ storageAudit.missing_records.length }}</b><span>记录缺文件</span></article><article><b>{{ storageAudit.partial_files.length }}</b><span>残留临时文件</span></article><article><b>{{ storageAudit.zero_byte_files.length }}</b><span>空文件</span></article><article><b>{{ storageAudit.orphan_files.length }}</b><span>未关联媒体</span></article></div><details v-if="storageAudit.missing_records.length || storageAudit.partial_files.length || storageAudit.orphan_files.length"><summary>查看问题样本</summary><pre>{{ JSON.stringify({ missing_records: storageAudit.missing_records, partial_files: storageAudit.partial_files, orphan_files: storageAudit.orphan_files }, null, 2) }}</pre></details><small>{{ storageAudit.note }}<template v-if="storageAudit.records_truncated || storageAudit.files_truncated"> 本次达到安全扫描上限，结果可能不完整。</template></small></template></div></div>
+    <div v-else-if="tab === 'operations'" class="settings-panel operations-panel"><header><ShieldCheck /><div><h3>平台验收与存储维护</h3><p>真实成功记录必须同时通过本地文件核验；存储处理采用可恢复隔离</p></div><div class="header-actions"><button class="btn ghost" :disabled="platformAuditBusy" @click="loadPlatformReadiness"><RefreshCw :size="15" />{{ platformAuditBusy ? '检查中…' : '检查平台' }}</button><button class="btn primary" :disabled="storageAuditBusy" @click="loadStorageAudit"><HardDrive :size="15" />{{ storageAuditBusy ? '扫描中…' : '扫描存储' }}</button></div></header><div class="platform-revision" v-if="platformReadiness.revision">当前运行版本：{{ String(platformReadiness.revision).slice(0, 12) }}</div><div class="platform-audit-grid"><article v-for="item in platformReadiness.items" :key="item.platform" :data-status="item.status" :data-validation="item.external_validation_complete ? 'complete' : item.external_tested ? 'partial' : 'none'"><div class="account-health"><strong>{{ item.name }}</strong><span>{{ item.status === 'ready' ? '本地就绪' : item.status === 'degraded' ? '可用但待完善' : '阻塞' }}</span></div><p>{{ item.engine }} · {{ item.supported_sources.map(sourceLabel).join(' / ') || '未开放下载' }}</p><small>Cookie：{{ item.cookie_configured ? '已配置' : '未配置' }} · FFmpeg：{{ item.ffmpeg_ready ? '可用' : '未安装' }} · 目录：{{ item.download_root.writable ? '可写' : '不可写' }}</small><ul v-if="item.blockers.length || item.warnings.length"><li v-for="message in [...item.blockers, ...item.warnings]" :key="message">{{ message }}</li></ul><div class="validation-evidence"><strong>{{ item.external_validation_complete ? '真实任务与本地媒体均已核验' : item.external_tested ? '已有记录，仍需补齐或修复媒体' : '尚无真实成功记录' }}</strong><span v-if="item.validated_sources?.length">已验证：{{ item.validated_sources.map(sourceLabel).join('、') }} · {{ item.successful_task_count }} 个任务</span><span v-if="item.missing_validation?.length">待验证：{{ item.missing_validation.map(sourceLabel).join('、') }}</span><time>最近成功：{{ displayDateTime(item.last_external_success_at) }}</time></div></article></div><div class="storage-report"><div class="storage-report-header"><div><strong>存储巡检与可恢复维护</strong><span v-if="storageAudit">已扫描 {{ storageAudit.scanned_records }} 条记录、{{ storageAudit.scanned_files }} 个文件</span><span v-else>点击“扫描存储”后显示结果</span></div><div class="header-actions" v-if="storageAudit"><button class="btn ghost compact" :disabled="storageRepairBusy || !storageRepairTargets.length" @click="previewStorageRepair">{{ storageRepairBusy ? '核验中…' : '预演处理' }}</button><button v-if="storageRepairPlan" class="btn primary compact" :disabled="storageRepairBusy || !eligibleRepairTargets.length" @click="applyStorageRepair">确认处理 {{ eligibleRepairTargets.length }} 项</button></div></div><template v-if="storageAudit"><div class="storage-metrics"><article><b>{{ storageAudit.disk.used_percent }}%</b><span>磁盘已用</span></article><article><b>{{ storageAudit.missing_records.length }}</b><span>记录缺文件</span></article><article><b>{{ storageAudit.partial_files.length }}</b><span>陈旧临时文件</span></article><article><b>{{ storageAudit.zero_byte_files.length }}</b><span>空文件</span></article><article><b>{{ storageAudit.orphan_files.length }}</b><span>未关联媒体</span></article></div><details v-if="storageAudit.missing_records.length || storageAudit.partial_files.length || storageAudit.zero_byte_files.length || storageAudit.orphan_files.length"><summary>查看问题样本</summary><pre>{{ JSON.stringify({ missing_records: storageAudit.missing_records, zero_byte_files: storageAudit.zero_byte_files, partial_files: storageAudit.partial_files, orphan_files: storageAudit.orphan_files }, null, 2) }}</pre></details><div v-if="storageRepairPlan" class="repair-plan"><strong>预演结果：{{ storageRepairPlan.eligible }}/{{ storageRepairPlan.planned }} 项可处理</strong><span>文件只移动到下载根目录内的 .quarantine，不会直接删除；缺失媒体对应任务会标记为失败，可从任务页重试。</span><details v-if="storageRepairPlan.items.some((item:any) => !item.eligible)"><summary>查看跳过原因</summary><ul><li v-for="item in storageRepairPlan.items.filter((entry:any) => !entry.eligible)" :key="`${item.issue_type}-${item.path}`">{{ item.path }}：{{ item.reason }}</li></ul></details></div><small>{{ storageAudit.note }}<template v-if="storageAudit.records_truncated || storageAudit.files_truncated"> 本次达到安全扫描上限，结果可能不完整，禁止处理未完整核验的孤立文件。</template></small></template></div></div>
 
     <div v-else-if="tab === 'logs'" class="settings-panel log-panel"><header><Activity /><div><h3>活动日志</h3><p>实时查看最近 500 条系统与任务事件</p></div><div class="header-actions"><button type="button" class="setting-switch" :class="{ on: live }" role="switch" :aria-checked="live" @click="live = !live"><span class="switch-track"><i /></span><span>实时刷新</span></button><button class="btn ghost compact" @click="copyLogs"><Clipboard :size="15" />复制</button><button class="btn ghost compact" @click="clearLogs"><Trash2 :size="15" />清空</button><button class="btn ghost compact" @click="loadLogs"><RefreshCw :size="15" />刷新</button></div></header><div class="log-filters"><button v-for="level in ['info','warning','error']" :key="level" :class="{ active: logLevels.includes(level) }" @click="toggleLevel(level)">{{ level }}</button></div><div class="log-console"><article v-for="(item, index) in filteredLogs" :key="`${item.ts}-${index}`" :data-level="item.level"><time>{{ new Date(item.ts * 1000).toLocaleString() }}</time><b>[{{ item.source }}]</b><span>{{ item.msg }}</span><small v-if="item.detail">{{ item.detail }}</small></article><div v-if="!filteredLogs.length" class="empty-state">暂无符合筛选条件的日志</div></div></div>
 
@@ -221,12 +251,17 @@ onMounted(init); onBeforeUnmount(() => clearInterval(timer.value))
 .validation-evidence span,.validation-evidence time { color:var(--faint); font-size:9px; overflow-wrap:anywhere; }
 .platform-audit-grid article[data-validation="complete"] .validation-evidence strong { color:var(--green); }
 .platform-audit-grid article[data-validation="partial"] .validation-evidence strong { color:var(--amber); }
+.platform-revision { margin-bottom:10px; color:var(--muted); font-size:10px; font-family:monospace; }
 .storage-report { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
-.storage-report>div:first-child { display:flex; justify-content:space-between; gap:12px; }
+.storage-report-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.storage-report-header>div:first-child { display:grid; gap:4px; }
 .storage-metrics { margin:12px 0; display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
 .storage-metrics article { padding:10px; display:grid; gap:3px; border:1px solid var(--line); border-radius:8px; }
 .storage-metrics b { font-size:18px; }.storage-metrics span,.storage-report small { color:var(--muted); font-size:9px; }
 .storage-report pre { max-height:260px; overflow:auto; font-size:9px; white-space:pre-wrap; }
+.repair-plan { display:grid; gap:6px; margin:12px 0; padding:12px; border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line)); border-radius:10px; background:var(--accent-soft); }
+.repair-plan>span,.repair-plan li { color:var(--muted); font-size:10px; overflow-wrap:anywhere; }
+.repair-plan ul { margin:8px 0 0; padding-left:18px; }
 @media(max-width:900px){.notification-test-result{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:900px){.readiness-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:900px){.platform-audit-grid{grid-template-columns:repeat(2,1fr)}.storage-metrics{grid-template-columns:repeat(3,1fr)}}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Eye, RefreshCw, RotateCcw, Search, Square } from '@lucide/vue'
+import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X } from '@lucide/vue'
 import { api, jsonBody } from '../api'
 import Pager from '../components/Pager.vue'
 import { openMedia } from '../media'
@@ -13,6 +13,8 @@ const platform = ref(''), status = ref(''), search = ref(''), loading = ref(fals
 const statusSummary = ref<Record<string, number>>({}), selectedKeys = ref<string[]>([])
 const actionBusy = ref(false), rowBusy = ref<string[]>([])
 const actionFailures = ref<Array<{ task_key: string; message: string; status_code: number }>>([])
+const statsTask = ref<UnifiedTask>(), statsData = ref<any>({ snapshots: [] }), statsBusy = ref(false)
+const statsMetric = ref<'view_count' | 'like_count' | 'comment_count' | 'share_count'>('view_count')
 let searchTimer: number | undefined
 const platformNames: Record<string, string> = { douyin: '抖音', x: 'X', tiktok: 'TikTok', weibo: '微博', bilibili: 'B站', xhs: '小红书' }
 const statusNames: Record<string, string> = { pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', skipped: '已跳过', failed: '失败', cancelled: '已取消' }
@@ -24,6 +26,23 @@ const selectedTasks = computed(() => tasks.value.filter(task => selectedKeys.val
 const retryableSelected = computed(() => selectedTasks.value.filter(task => ['failed', 'cancelled'].includes(task.status)))
 const cancellableSelected = computed(() => selectedTasks.value.filter(task => ['pending', 'downloading', 'paused'].includes(task.status)))
 const summaryTotal = computed(() => Object.values(statusSummary.value).reduce((sum, count) => sum + count, 0))
+const statsMetrics = [['view_count', '播放'], ['like_count', '点赞'], ['comment_count', '评论'], ['share_count', '分享']] as const
+const statsSeries = computed(() => (statsData.value.snapshots || []).filter((item: any) => item[statsMetric.value] != null))
+const statsSummary = computed(() => {
+  const values = statsSeries.value.map((item: any) => Number(item[statsMetric.value] || 0))
+  const latest = values.at(-1) || 0, first = values[0] || 0
+  const deltas = values.slice(1).map((value: number, index: number) => value - values[index])
+  const latestDelta = deltas.at(-1) || 0
+  const baseline = deltas.length > 1 ? deltas.slice(0, -1).reduce((sum: number, value: number) => sum + value, 0) / (deltas.length - 1) : 0
+  return { latest, delta: latest - first, latestDelta, unusual: baseline > 0 && latestDelta >= baseline * 3 }
+})
+const statsPoints = computed(() => {
+  const values = statsSeries.value.map((item: any) => Number(item[statsMetric.value] || 0))
+  if (!values.length) return ''
+  const min = Math.min(...values), max = Math.max(...values), span = Math.max(1, max - min)
+  return values.map((value: number, index: number) => `${values.length === 1 ? 50 : index * 100 / (values.length - 1)},${90 - (value - min) * 80 / span}`).join(' ')
+})
+const formatCount = (value: number) => Number(value || 0).toLocaleString('zh-CN')
 
 async function load() {
   loading.value = true
@@ -79,6 +98,13 @@ async function preview(task: UnifiedTask) {
     if (items.length) openMedia(items); else store.notify('该任务没有可预览资源', 'info')
   } catch (error: any) { store.notify(error.message || '预览失败', 'error') }
 }
+async function showStats(task: UnifiedTask) {
+  if (!task.stats_endpoint) return
+  statsTask.value = task; statsBusy.value = true; statsData.value = { snapshots: [] }
+  try { statsData.value = await api<any>(task.stats_endpoint) }
+  catch (error: any) { store.notify(error.message || '互动趋势加载失败', 'error') }
+  finally { statsBusy.value = false }
+}
 function changePage(value: number) { page.value = value; void load() }
 onMounted(load)
 onBeforeUnmount(() => window.clearTimeout(searchTimer))
@@ -117,12 +143,13 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer))
           <td><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small></td>
           <td><strong>{{ Number(task.progress_percent || 0).toFixed(1) }}%</strong><span>{{ task.file_count }} 个文件</span></td>
           <td class="result-cell"><span :class="{ 'inline-error': task.error_message }" :title="task.error_message || ''">{{ task.error_message || '—' }}</span><small v-if="task.error_code">{{ task.error_code }}</small></td>
-          <td><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
+          <td><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
         </tr></tbody>
       </table>
       <div v-if="!loading && !tasks.length" class="empty-state"><strong>暂无符合条件的任务</strong><span>可调整平台、状态或搜索条件后重试</span></div>
     </div>
     <Pager :page="page" :pages="pages" :total="total" @change="changePage" />
+    <Teleport to="body"><div v-if="statsTask" class="trend-overlay" @click.self="statsTask = undefined"><section class="trend-dialog"><header><div><p class="eyebrow">CROSS-PLATFORM ANALYTICS</p><h3>{{ statsData.label || statsTask.source_label }}</h3><span>{{ platformNames[statsTask.platform] }} · {{ statsSeries.length }} 个统计快照</span></div><button class="icon-btn" @click="statsTask = undefined"><X /></button></header><nav><button v-for="metric in statsMetrics" :key="metric[0]" :class="{ active: statsMetric === metric[0] }" @click="statsMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="statsBusy" class="empty-state">正在读取趋势…</div><template v-else-if="statsSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(statsSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(statsSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="statsSummary.unusual"><strong>+{{ formatCount(statsSummary.latestDelta) }}</strong><span>最近增量{{ statsSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="跨平台互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="statsPoints" /></svg><div class="trend-table"><article v-for="(snapshot, index) in [...statsSeries].reverse().slice(0, 30)" :key="snapshot.id || index"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[statsMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>该平台尚未返回互动统计</strong><span>后续下载取得统计字段时会自动开始记录</span></div></section></div></Teleport>
   </section>
 </template>
 
@@ -149,5 +176,23 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer))
 .media-cell strong,.result-cell>span,.data-table td>strong { display:block; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .result-cell small { display:block; margin-top:4px; color:var(--faint); overflow-wrap:anywhere; }
 .status[data-tone="paused"],.status[data-tone="cancelled"] { background:rgba(231,169,67,.12); color:var(--amber)!important; }
+.trend-overlay { position:fixed; inset:0; z-index:1000; display:grid; place-items:center; padding:24px; background:rgba(5,8,14,.7); backdrop-filter:blur(8px); }
+.trend-dialog { width:min(760px,100%); max-height:88vh; overflow:auto; padding:24px; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 24px 80px rgba(0,0,0,.32); }
+.trend-dialog>header { display:flex; justify-content:space-between; gap:16px; }
+.trend-dialog>header h3 { margin:4px 0; }
+.trend-dialog>header span,.trend-table span { color:var(--muted); }
+.trend-dialog>nav { display:flex; gap:6px; margin:18px 0; }
+.trend-dialog>nav button { padding:7px 11px; border:1px solid var(--line); border-radius:8px; background:transparent; color:var(--muted); cursor:pointer; }
+.trend-dialog>nav button.active { border-color:var(--accent); background:var(--accent-soft); color:var(--text); }
+.trend-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+.trend-kpis article { padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
+.trend-kpis strong,.trend-kpis span { display:block; }
+.trend-kpis span { margin-top:4px; color:var(--muted); font-size:10px; }
+.trend-kpis article[data-alert="true"] { border-color:var(--amber); }
+.trend-chart { width:100%; height:210px; margin:18px 0; overflow:visible; }
+.trend-chart line { stroke:var(--line); stroke-width:.5; }
+.trend-chart polyline { fill:none; stroke:var(--accent); stroke-width:2.2; vector-effect:non-scaling-stroke; }
+.trend-table { display:grid; gap:5px; }
+.trend-table article { display:grid; grid-template-columns:1fr auto 90px; gap:12px; padding:8px 10px; border-bottom:1px solid var(--line); }
 @media (max-width:760px) { .unified-filters { grid-template-columns:1fr; } .selection-bar { align-items:flex-start; flex-direction:column; } }
 </style>

@@ -16,7 +16,11 @@ from app.models.database import get_sync_db
 from app.models.models import XAuthor, XDownloadTask, XMediaAsset
 from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_cookie_file
 from app.services.x_downloader import build_x_download_engine, is_media_download_line
-from app.services.platform_metadata import fill_missing_media_metadata, metadata_for_media
+from app.services.platform_metadata import (
+    apply_media_metadata,
+    metadata_for_media,
+    record_media_stats_snapshot,
+)
 from app.services.x_task_service import (
     ACTIVE_X_TASK_STATUSES,
     create_x_download_task,
@@ -150,9 +154,12 @@ def download_x_profile(self, task_id: int):
                 fallback_author=task.x_author.display_name if task.x_author else task.username,
             )
             if existing := existing_assets.get(file_path):
-                fill_missing_media_metadata(existing, metadata)
+                apply_media_metadata(existing, metadata)
+                record_media_stats_snapshot(
+                    db, existing, platform="x", asset_kind="x_media",
+                )
                 continue
-            db.add(XMediaAsset(
+            asset = XMediaAsset(
                 task_id=task.id,
                 x_author_id=task.x_author_id,
                 media_type=media_type,
@@ -161,7 +168,12 @@ def download_x_profile(self, task_id: int):
                 size_bytes=path.stat().st_size if path.is_file() else 0,
                 mime_type=mime_type,
                 **metadata.as_model_values(),
-            ))
+            )
+            db.add(asset)
+            db.flush()
+            record_media_stats_snapshot(
+                db, asset, platform="x", asset_kind="x_media",
+            )
         update_x_task_runtime(
             task,
             phase="finalizing",

@@ -9,13 +9,15 @@ import logging
 import os
 from pathlib import Path
 import shutil
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core import redis_client
 from app.core.config import settings
 from app.models.database import get_async_db
 from app.models.models import (
@@ -23,16 +25,22 @@ from app.models.models import (
     DouyinAccountProfile,
     DownloadHistory,
     DownloadTask,
+    MediaStatsSnapshot,
     PlatformCredential,
     PlatformDownloadTask,
     PlatformMediaAsset,
     SystemConfig,
     Work,
+    WorkStatsSnapshot,
     XAuthor,
     XDownloadTask,
     XMediaAsset,
 )
 from app.services.platform_registry import platform_registry
+from app.services.storage_maintenance import (
+    apply_storage_repair_plan,
+    build_storage_repair_plan,
+)
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
@@ -40,6 +48,18 @@ from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
 
 router = APIRouter(prefix="/operations", tags=["统一运维"])
 logger = logging.getLogger(__name__)
+
+
+class StorageRepairTarget(BaseModel):
+    issue_type: Literal["missing_record", "zero_byte_file", "partial_file", "orphan_file"]
+    record_kind: Literal["download_task", "download_history", "x_media", "platform_media"] | None = None
+    record_id: int | None = Field(None, ge=1)
+    path: str = Field(..., min_length=1, max_length=4096)
+
+
+class StorageRepairRequest(BaseModel):
+    targets: list[StorageRepairTarget] = Field(..., min_length=1, max_length=200)
+    dry_run: bool = True
 
 
 def _safe_stat(path_value: str | None) -> tuple[bool, int]:
@@ -94,13 +114,22 @@ def _scan_storage_files(
         try:
             if not path.is_file():
                 continue
+            try:
+                if path.relative_to(root).parts[0] == ".quarantine":
+                    continue
+            except (IndexError, ValueError):
+                continue
             scanned_files += 1
             resolved = str(path.resolve(strict=False))
             if path.suffix.lower() in {".part", ".tmp", ".downloading"} and len(partials) < 200:
                 stat = path.stat()
+                age_seconds = max(0, datetime.now().timestamp() - stat.st_mtime)
+                if age_seconds < 6 * 3600:
+                    continue
                 partials.append({
                     "path": resolved, "size_bytes": stat.st_size,
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "stale_seconds": int(age_seconds),
                 })
             elif (
                 allow_orphans
@@ -184,6 +213,95 @@ async def _platform_success_evidence(db: AsyncSession) -> dict[str, dict[str, An
     return evidence
 
 
+async def _latest_artifact_evidence(db: AsyncSession) -> dict[str, dict[str, dict[str, Any]]]:
+    """核验最近成功记录对应的本地文件，证明当前版本可继续提供预览。"""
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+
+    douyin_rows = (await db.execute(
+        select(DownloadTask.id, DownloadTask.file_path, DownloadTask.completed_at)
+        .where(DownloadTask.status == "completed", DownloadTask.file_path.is_not(None))
+        .order_by(DownloadTask.completed_at.desc().nullslast(), DownloadTask.id.desc())
+        .limit(20)
+    )).all()
+    if douyin_rows:
+        row = douyin_rows[0]
+        exists, size = await asyncio.to_thread(_safe_stat, row.file_path)
+        result["douyin"] = {"work": {
+            "healthy": exists and size > 0, "task_id": int(row.id), "size_bytes": size,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }}
+
+    for source_type in ("profile", "work"):
+        source_condition = (
+            XDownloadTask.profile_url.ilike("%/status/%")
+            if source_type == "work"
+            else ~XDownloadTask.profile_url.ilike("%/status/%")
+        )
+        row = (await db.execute(
+            select(XDownloadTask.id, XMediaAsset.id, XMediaAsset.file_path)
+            .join(XMediaAsset, XMediaAsset.task_id == XDownloadTask.id)
+            .where(XDownloadTask.status == "completed", source_condition)
+            .order_by(XDownloadTask.completed_at.desc().nullslast(), XMediaAsset.id.desc())
+            .limit(1)
+        )).first()
+        if not row:
+            continue
+        task_id, asset_id, file_path = row
+        exists, size = await asyncio.to_thread(_safe_stat, file_path)
+        result.setdefault("x", {})[source_type] = {
+            "healthy": exists and size > 0, "task_id": int(task_id),
+            "asset_id": int(asset_id), "size_bytes": size,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    for definition in platform_registry.list():
+        if definition.id in {"douyin", "x"}:
+            continue
+        capabilities = definition.to_dict()["capabilities"]
+        for source in ("profile", "work"):
+            if not capabilities[f"{source}_download"]:
+                continue
+            row = (await db.execute(
+                select(PlatformDownloadTask.id, PlatformMediaAsset.id, PlatformMediaAsset.file_path)
+                .join(PlatformMediaAsset, PlatformMediaAsset.task_id == PlatformDownloadTask.id)
+                .where(
+                    PlatformDownloadTask.platform == definition.id,
+                    PlatformDownloadTask.source_type == source,
+                    PlatformDownloadTask.status == "completed",
+                )
+                .order_by(PlatformDownloadTask.completed_at.desc().nullslast(), PlatformMediaAsset.id.desc())
+                .limit(1)
+            )).first()
+            if not row:
+                continue
+            task_id, asset_id, file_path = row
+            exists, size = await asyncio.to_thread(_safe_stat, file_path)
+            result.setdefault(definition.id, {})[source] = {
+                "healthy": exists and size > 0, "task_id": int(task_id),
+                "asset_id": int(asset_id), "size_bytes": size,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+    return result
+
+
+def _runtime_revision() -> str | None:
+    """不启动子进程地读取部署工作树版本。"""
+    for key in ("JENKINS_TARGET_SHA", "GIT_COMMIT"):
+        if value := str(os.environ.get(key) or "").strip():
+            return value
+    try:
+        git_path = Path(__file__).resolve().parents[2] / ".git"
+        if git_path.is_file():
+            line = git_path.read_text(encoding="utf-8").strip()
+            git_path = (git_path.parent / line.removeprefix("gitdir:").strip()).resolve()
+        head = (git_path / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            return (git_path / head.removeprefix("ref:").strip()).read_text(encoding="utf-8").strip()
+        return head
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 @router.get("/platform-readiness")
 async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
     """返回本地就绪状态，以及数据库中可核验的真实成功任务证据。"""
@@ -201,6 +319,7 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
     ffmpeg = shutil.which("ffmpeg") is not None
     xhs_service = await asyncio.to_thread(_xhs_service_check)
     success_evidence = await _platform_success_evidence(db)
+    artifact_evidence = await _latest_artifact_evidence(db)
     items = []
     external_validation_required = False
     for definition in platform_registry.list():
@@ -238,11 +357,21 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
             "work": capabilities["work_download"],
         }.items() if enabled]
         platform_evidence = success_evidence.get(platform_id, {})
-        validated_sources = sorted(
+        recorded_sources = sorted(
             set(platform_evidence.get("validated_sources") or []) & set(supported_sources)
         )
+        artifact_validation = artifact_evidence.get(platform_id, {})
+        validated_sources = sorted(
+            source for source in recorded_sources
+            if artifact_validation.get(source, {}).get("healthy") is True
+        )
+        broken_sources = sorted(set(recorded_sources) - set(validated_sources))
+        if broken_sources:
+            warnings.append(
+                "最近成功记录的本地媒体已缺失或为空：" + "、".join(broken_sources)
+            )
         missing_validation = [name for name in supported_sources if name not in validated_sources]
-        external_tested = bool(validated_sources)
+        external_tested = bool(recorded_sources)
         validation_complete = bool(supported_sources) and not missing_validation
         external_validation_required = external_validation_required or not validation_complete
         last_success_at = platform_evidence.get("last_success_at")
@@ -261,12 +390,15 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
             "external_tested": external_tested,
             "external_validation_complete": validation_complete,
             "validated_sources": validated_sources,
+            "recorded_sources": recorded_sources,
             "missing_validation": missing_validation,
+            "artifact_validation": artifact_validation,
             "last_external_success_at": last_success_at.isoformat() if last_success_at else None,
             "successful_task_count": int(platform_evidence.get("successful_task_count") or 0),
         })
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "revision": _runtime_revision(),
         "scope": "local_preflight_with_observed_success",
         "external_validation_required": external_validation_required,
         "items": items,
@@ -286,6 +418,9 @@ def _merge_status_rows(target: dict[str, int], rows) -> None:
 
 def _serialize_douyin_task(task: DownloadTask) -> dict[str, Any]:
     work = task.work
+    has_stats = any(getattr(work, name, None) is not None for name in (
+        "play_count", "digg_count", "comment_count", "share_count",
+    ))
     return {
         "key": f"douyin:{task.id}", "platform": "douyin", "id": task.id,
         "source_type": "work", "source_label": work.title or work.aweme_id,
@@ -298,6 +433,8 @@ def _serialize_douyin_task(task: DownloadTask) -> dict[str, Any]:
         "error_message": task.error_message, "error_code": None,
         "preview_count": 1 if task.status == "completed" and task.file_path else 0,
         "preview_endpoint": f"/tasks/{task.id}/preview",
+        "has_stats": has_stats,
+        "stats_endpoint": f"/operations/tasks/douyin/{task.id}/stats" if has_stats else None,
         "retry_endpoint": f"/tasks/{task.id}/retry",
         "cancel_endpoint": f"/tasks/{task.id}/cancel",
         "created_at": task.created_at, "started_at": task.started_at,
@@ -305,8 +442,16 @@ def _serialize_douyin_task(task: DownloadTask) -> dict[str, Any]:
     }
 
 
+def _first_media_asset(task: Any) -> Any | None:
+    assets = list(getattr(task, "media_assets", None) or [])
+    return min(assets, key=lambda item: int(item.id or 0)) if assets else None
+
+
 def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
-    asset = task.media_assets[0] if task.media_assets else None
+    asset = _first_media_asset(task)
+    has_stats = bool(asset and any(getattr(asset, name, None) is not None for name in (
+        "view_count", "like_count", "comment_count", "share_count",
+    )))
     return {
         "key": f"x:{task.id}", "platform": "x", "id": task.id,
         "source_type": "work" if "/status/" in task.profile_url else "profile",
@@ -322,6 +467,8 @@ def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
         "progress_percent": task.progress_percent, "file_count": task.file_count,
         "error_message": task.error_message, "error_code": task.error_code,
         "preview_count": len(task.media_assets), "media_endpoint": f"/x/tasks/{task.id}/media",
+        "has_stats": has_stats,
+        "stats_endpoint": f"/operations/tasks/x/{task.id}/stats" if has_stats else None,
         "retry_endpoint": f"/x/tasks/{task.id}/retry",
         "cancel_endpoint": f"/x/tasks/{task.id}/cancel",
         "created_at": task.created_at, "started_at": task.started_at,
@@ -330,7 +477,10 @@ def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
 
 
 def _serialize_platform_task(task: PlatformDownloadTask) -> dict[str, Any]:
-    asset = task.media_assets[0] if task.media_assets else None
+    asset = _first_media_asset(task)
+    has_stats = bool(asset and any(getattr(asset, name, None) is not None for name in (
+        "view_count", "like_count", "comment_count", "share_count",
+    )))
     return {
         "key": f"{task.platform}:{task.id}", "platform": task.platform, "id": task.id,
         "source_type": task.source_type,
@@ -343,12 +493,132 @@ def _serialize_platform_task(task: PlatformDownloadTask) -> dict[str, Any]:
         "progress_percent": task.progress_percent, "file_count": task.file_count,
         "error_message": task.error_message, "error_code": task.error_code,
         "preview_count": len(task.media_assets),
+        "has_stats": has_stats,
+        "stats_endpoint": (
+            f"/operations/tasks/{task.platform}/{task.id}/stats" if has_stats else None
+        ),
         "media_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/media",
         "retry_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/retry",
         "cancel_endpoint": f"/platform-downloads/{task.platform}/tasks/{task.id}/cancel",
         "created_at": task.created_at, "started_at": task.started_at,
         "completed_at": task.completed_at,
     }
+
+
+def _snapshot_values(snapshot: Any, *, douyin: bool = False) -> dict[str, Any]:
+    return {
+        "id": snapshot.id,
+        "view_count": getattr(snapshot, "play_count" if douyin else "view_count", None),
+        "like_count": getattr(snapshot, "digg_count" if douyin else "like_count", None),
+        "comment_count": snapshot.comment_count,
+        "share_count": snapshot.share_count,
+        "observed_at": snapshot.observed_at,
+        "source": snapshot.source,
+    }
+
+
+@router.get("/tasks/{platform}/{task_id}/stats")
+async def unified_task_stats(
+    platform: str,
+    task_id: int,
+    limit: int = Query(200, ge=1, le=1000),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """返回统一字段的互动趋势；无历史快照时仍返回当前采集值。"""
+    platform_id = str(platform or "").lower()
+    snapshots: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    label = ""
+    if platform_id == "douyin":
+        task = (await db.execute(
+            select(DownloadTask).options(selectinload(DownloadTask.work))
+            .where(DownloadTask.id == task_id)
+        )).scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        work = task.work
+        label = work.title or work.aweme_id
+        rows = (await db.execute(
+            select(WorkStatsSnapshot)
+            .where(WorkStatsSnapshot.work_id == work.id)
+            .order_by(WorkStatsSnapshot.observed_at.desc(), WorkStatsSnapshot.id.desc())
+            .limit(limit)
+        )).scalars().all()
+        snapshots = [_snapshot_values(item, douyin=True) for item in reversed(rows)]
+        current = {
+            "view_count": work.play_count, "like_count": work.digg_count,
+            "comment_count": work.comment_count, "share_count": work.share_count,
+            "observed_at": work.metadata_refreshed_at or work.discovered_at,
+            "source": "current",
+        }
+    elif platform_id == "x":
+        task = (await db.execute(
+            select(XDownloadTask).options(selectinload(XDownloadTask.media_assets))
+            .where(XDownloadTask.id == task_id)
+        )).scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        asset = _first_media_asset(task)
+        label = asset.title if asset and asset.title else f"@{task.username}"
+        if asset:
+            rows = (await db.execute(
+                select(MediaStatsSnapshot)
+                .where(
+                    MediaStatsSnapshot.platform == "x",
+                    MediaStatsSnapshot.asset_kind == "x_media",
+                    MediaStatsSnapshot.asset_id == asset.id,
+                )
+                .order_by(MediaStatsSnapshot.observed_at.desc(), MediaStatsSnapshot.id.desc())
+                .limit(limit)
+            )).scalars().all()
+            snapshots = [_snapshot_values(item) for item in reversed(rows)]
+            current = {
+                name: getattr(asset, name) for name in (
+                    "view_count", "like_count", "comment_count", "share_count",
+                )
+            } | {"observed_at": asset.created_at, "source": "current"}
+    else:
+        try:
+            platform_registry.get(platform_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="平台不存在") from exc
+        task = (await db.execute(
+            select(PlatformDownloadTask).options(selectinload(PlatformDownloadTask.media_assets))
+            .where(
+                PlatformDownloadTask.id == task_id,
+                PlatformDownloadTask.platform == platform_id,
+            )
+        )).scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        asset = _first_media_asset(task)
+        label = asset.title if asset and asset.title else task.source_key
+        if asset:
+            rows = (await db.execute(
+                select(MediaStatsSnapshot)
+                .where(
+                    MediaStatsSnapshot.platform == platform_id,
+                    MediaStatsSnapshot.asset_kind == "platform_media",
+                    MediaStatsSnapshot.asset_id == asset.id,
+                )
+                .order_by(MediaStatsSnapshot.observed_at.desc(), MediaStatsSnapshot.id.desc())
+                .limit(limit)
+            )).scalars().all()
+            snapshots = [_snapshot_values(item) for item in reversed(rows)]
+            current = {
+                name: getattr(asset, name) for name in (
+                    "view_count", "like_count", "comment_count", "share_count",
+                )
+            } | {"observed_at": asset.created_at, "source": "current"}
+    if current and any(current.get(name) is not None for name in (
+        "view_count", "like_count", "comment_count", "share_count",
+    )):
+        comparable = {name: current.get(name) for name in (
+            "view_count", "like_count", "comment_count", "share_count",
+        )}
+        if not snapshots or any(snapshots[-1].get(name) != value for name, value in comparable.items()):
+            snapshots.append({"id": None, **current})
+    return {"platform": platform_id, "task_id": task_id, "label": label, "snapshots": snapshots}
 
 
 @router.get("/tasks")
@@ -551,7 +821,9 @@ async def storage_audit(
     scanned_records = 0
     total_records = 0
     for count_statement in (
-        select(func.count(DownloadTask.id)).where(DownloadTask.file_path.is_not(None)),
+        select(func.count(DownloadTask.id)).where(
+            DownloadTask.status == "completed", DownloadTask.file_path.is_not(None),
+        ),
         select(func.count(DownloadHistory.id)).where(DownloadHistory.file_path.is_not(None)),
         select(func.count(XMediaAsset.id)),
         select(func.count(PlatformMediaAsset.id)),
@@ -572,17 +844,22 @@ async def storage_audit(
     def inspect_records():
         for kind, record_id, path_value in record_rows:
             try:
-                normalized = str(Path(path_value).expanduser().resolve(strict=False))
+                candidate = Path(path_value).expanduser()
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                normalized = str(candidate.resolve(strict=False))
             except (OSError, RuntimeError, ValueError):
                 normalized = str(path_value)
             known.add(normalized)
-            exists, size = _safe_stat(path_value)
+            exists, size = _safe_stat(normalized)
             if not exists and len(missing) < 200:
-                missing.append({"kind": kind, "id": record_id, "path": str(path_value)})
+                missing.append({"kind": kind, "id": record_id, "path": normalized})
             elif exists and size == 0 and len(zero_byte) < 200:
-                zero_byte.append({"kind": kind, "id": record_id, "path": str(path_value)})
+                zero_byte.append({"kind": kind, "id": record_id, "path": normalized})
 
-    await consume("download_task", select(DownloadTask.id, DownloadTask.file_path).where(DownloadTask.file_path.is_not(None)))
+    await consume("download_task", select(DownloadTask.id, DownloadTask.file_path).where(
+        DownloadTask.status == "completed", DownloadTask.file_path.is_not(None),
+    ))
     if scanned_records < max_records:
         await consume("download_history", select(DownloadHistory.id, DownloadHistory.file_path).where(DownloadHistory.file_path.is_not(None)))
     if scanned_records < max_records:
@@ -608,4 +885,41 @@ async def storage_audit(
         "partial_files": partials, "orphan_files": orphan_files,
         "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "used_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0},
         "note": "结果仅用于核对；不会自动删除文件或修改历史记录。",
+    }
+
+
+@router.post("/storage-repair")
+async def storage_repair(
+    request: StorageRepairRequest,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """先预演、再执行可恢复维护；文件只移动到下载根目录内的隔离区。"""
+    current = await asyncio.to_thread(settings.snapshot)
+    root = Path(current.DOWNLOAD_ROOT).expanduser().resolve(strict=False)
+    if not root.is_dir():
+        raise HTTPException(status_code=409, detail="下载根目录不存在，不能执行存储维护")
+    targets = [item.model_dump() for item in request.targets]
+    if request.dry_run:
+        plan = await build_storage_repair_plan(db, root, targets)
+        return {
+            "dry_run": True,
+            "planned": len(plan),
+            "eligible": sum(1 for item in plan if item["eligible"]),
+            "items": plan,
+            "note": "预演没有修改任何文件或记录；确认后才会执行可恢复隔离。",
+        }
+    result = await apply_storage_repair_plan(db, root, targets)
+    try:
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "warning", "storage-maintenance",
+            f"存储维护已处理 {result['applied']} 项",
+            f"隔离目录：{result['quarantine_root'] or '无'}；标记任务：{len(result['marked_tasks'])}",
+        )
+    except Exception as exc:
+        logger.warning("存储维护已完成，但活动日志写入失败: %s", exc)
+    return {
+        "dry_run": False,
+        **result,
+        "message": "处理完成；文件未删除，可按隔离清单恢复",
     }

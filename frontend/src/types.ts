@@ -54,6 +54,7 @@ export interface UnifiedTask {
   status: string; phase?: string; progress_percent: number; file_count: number;
   error_message?: string; error_code?: string; preview_count: number;
   preview_endpoint?: string; media_endpoint?: string; retry_endpoint?: string; cancel_endpoint?: string;
+  has_stats?: boolean; stats_endpoint?: string;
   created_at: string; started_at?: string; completed_at?: string;
 }
 export interface UnifiedTaskPage extends PageData<UnifiedTask> { status_summary: Record<string, number> }

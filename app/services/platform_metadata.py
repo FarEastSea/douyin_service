@@ -13,6 +13,10 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from sqlalchemy import select
+
+from app.models.models import MediaStatsSnapshot
+
 
 @dataclass(frozen=True, slots=True)
 class NormalizedMediaMetadata:
@@ -155,10 +159,60 @@ def metadata_for_media(
 
 
 def fill_missing_media_metadata(record: Any, metadata: NormalizedMediaMetadata) -> bool:
-    """Fill only absent normalized fields; never overwrite existing history."""
+    """兼容旧调用：静态字段只补空值，统计字段始终更新。"""
+    return apply_media_metadata(record, metadata)
+
+
+STATIC_METADATA_FIELDS = {
+    "title", "author_name", "published_at", "cover_url",
+    "duration_ms", "width", "height",
+}
+STATS_FIELDS = ("view_count", "like_count", "comment_count", "share_count")
+
+
+def apply_media_metadata(record: Any, metadata: NormalizedMediaMetadata) -> bool:
+    """补齐静态元数据，并用最新采集值更新可变化的互动统计。"""
     changed = False
     for name, value in metadata.as_model_values().items():
-        if getattr(record, name, None) is None:
+        current = getattr(record, name, None)
+        if (name in STATIC_METADATA_FIELDS and current is None) or (
+            name in STATS_FIELDS and current != value
+        ):
             setattr(record, name, value)
             changed = True
     return changed
+
+
+def record_media_stats_snapshot(
+    db: Any,
+    record: Any,
+    *,
+    platform: str,
+    asset_kind: str,
+    source: str = "download",
+) -> bool:
+    """统计发生变化时追加快照，避免重复采集写出无意义记录。"""
+    asset_id = getattr(record, "id", None)
+    values = {name: getattr(record, name, None) for name in STATS_FIELDS}
+    if not asset_id or not any(value is not None for value in values.values()):
+        return False
+    latest = db.execute(
+        select(MediaStatsSnapshot)
+        .where(
+            MediaStatsSnapshot.platform == platform,
+            MediaStatsSnapshot.asset_kind == asset_kind,
+            MediaStatsSnapshot.asset_id == int(asset_id),
+        )
+        .order_by(MediaStatsSnapshot.observed_at.desc(), MediaStatsSnapshot.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest and all(getattr(latest, name) == value for name, value in values.items()):
+        return False
+    db.add(MediaStatsSnapshot(
+        platform=platform,
+        asset_kind=asset_kind,
+        asset_id=int(asset_id),
+        source=source,
+        **values,
+    ))
+    return True

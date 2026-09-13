@@ -432,6 +432,8 @@ def get(path, auth=False):
 last_error = None
 for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
     try:
+        verified_platforms = []
+        pending_platforms = []
         try:
             readiness = json.loads(get("/api/ready"))
             if readiness.get("status") != "ready":
@@ -466,6 +468,7 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
             tasks = json.loads(get("/api/tasks/?page=1&page_size=20", True))
             unified = json.loads(get("/api/operations/tasks?page=1&page_size=1", True))
             platforms = json.loads(get("/api/operations/platform-readiness", True))
+            storage = json.loads(get("/api/operations/storage-audit?max_records=100&max_files=100", True))
             previewable = next((item for item in tasks.get("items", []) if item.get("local_preview_available")), None)
             if previewable:
                 get(f"/api/tasks/{previewable.get('id')}/preview", True)
@@ -475,7 +478,34 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                 raise RuntimeError("cross-platform operations payload is invalid")
             if len(platforms["items"]) < 6:
                 raise RuntimeError("platform readiness matrix is incomplete")
-        print("Smoke checks OK: BT Panel runtime, Xiaohongshu downloader, home, docs, unified tasks, platform readiness, authors, media preview when available")
+            if storage.get("read_only") is not True:
+                raise RuntimeError("storage audit did not preserve read-only semantics")
+            for platform in platforms["items"]:
+                platform_id = platform["platform"]
+                page = json.loads(get(
+                    f"/api/operations/tasks?platform={platform_id}&status=completed&page=1&page_size=20",
+                    True,
+                ))
+                item = next((row for row in page.get("items", []) if row.get("preview_count")), None)
+                if not item:
+                    pending_platforms.append(platform_id)
+                    continue
+                if item.get("preview_endpoint"):
+                    get("/api" + item["preview_endpoint"], True)
+                elif item.get("media_endpoint"):
+                    assets = json.loads(get("/api" + item["media_endpoint"], True))
+                    if not assets:
+                        raise RuntimeError(f"{platform_id} completed task has no media assets")
+                    get(assets[0]["preview_url"], True)
+                if item.get("stats_endpoint"):
+                    json.loads(get("/api" + item["stats_endpoint"], True))
+                verified_platforms.append(platform_id)
+        print(
+            "Smoke checks OK: BT Panel runtime, home, docs, unified tasks, platform readiness, "
+            "storage audit and current-code media preview; "
+            f"verified platforms={','.join(verified_platforms) or 'none'}; "
+            f"awaiting first successful task={','.join(pending_platforms) or 'none'}"
+        )
         raise SystemExit(0)
     except Exception as exc:
         last_error = exc

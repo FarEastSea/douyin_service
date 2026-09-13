@@ -500,6 +500,29 @@ class PlatformMediaAsset(Base):
     task = relationship("PlatformDownloadTask", back_populates="media_assets")
 
 
+class MediaStatsSnapshot(Base):
+    """X 与通用平台媒体的互动统计快照。"""
+
+    __tablename__ = "media_stats_snapshots"
+    __table_args__ = (
+        Index(
+            "idx_media_stats_asset_observed",
+            "platform", "asset_kind", "asset_id", "observed_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    asset_kind = Column(String(16), nullable=False)
+    asset_id = Column(Integer, nullable=False)
+    view_count = Column(BigInteger)
+    like_count = Column(BigInteger)
+    comment_count = Column(BigInteger)
+    share_count = Column(BigInteger)
+    observed_at = Column(DateTime, server_default=func.now(), nullable=False)
+    source = Column(String(32), default="download", nullable=False)
+
+
 class PlatformAuthor(Base):
     """通用平台作者及订阅状态；不复用抖音专用 sec_uid 字段。"""
 
