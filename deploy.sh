@@ -505,6 +505,63 @@ cleanup_legacy_release_layout() {
     fi
 }
 
+reconcile_published_worktree_changes() {
+    local previous_sha="$1"
+    local target_sha="$2"
+    local matched_sha=""
+    local candidate_sha=""
+    local backup_dir=""
+    local backup_name=""
+    local -a dirty_paths=()
+
+    if git diff --quiet && git diff --cached --quiet; then
+        return 0
+    fi
+
+    echo "Tracked files contain local changes:" >&2
+    git status --short --untracked-files=no >&2
+
+    if ! git diff --cached --quiet; then
+        echo "Deploy aborted: staged service-root changes require manual review." >&2
+        return 1
+    fi
+    if ! git merge-base --is-ancestor "$previous_sha" "$target_sha"; then
+        echo "Deploy aborted: target commit is not a descendant of the deployed commit." >&2
+        return 1
+    fi
+
+    mapfile -d '' dirty_paths < <(git diff --name-only -z)
+    if [ "${#dirty_paths[@]}" -eq 0 ]; then
+        echo "Deploy aborted: unable to classify the tracked service-root changes." >&2
+        return 1
+    fi
+
+    while IFS= read -r candidate_sha; do
+        if git diff --quiet "$candidate_sha" -- "${dirty_paths[@]}"; then
+            matched_sha="$candidate_sha"
+            break
+        fi
+    done < <(git rev-list --reverse --ancestry-path "${previous_sha}..${target_sha}")
+
+    if [ -z "$matched_sha" ]; then
+        echo "Deploy aborted: tracked changes do not match a published commit on the deployment path." >&2
+        return 1
+    fi
+
+    backup_dir="$SERVICE_ROOT/.runtime/deploy-recovery"
+    backup_name="$(date -u +%Y%m%dT%H%M%SZ)-${previous_sha:0:12}-to-${matched_sha:0:12}"
+    mkdir -p "$backup_dir"
+    git status --short --untracked-files=no > "$backup_dir/${backup_name}.status"
+    git diff --binary "$previous_sha" -- "${dirty_paths[@]}" > "$backup_dir/${backup_name}.patch"
+
+    echo "Local changes exactly match published commit ${matched_sha}; preserving an audit patch and cleaning the old worktree."
+    git restore --source="$previous_sha" --worktree -- "${dirty_paths[@]}"
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "Deploy aborted: the service root is still dirty after published-change reconciliation." >&2
+        return 1
+    fi
+}
+
 rollback() {
     local exit_code=$?
     trap - ERR
@@ -529,11 +586,6 @@ trap rollback ERR
 validate_layout
 mkdir -p "$SERVICE_ROOT/logs"
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "Deploy aborted: tracked files contain local changes in the service root." >&2
-    exit 1
-fi
-
 echo "Preparing ${PROJECT_NAME} deployment for BT Panel..."
 PREVIOUS_SHA="$(git rev-parse HEAD)"
 git fetch origin "$BRANCH"
@@ -544,6 +596,7 @@ if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
     echo "Deploy failed: target commit ${TARGET_SHA} is unavailable." >&2
     exit 1
 fi
+reconcile_published_worktree_changes "$PREVIOUS_SHA" "$TARGET_SHA"
 
 prepare_candidate
 preflight
