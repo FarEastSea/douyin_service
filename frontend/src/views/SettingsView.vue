@@ -16,8 +16,9 @@ const readiness = ref<any>({ components: {} })
 const platformReadiness = ref<any>({ items: [] }), storageAudit = ref<any>(null)
 const storageAuditState = ref<any>({ status: 'idle', progress: {} })
 const lastStorageRepair = ref<any>(null)
+const storageRepairAllState = ref<any>({ status: 'idle', progress: {} })
 const platformAuditBusy = ref(false), storageAuditBusy = ref(false)
-const storageRepairBusy = ref(false), storageRepairPlan = ref<any>(null)
+const storageRepairBusy = ref(false), storageRepairAllBusy = ref(false), storageRepairPlan = ref<any>(null)
 const allFields = ref<any[]>([]), allValues = ref<any>({}), timer = ref<number>(), storageAuditTimer = ref<number>()
 const secretValues = ref<Record<string, string>>({})
 const updateInfo = ref<any>({}), diagnostic = ref<any>(null), updateBusy = ref(false)
@@ -42,6 +43,11 @@ const storageRepairTargets = computed(() => {
   ].slice(0, 200)
 })
 const eligibleRepairTargets = computed(() => (storageRepairPlan.value?.items || []).filter((item: any) => item.eligible).map((item: any) => ({ issue_type: item.issue_type, record_kind: item.record_kind, record_id: item.record_id, path: item.path })))
+const storageIssueCount = computed(() => {
+  const counts = storageAudit.value?.issue_counts
+  if (!counts) return storageRepairTargets.value.length
+  return Object.values(counts).reduce((total: number, value: any) => total + Number(value || 0), 0)
+})
 const managedPlatformCredentials = [
   { id: 'tiktok', name: 'TikTok', cookieKey: 'TIKTOK_COOKIE', fileKey: 'TIKTOK_COOKIE_FILE' },
   { id: 'weibo', name: '微博', cookieKey: 'WEIBO_COOKIE', fileKey: 'WEIBO_COOKIE_FILE' },
@@ -85,16 +91,23 @@ function stopStorageAuditPolling() { if (storageAuditTimer.value != null) { wind
 function startStorageAuditPolling() { if (storageAuditTimer.value == null) storageAuditTimer.value = window.setInterval(() => refreshStorageAudit(true), 2000) }
 async function refreshStorageAudit(silent = false) {
   const previousStatus = storageAuditState.value?.status
+  const previousRepairAllStatus = storageRepairAllState.value?.status
   try {
     const state = await api<any>('/operations/storage-audit')
     storageAuditState.value = state
     lastStorageRepair.value = state.last_repair || null
+    storageRepairAllState.value = state.repair_all || { status: 'idle', progress: {} }
     storageAuditBusy.value = ['queued', 'running'].includes(state.status)
+    storageRepairAllBusy.value = ['queued', 'running'].includes(storageRepairAllState.value.status)
     if (state.result) storageAudit.value = state.result
-    if (storageAuditBusy.value) startStorageAuditPolling()
+    if (storageAuditBusy.value || storageRepairAllBusy.value) startStorageAuditPolling()
     else stopStorageAuditPolling()
     if (state.status === 'completed' && previousStatus && previousStatus !== 'completed' && previousStatus !== 'idle') store.notify('存储巡检完成')
     if (state.status === 'failed' && previousStatus !== 'failed' && !silent) store.notify(state.error || '存储巡检失败', 'error')
+    if (storageRepairAllState.value.status === 'completed' && ['queued', 'running'].includes(previousRepairAllStatus)) {
+      store.notify(`存储全部维护完成：已处理 ${storageRepairAllState.value.result?.applied || 0} 项`)
+    }
+    if (storageRepairAllState.value.status === 'failed' && previousRepairAllStatus !== 'failed' && !silent) store.notify(storageRepairAllState.value.error || '存储全部维护失败', 'error')
   } catch (error: any) {
     storageAuditBusy.value = false
     stopStorageAuditPolling()
@@ -130,6 +143,20 @@ async function applyStorageRepair() {
     await loadStorageAudit()
   } catch (error: any) { store.notify(error.message || '执行存储维护失败', 'error') }
   finally { storageRepairBusy.value = false }
+}
+async function applyAllStorageRepairs() {
+  const count = storageIssueCount.value
+  if (!count || !confirm(`确认在后台处理本次扫描发现的全部 ${count} 项问题？系统会按每批 200 项重新校验并提交；文件只会移动到可恢复隔离区，不会直接删除。`)) return
+  storageRepairAllBusy.value = true
+  storageRepairPlan.value = null
+  try {
+    storageRepairAllState.value = await api<any>('/operations/storage-repair-all', { method: 'POST' })
+    store.notify('存储全部维护已进入后台队列，可以离开页面')
+    startStorageAuditPolling()
+  } catch (error: any) {
+    storageRepairAllBusy.value = false
+    store.notify(error.message || '提交存储全部维护失败', 'error')
+  }
 }
 async function loadUpdateInfo() { updateInfo.value = await api<any>('/update/info') }
 async function init() {
@@ -237,16 +264,16 @@ onMounted(init); onBeforeUnmount(() => { clearInterval(timer.value); stopStorage
     <div v-else-if="tab === 'process'" class="settings-panel"><header><Server /><div><h3>服务进程</h3><p>管理 Celery Worker 与定时调度器</p></div><button class="btn ghost" @click="loadReadiness"><RefreshCw :size="15" />检查依赖</button></header><div class="readiness-grid"><article v-for="(component, name) in readiness.components" :key="name" :data-ready="component.ok"><span class="health-dot" :class="{ online: component.ok }" /><div><strong>{{ readinessLabel(String(name)) }}</strong><small>{{ component.message }}</small></div></article></div><div class="process-grid"><article v-for="target in ['worker','beat']" :key="target"><div><span class="health-dot" :class="{ online: process[target]?.running }" /><strong>{{ target === 'worker' ? '下载 Worker' : '定时调度 Beat' }}</strong></div><p>{{ process[target]?.running ? `运行中 · PID ${process[target]?.pid || '—'}` : '当前已停止' }}</p><footer><button class="btn ghost" @click="processAction(target as any, 'start')"><Play :size="15" />启动</button><button class="btn ghost" @click="processAction(target as any, 'stop')"><Square :size="15" />停止</button></footer></article></div></div>
 
     <div v-else-if="tab === 'operations'" class="settings-panel operations-panel">
-      <header><ShieldCheck /><div><h3>平台验收与存储维护</h3><p>真实成功记录必须同时通过本地文件核验；存储处理采用可恢复隔离</p></div><div class="header-actions"><button class="btn ghost" :disabled="platformAuditBusy" @click="loadPlatformReadiness"><RefreshCw :size="15" />{{ platformAuditBusy ? '检查中…' : '检查平台' }}</button><button class="btn primary" :disabled="storageAuditBusy" @click="loadStorageAudit"><HardDrive :size="15" />{{ storageAuditBusy ? '后台扫描中…' : '扫描存储' }}</button></div></header>
+      <header><ShieldCheck /><div><h3>平台验收与存储维护</h3><p>真实成功记录必须同时通过本地文件核验；存储处理采用可恢复隔离</p></div><div class="header-actions"><button class="btn ghost" :disabled="platformAuditBusy" @click="loadPlatformReadiness"><RefreshCw :size="15" />{{ platformAuditBusy ? '检查中…' : '检查平台' }}</button><button class="btn primary" :disabled="storageAuditBusy || storageRepairAllBusy" @click="loadStorageAudit"><HardDrive :size="15" />{{ storageAuditBusy ? '后台扫描中…' : storageRepairAllBusy ? '全部处理中…' : '扫描存储' }}</button></div></header>
       <div class="platform-revision" v-if="platformReadiness.revision">当前运行版本：{{ String(platformReadiness.revision).slice(0, 12) }}</div>
       <div class="platform-audit-grid"><article v-for="item in platformReadiness.items" :key="item.platform" :data-status="item.status" :data-validation="item.external_validation_complete ? 'complete' : item.external_tested ? 'partial' : 'none'"><div class="account-health"><strong>{{ item.name }}</strong><span>{{ item.status === 'ready' ? '本地就绪' : item.status === 'degraded' ? '可用但待完善' : '阻塞' }}</span></div><p>{{ item.engine }} · {{ item.supported_sources.map(sourceLabel).join(' / ') || '未开放下载' }}</p><small>Cookie：{{ item.cookie_configured ? '已配置' : '未配置' }} · FFmpeg：{{ item.ffmpeg_ready ? '可用' : '未安装' }} · 目录：{{ item.download_root.writable ? '可写' : '不可写' }}</small><ul v-if="item.blockers.length || item.warnings.length"><li v-for="message in [...item.blockers, ...item.warnings]" :key="message">{{ message }}</li></ul><div class="validation-evidence"><strong>{{ item.external_validation_complete ? '真实任务与本地媒体均已核验' : item.external_tested ? '已有记录，仍需补齐或修复媒体' : '尚无真实成功记录' }}</strong><span v-if="item.validated_sources?.length">已验证：{{ item.validated_sources.map(sourceLabel).join('、') }} · {{ item.successful_task_count }} 个任务</span><span v-if="item.missing_validation?.length">待验证：{{ item.missing_validation.map(sourceLabel).join('、') }}</span><time>最近成功：{{ displayDateTime(item.last_external_success_at) }}</time></div></article></div>
       <div class="storage-report">
-        <div class="storage-report-header"><div><strong>存储巡检与可恢复维护</strong><span v-if="storageAuditBusy">{{ storageAuditState.phase === 'files' ? '正在扫描文件' : '正在核对数据库记录' }} · 已处理 {{ storageAuditState.progress?.scanned_records || 0 }} 条记录、{{ storageAuditState.progress?.scanned_files || 0 }} 个文件；离开页面后仍会继续</span><span v-else-if="storageAudit">已扫描 {{ storageAudit.scanned_records }} 条记录、{{ storageAudit.scanned_files }} 个文件 · {{ displayDateTime(storageAudit.checked_at) }}</span><span v-else-if="storageAuditState.status === 'failed'">上次扫描失败：{{ storageAuditState.error }}</span><span v-else>点击“扫描存储”后显示结果；任务在后台执行，刷新页面不会丢失</span><span v-if="lastStorageRepair">上次处理：{{ displayDateTime(lastStorageRepair.applied_at) }} · 成功 {{ lastStorageRepair.applied }} 项（回填 {{ lastStorageRepair.relinked }}、隔离 {{ lastStorageRepair.moved }}、标记任务 {{ lastStorageRepair.marked_tasks }}）</span></div><div class="header-actions" v-if="storageAudit"><button class="btn ghost compact" :disabled="storageRepairBusy || !storageRepairTargets.length" @click="previewStorageRepair">{{ storageRepairBusy ? '核验中…' : '预演当前批次' }}</button><button v-if="storageRepairPlan" class="btn primary compact" :disabled="storageRepairBusy || !eligibleRepairTargets.length" @click="applyStorageRepair">确认处理当前批次 {{ eligibleRepairTargets.length }} 项</button></div></div>
+        <div class="storage-report-header"><div><strong>存储巡检与可恢复维护</strong><span v-if="storageRepairAllBusy">后台全部维护：{{ storageRepairAllState.phase === 'scanning' ? `正在扫描 ${storageRepairAllState.progress?.scanned_records || 0} 条记录、${storageRepairAllState.progress?.scanned_files || 0} 个文件` : storageRepairAllState.phase === 'verifying' ? `已处理 ${storageRepairAllState.progress?.applied || 0} 项，正在重新扫描确认剩余问题` : `已处理 ${storageRepairAllState.progress?.applied || 0}/${storageRepairAllState.progress?.planned || 0} 项，共 ${storageRepairAllState.progress?.batches || 0} 批` }}</span><span v-else-if="storageAuditBusy">{{ storageAuditState.phase === 'files' ? '正在扫描文件' : '正在核对数据库记录' }} · 已处理 {{ storageAuditState.progress?.scanned_records || 0 }} 条记录、{{ storageAuditState.progress?.scanned_files || 0 }} 个文件；离开页面后仍会继续</span><span v-else-if="storageAudit">已扫描 {{ storageAudit.scanned_records }} 条记录、{{ storageAudit.scanned_files }} 个文件 · {{ displayDateTime(storageAudit.checked_at) }}</span><span v-else-if="storageAuditState.status === 'failed'">上次扫描失败：{{ storageAuditState.error }}</span><span v-else>点击“扫描存储”后显示结果；任务在后台执行，刷新页面不会丢失</span><span v-if="lastStorageRepair">上次处理：{{ displayDateTime(lastStorageRepair.applied_at) }} · 成功 {{ lastStorageRepair.applied }} 项（回填 {{ lastStorageRepair.relinked }}、隔离 {{ lastStorageRepair.moved }}、标记任务 {{ lastStorageRepair.marked_tasks }}）</span></div><div class="header-actions" v-if="storageAudit"><button class="btn ghost compact" :disabled="storageRepairBusy || storageRepairAllBusy || !storageRepairTargets.length" @click="previewStorageRepair">{{ storageRepairBusy ? '核验中…' : '预演当前批次' }}</button><button v-if="storageRepairPlan" class="btn primary compact" :disabled="storageRepairBusy || storageRepairAllBusy || !eligibleRepairTargets.length" @click="applyStorageRepair">确认处理当前批次 {{ eligibleRepairTargets.length }} 项</button><button class="btn primary compact" :disabled="storageRepairBusy || storageRepairAllBusy || !storageIssueCount" @click="applyAllStorageRepairs">后台处理全部 {{ storageIssueCount }} 项</button></div></div>
         <template v-if="storageAudit">
           <div class="storage-metrics"><article><b>{{ storageAudit.disk.used_percent }}%</b><span>磁盘已用</span></article><article><b>{{ storageAudit.issue_counts?.relinkable_records ?? storageAudit.relinkable_records?.length ?? 0 }}</b><span>可修复旧路径</span></article><article><b>{{ storageAudit.issue_counts?.missing_records ?? storageAudit.missing_records.length }}</b><span>记录缺文件</span></article><article><b>{{ storageAudit.issue_counts?.partial_files ?? storageAudit.partial_files.length }}</b><span>陈旧临时文件</span></article><article><b>{{ storageAudit.issue_counts?.zero_byte_files ?? storageAudit.zero_byte_files.length }}</b><span>空文件</span></article><article><b>{{ storageAudit.issue_counts?.orphan_files ?? storageAudit.orphan_files.length }}</b><span>未关联媒体</span></article></div>
           <details v-if="storageAudit.relinkable_records?.length || storageAudit.missing_records.length || storageAudit.partial_files.length || storageAudit.zero_byte_files.length || storageAudit.orphan_files.length"><summary>查看问题样本</summary><pre>{{ JSON.stringify({ relinkable_records: storageAudit.relinkable_records, missing_records: storageAudit.missing_records, zero_byte_files: storageAudit.zero_byte_files, partial_files: storageAudit.partial_files, orphan_files: storageAudit.orphan_files }, null, 2) }}</pre></details>
           <div v-if="storageRepairPlan" class="repair-plan"><strong>预演结果：{{ storageRepairPlan.eligible }}/{{ storageRepairPlan.planned }} 项可处理</strong><span>旧根目录记录只回填到已找到的现有文件；异常文件只移动到 .quarantine，不会直接删除；真正缺失的媒体任务会标记为失败，可从任务页重试。</span><details v-if="storageRepairPlan.items.some((item:any) => !item.eligible)"><summary>查看跳过原因</summary><ul><li v-for="item in storageRepairPlan.items.filter((entry:any) => !entry.eligible)" :key="`${item.issue_type}-${item.path}`">{{ item.path }}：{{ item.reason }}</li></ul></details></div>
-          <small>界面最多展示 {{ storageAudit.sample_limit || 200 }} 个问题样本，并且每次最多处理 200 项；总数大于样本数时需分批处理。{{ storageAudit.note }}<template v-if="storageAudit.records_truncated || storageAudit.files_truncated"> 本次达到安全扫描上限，显示的总数也只是已扫描范围内的数量；禁止处理未完整核验的孤立文件。</template></small>
+          <small>界面最多展示 {{ storageAudit.sample_limit || 200 }} 个问题样本；“后台处理全部”会重新扫描并在服务端按每批 200 项自动处理，无需反复点击。{{ storageAudit.note }}<template v-if="storageAudit.records_truncated || storageAudit.files_truncated"> 本次达到安全扫描上限，显示的总数只是已扫描范围内的数量；后台全部维护也只处理重新扫描确认的问题。</template></small>
         </template>
       </div>
     </div>

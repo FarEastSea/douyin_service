@@ -187,6 +187,23 @@ def get_sync_engine() -> Engine:
     return selected_engine
 
 
+def create_isolated_async_engine() -> AsyncEngine:
+    """Create an event-loop-local async engine for one Celery task."""
+    current, _ = _current_engine_config()
+    return create_async_engine(
+        _build_async_url(current.effective_database_url),
+        echo=current.DEBUG,
+        future=True,
+        pool_size=5,
+        max_overflow=5,
+        pool_pre_ping=True,
+        connect_args=_postgresql_connect_args(
+            current.effective_database_url,
+            asynchronous=True,
+        ),
+    )
+
+
 def dispose_inherited_sync_engine() -> None:
     """在 fork 子进程初始化时丢弃继承的同步连接池。"""
     global _sync_engine, _sync_engine_key, _sync_engine_pid, _sync_failed_key, _sync_retry_after

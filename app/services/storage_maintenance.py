@@ -272,7 +272,7 @@ async def apply_storage_repair_plan(
 ) -> dict[str, Any]:
     plan = await build_storage_repair_plan(db, root, targets)
     eligible = [item for item in plan if item["eligible"]]
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     quarantine_root = root / ".quarantine" / "storage-maintenance" / timestamp
     moved: list[dict[str, str]] = []
     relinked: list[dict[str, Any]] = []

@@ -38,6 +38,7 @@ def _scan_storage_files(
     max_files: int,
     allow_orphans: bool,
     progress: ProgressCallback | None,
+    sample_limit: int,
 ) -> tuple[list[dict[str, Any]], list[str], int, int, int]:
     partials: list[dict[str, Any]] = []
     orphan_files: list[str] = []
@@ -67,7 +68,7 @@ def _scan_storage_files(
                 if age_seconds < 6 * 3600:
                     continue
                 partial_count += 1
-                if len(partials) < 200:
+                if len(partials) < sample_limit:
                     partials.append({
                         "path": resolved,
                         "size_bytes": stat.st_size,
@@ -83,7 +84,7 @@ def _scan_storage_files(
                 and resolved not in known
             ):
                 orphan_count += 1
-                if len(orphan_files) < 200:
+                if len(orphan_files) < sample_limit:
                     orphan_files.append(resolved)
         except OSError:
             continue
@@ -96,6 +97,7 @@ def run_storage_audit(
     *,
     max_records: int = 200_000,
     max_files: int = 50_000,
+    sample_limit: int = 200,
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Scan registered media and disk files without mutating either source."""
@@ -147,7 +149,7 @@ def run_storage_audit(
                     relinkable_count += 1
                     rebased_path = str(rebased)
                     known.add(rebased_path)
-                    if len(relinkable) + len(missing) < 200:
+                    if len(relinkable) + len(missing) < sample_limit:
                         relinkable.append({
                             "kind": kind,
                             "id": int(record_id),
@@ -156,11 +158,11 @@ def run_storage_audit(
                         })
                 else:
                     missing_count += 1
-                    if len(relinkable) + len(missing) < 200:
+                    if len(relinkable) + len(missing) < sample_limit:
                         missing.append({"kind": kind, "id": int(record_id), "path": normalized})
             elif size == 0:
                 zero_byte_count += 1
-                if len(zero_byte) < 200:
+                if len(zero_byte) < sample_limit:
                     zero_byte.append({"kind": kind, "id": int(record_id), "path": normalized})
             if progress and scanned_records % 1000 == 0:
                 progress({
@@ -187,7 +189,7 @@ def run_storage_audit(
             "scanned_files": 0,
         })
     partials, orphan_files, scanned_files, partial_count, orphan_count = _scan_storage_files(
-        root, known, max_files, not records_truncated, progress,
+        root, known, max_files, not records_truncated, progress, sample_limit,
     )
     disk_target = root
     while not disk_target.exists() and disk_target != disk_target.parent:
@@ -203,7 +205,7 @@ def run_storage_audit(
         "records_truncated": records_truncated,
         "files_truncated": scanned_files >= max_files,
         "orphan_scan_reliable": not records_truncated,
-        "sample_limit": 200,
+        "sample_limit": sample_limit,
         "issue_counts": {
             "relinkable_records": relinkable_count,
             "missing_records": missing_count,
@@ -224,3 +226,38 @@ def run_storage_audit(
         },
         "note": "结果仅用于核对；旧根目录记录可在预演确认后回填，文件不会移动。其他问题也不会自动处理。",
     }
+
+
+def storage_repair_targets(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert one trusted audit result into revalidated maintenance targets."""
+    targets: list[dict[str, Any]] = []
+    for item in report.get("relinkable_records") or []:
+        targets.append({
+            "issue_type": "stale_record_path",
+            "record_kind": item.get("kind"),
+            "record_id": item.get("id"),
+            "path": item.get("path"),
+        })
+    for item in report.get("missing_records") or []:
+        targets.append({
+            "issue_type": "missing_record",
+            "record_kind": item.get("kind"),
+            "record_id": item.get("id"),
+            "path": item.get("path"),
+        })
+    for item in report.get("zero_byte_files") or []:
+        targets.append({
+            "issue_type": "zero_byte_file",
+            "record_kind": item.get("kind"),
+            "record_id": item.get("id"),
+            "path": item.get("path"),
+        })
+    targets.extend(
+        {"issue_type": "partial_file", "path": item.get("path")}
+        for item in report.get("partial_files") or []
+    )
+    targets.extend(
+        {"issue_type": "orphan_file", "path": path}
+        for path in report.get("orphan_files") or []
+    )
+    return targets

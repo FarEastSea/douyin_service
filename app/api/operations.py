@@ -43,7 +43,7 @@ from app.services.storage_maintenance import (
     apply_storage_repair_plan,
     build_storage_repair_plan,
 )
-from app.tasks.operations_tasks import run_storage_audit_task
+from app.tasks.operations_tasks import run_storage_audit_task, run_storage_repair_all_task
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
@@ -770,6 +770,28 @@ async def storage_audit_status():
             if state.get("job_id"):
                 await asyncio.to_thread(redis_client.release_storage_audit_lock, state["job_id"])
     state["last_repair"] = await asyncio.to_thread(redis_client.get_storage_repair_state)
+    repair_all = await asyncio.to_thread(redis_client.get_storage_repair_all_state)
+    if repair_all.get("status") in {"queued", "running"}:
+        try:
+            repair_updated_at = datetime.fromisoformat(str(repair_all.get("updated_at") or ""))
+            if repair_updated_at.tzinfo is None:
+                repair_updated_at = repair_updated_at.replace(tzinfo=timezone.utc)
+            repair_stale = (datetime.now(timezone.utc) - repair_updated_at).total_seconds() > 7500
+        except (TypeError, ValueError):
+            repair_stale = False
+        if repair_stale:
+            repair_all.update({
+                "status": "failed",
+                "phase": "failed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "error": "存储全部维护超过任务硬时限且无进度更新，可以重新提交。",
+            })
+            await asyncio.to_thread(redis_client.set_storage_repair_all_state, repair_all)
+            if repair_all.get("job_id"):
+                await asyncio.to_thread(
+                    redis_client.release_storage_repair_all_lock, repair_all["job_id"],
+                )
+    state["repair_all"] = repair_all
     return state
 
 
@@ -779,6 +801,9 @@ async def start_storage_audit(
     max_files: int = Query(50_000, ge=100, le=200_000),
 ):
     """Queue one bounded read-only scan; duplicate clicks reuse the active job."""
+    repair_all = await asyncio.to_thread(redis_client.get_storage_repair_all_state)
+    if repair_all.get("status") in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="存储全部维护正在后台执行，请等待完成")
     current = await asyncio.to_thread(redis_client.get_storage_audit_state)
     if current.get("status") in {"queued", "running"}:
         try:
@@ -843,12 +868,75 @@ async def start_storage_audit(
         raise HTTPException(status_code=503, detail=state["error"]) from exc
 
 
+@router.post("/storage-repair-all")
+async def storage_repair_all(
+    max_records: int = Query(200_000, ge=100, le=200_000),
+    max_files: int = Query(50_000, ge=100, le=200_000),
+):
+    """Queue one full maintenance pass; every item is revalidated in 200-item batches."""
+    current = await asyncio.to_thread(redis_client.get_storage_repair_all_state)
+    if current.get("status") in {"queued", "running"}:
+        return current
+    audit = await asyncio.to_thread(redis_client.get_storage_audit_state)
+    if audit.get("status") in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="存储巡检正在执行，请等待完成后再处理全部")
+
+    job_id = uuid4().hex
+    acquired = await asyncio.to_thread(redis_client.acquire_storage_repair_all_lock, job_id)
+    if not acquired:
+        state = await asyncio.to_thread(redis_client.get_storage_repair_all_state)
+        if state.get("status") in {"queued", "running"}:
+            return state
+        raise HTTPException(status_code=409, detail="存储全部维护正在启动，请稍后刷新")
+
+    now = datetime.now(timezone.utc).isoformat()
+    state = {
+        "job_id": job_id,
+        "status": "queued",
+        "phase": "queued",
+        "started_at": now,
+        "updated_at": now,
+        "progress": {"scanned_records": 0, "scanned_files": 0},
+        "result": None,
+        "error": None,
+    }
+    await asyncio.to_thread(redis_client.set_storage_repair_all_state, state)
+    try:
+        task = await asyncio.to_thread(
+            run_storage_repair_all_task.apply_async,
+            args=(job_id, max_records, max_files),
+        )
+        state["celery_task_id"] = task.id
+        await asyncio.to_thread(redis_client.set_storage_repair_all_state, state)
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "warning", "storage-maintenance", "存储全部维护已进入后台队列",
+            f"扫描上限：记录={max_records}，文件={max_files}；每批重新校验并处理 200 项",
+            event_code="storage_repair_all_queued",
+            correlation_id=job_id,
+        )
+        return state
+    except Exception as exc:
+        await asyncio.to_thread(redis_client.release_storage_repair_all_lock, job_id)
+        state.update({
+            "status": "failed",
+            "phase": "failed",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "error": f"后台任务提交失败：{type(exc).__name__}: {str(exc)[:500]}",
+        })
+        await asyncio.to_thread(redis_client.set_storage_repair_all_state, state)
+        raise HTTPException(status_code=503, detail=state["error"]) from exc
+
+
 @router.post("/storage-repair")
 async def storage_repair(
     request: StorageRepairRequest,
     db: AsyncSession = Depends(get_async_db),
 ):
     """先预演、再回填旧路径或执行可恢复隔离。"""
+    repair_all = await asyncio.to_thread(redis_client.get_storage_repair_all_state)
+    if repair_all.get("status") in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="存储全部维护正在后台执行，请等待完成")
     current = await asyncio.to_thread(settings.snapshot)
     root = Path(current.DOWNLOAD_ROOT).expanduser().resolve(strict=False)
     if not root.is_dir():
