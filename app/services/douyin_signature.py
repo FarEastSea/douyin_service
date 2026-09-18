@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
+import re
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+from app.services.douyin_cookie import get_cookie_value
 from app.services.vendor.douyin_abogus import ABogus, BrowserFingerprintGenerator
+
+
+DOUYIN_SIGNATURE_CONTRACT = "web-post-a_bogus-v2"
 
 
 def douyin_browser_name(user_agent: str) -> str:
@@ -17,6 +22,87 @@ def douyin_browser_name(user_agent: str) -> str:
     if "Safari/" in normalized and "Chrome/" not in normalized:
         return "Safari"
     return "Chrome"
+
+
+def douyin_browser_version(user_agent: str) -> str:
+    """Extract the browser version that is actually bound to the saved User-Agent."""
+    normalized = str(user_agent or "")
+    browser = douyin_browser_name(normalized)
+    token = {"Edge": "Edg", "Firefox": "Firefox", "Safari": "Version"}.get(browser, "Chrome")
+    match = re.search(rf"{re.escape(token)}/([0-9.]+)", normalized)
+    return match.group(1) if match else "unknown"
+
+
+def build_douyin_user_post_url(
+    sec_user_id: str,
+    max_cursor: int,
+    count: int,
+    *,
+    cookie: str,
+    user_agent: str,
+) -> str:
+    """Build the full browser request contract before signing the user-post API."""
+    browser_name = douyin_browser_name(user_agent)
+    browser_version = douyin_browser_version(user_agent)
+    if browser_version == "unknown":
+        raise ValueError("保存的 User-Agent 无法识别浏览器版本，请复制浏览器的完整 User-Agent")
+    params = [
+        ("device_platform", "webapp"),
+        ("aid", "6383"),
+        ("channel", "channel_pc_web"),
+        ("sec_user_id", str(sec_user_id)),
+        ("max_cursor", str(max_cursor)),
+        ("locate_query", "false"),
+        ("show_live_replay_strategy", "1"),
+        ("need_time_list", "1"),
+        ("time_list_query", "0"),
+        ("whale_cut_token", ""),
+        ("cut_version", "1"),
+        ("count", str(count)),
+        ("publish_video_strategy_type", "2"),
+        ("from_user_page", "1"),
+        ("update_version_code", "170400"),
+        ("pc_client_type", "1"),
+        ("pc_libra_divert", "Windows"),
+        ("support_h265", "1"),
+        ("support_dash", "0"),
+        ("version_code", "290100"),
+        ("version_name", "29.1.0"),
+        ("cookie_enabled", "true"),
+        ("screen_width", "1920"),
+        ("screen_height", "1080"),
+        ("browser_language", "zh-CN"),
+        ("browser_platform", "Win32"),
+        ("browser_name", browser_name),
+        ("browser_version", browser_version),
+        ("browser_online", "true"),
+        ("engine_name", "Blink"),
+        ("engine_version", browser_version),
+        ("os_name", "Windows"),
+        ("os_version", "10"),
+        ("cpu_core_num", "12"),
+        ("device_memory", "8"),
+        ("platform", "PC"),
+        ("downlink", "10"),
+        ("effective_type", "4g"),
+        ("round_trip_time", "50"),
+    ]
+    if ms_token := get_cookie_value(cookie, "msToken"):
+        params.append(("msToken", ms_token))
+    return "https://www.douyin.com/aweme/v1/web/aweme/post/?" + urlencode(params)
+
+
+def douyin_signature_diagnostics(cookie: str, user_agent: str) -> dict[str, object]:
+    """Return a copy-safe request summary; never expose Cookie or identity values."""
+    return {
+        "contract": DOUYIN_SIGNATURE_CONTRACT,
+        "algorithm": "a_bogus",
+        "browser_name": douyin_browser_name(user_agent),
+        "browser_version": douyin_browser_version(user_agent),
+        "has_uifid": bool(get_cookie_value(cookie, "UIFID")),
+        "has_ms_token": bool(get_cookie_value(cookie, "msToken")),
+        "user_agent_configured": bool(str(user_agent or "").strip()),
+    }
 
 
 def add_douyin_api_signature(url: str, user_agent: str) -> str:

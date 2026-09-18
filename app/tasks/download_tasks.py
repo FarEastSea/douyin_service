@@ -1738,6 +1738,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "status": "failed",
                         "error_code": e.code,
                         "message": e.user_message,
+                        "action": e.action,
+                        "upstream_detail": e.detail,
+                        "http_status": e.status_code,
+                        "diagnostics": e.diagnostics,
                     })
                     if consecutive_signature_rejected >= REQUEST_FAILURE_STOP_THRESHOLD:
                         stopped_for_upstream = True
@@ -1745,7 +1749,16 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         risk_error_code = e.code
                         redis_client.append_activity_log(
                             "warning", "task", "连续多个作者的抖音请求签名被拒绝，本轮检查提前停止",
-                            f"连续失败={consecutive_signature_rejected}, 最近 author_id={author.id}",
+                            f"连续失败={consecutive_signature_rejected}, 最近 author_id={author.id}, "
+                            f"HTTP={e.status_code}, detail={e.detail[:500]}",
+                            event_code="douyin_signature_rejected",
+                            correlation_id=str(e.diagnostics.get("request_id") or ""),
+                            context={
+                                "author_id": author.id,
+                                "endpoint": e.diagnostics.get("endpoint", "unknown"),
+                                "attempts": e.diagnostics.get("attempts", 0),
+                                "contract": (e.diagnostics.get("request_context") or {}).get("contract", "unknown"),
+                            },
                         )
                         _notify_event(
                             "douyin_risk",
@@ -1757,7 +1770,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         break
                     redis_client.append_activity_log(
                         "info", "task", "单个作者的抖音请求签名被拒绝，继续检查其余作者",
-                        f"连续失败={consecutive_signature_rejected}/{REQUEST_FAILURE_STOP_THRESHOLD}, author_id={author.id}",
+                        f"连续失败={consecutive_signature_rejected}/{REQUEST_FAILURE_STOP_THRESHOLD}, "
+                        f"author_id={author.id}, HTTP={e.status_code}, request_id={e.diagnostics.get('request_id', '')}",
+                        event_code="douyin_signature_rejected_single",
+                        correlation_id=str(e.diagnostics.get("request_id") or ""),
                     )
                     if author_delay > 0:
                         time.sleep(author_delay)
@@ -1779,6 +1795,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "status": "failed",
                         "error_code": e.code,
                         "message": e.user_message,
+                        "action": e.action,
+                        "upstream_detail": e.detail,
+                        "http_status": e.status_code,
+                        "diagnostics": e.diagnostics,
                     })
                     redis_client.append_activity_log(
                         "warning", "task", "抖音请求前置条件未满足，本轮订阅检查立即停止",

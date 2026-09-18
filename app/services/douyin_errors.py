@@ -72,7 +72,7 @@ class DouyinRequestError(ValueError):
     """可被 API、Celery 和前端统一识别的抖音请求错误。"""
 
     def __init__(self, code: str, *, detail: str = "", status_code: Optional[int] = None,
-                 retry_after: int = 0) -> None:
+                 retry_after: int = 0, diagnostics: Optional[dict[str, Any]] = None) -> None:
         self.info = ERROR_INFO.get(code, ERROR_INFO["upstream_error"])
         self.code = self.info.code
         self.category = self.info.category
@@ -82,6 +82,7 @@ class DouyinRequestError(ValueError):
         self.detail = str(detail or "")[:1000]
         self.status_code = status_code
         self.retry_after = max(0, int(retry_after or 0))
+        self.diagnostics = dict(diagnostics or {})
         super().__init__(self.user_message)
 
     def as_dict(self) -> dict[str, Any]:
@@ -89,6 +90,7 @@ class DouyinRequestError(ValueError):
             "code": self.code, "category": self.category, "message": self.user_message,
             "action": self.action, "recoverable": self.recoverable,
             "retry_after": self.retry_after,
+            "diagnostics": self.diagnostics,
         }
 
 

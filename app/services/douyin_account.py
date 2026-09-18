@@ -21,6 +21,7 @@ from app.models.database import get_sync_db
 from app.models.models import DouyinAccountProfile, SystemConfig
 from app.services.douyin_cookie import get_cookie_value
 from app.services.douyin_errors import DouyinRequestError
+from app.services.douyin_signature import douyin_browser_name, douyin_browser_version
 
 
 DEFAULT_USER_AGENT = (
@@ -141,6 +142,10 @@ def _profile_payload(profile: DouyinAccountProfile | None) -> dict[str, Any]:
         "degraded": "异常",
         "isolated": "已隔离",
     }
+    try:
+        cookie = _decrypt(profile.encrypted_cookie)
+    except RuntimeError:
+        cookie = ""
     return {
         "configured": bool(profile.encrypted_cookie),
         "name": profile.name,
@@ -151,7 +156,10 @@ def _profile_payload(profile: DouyinAccountProfile | None) -> dict[str, Any]:
         "cookie_fingerprint": profile.cookie_fingerprint,
         "has_uifid": bool(profile.uifid_fingerprint),
         "uifid_fingerprint": profile.uifid_fingerprint,
+        "has_ms_token": bool(get_cookie_value(cookie, "msToken")),
         "user_agent": profile.user_agent,
+        "browser_name": douyin_browser_name(profile.user_agent),
+        "browser_version": douyin_browser_version(profile.user_agent),
         "proxy_enabled": bool(profile.proxy_enabled),
         "proxy_label": proxy_label,
         "consecutive_failures": int(profile.consecutive_failures or 0),

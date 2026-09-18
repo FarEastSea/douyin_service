@@ -71,9 +71,11 @@ def _escaped_ilike_pattern(value: str) -> str:
     return f"%{escaped}%"
 from app.core import redis_client
 from app.core.config import settings
+from app.core.revision import runtime_revision
 from app.core.runtime_config import get_runtime_config
 from app.services.work_manager import delete_author_hard
-from app.services.douyin_account import get_request_context
+from app.services.douyin_account import get_account_status, get_request_context
+from app.services.douyin_signature import douyin_signature_diagnostics
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -1133,4 +1135,111 @@ async def get_subscription_reports(
             "new_works": latest["new_works"],
         }
     return {"items": reports, "cycle": cycle}
+
+
+@router.get("/reports/subscriptions/diagnostic")
+async def get_subscription_diagnostic(db: AsyncSession = Depends(get_async_db)):
+    """Return a compact, secret-free bundle for diagnosing automatic updates."""
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    account = await get_account_status(db)
+    request_context: dict = {
+        "contract": "unavailable",
+        "has_uifid": bool(account.get("has_uifid")),
+        "has_ms_token": bool(account.get("has_ms_token")),
+        "browser_name": account.get("browser_name"),
+        "browser_version": account.get("browser_version"),
+    }
+    try:
+        context = await get_request_context(db)
+        request_context = douyin_signature_diagnostics(context.cookie, context.user_agent)
+        request_context["proxy_enabled"] = bool(context.proxy_url)
+    except DouyinRequestError as exc:
+        request_context["context_error"] = exc.code
+
+    report_rows = (await db.execute(
+        select(SubscriptionCheckReport)
+        .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
+        .limit(10)
+    )).scalars().all()
+    reports: list[dict] = []
+    for report in report_rows:
+        try:
+            details = json.loads(report.details_json or "[]")
+        except (TypeError, ValueError):
+            details = []
+        failures = []
+        for item in details:
+            if not isinstance(item, dict) or item.get("status") != "failed":
+                continue
+            diagnostics = item.get("diagnostics") if isinstance(item.get("diagnostics"), dict) else {}
+            failures.append({
+                "author_id": item.get("author_id"),
+                "nickname": item.get("nickname"),
+                "error_code": item.get("error_code"),
+                "message": item.get("message"),
+                "action": item.get("action"),
+                "http_status": item.get("http_status"),
+                "upstream_detail": redis_client.redact_sensitive_text(
+                    item.get("upstream_detail") or item.get("error") or ""
+                )[:500],
+                "diagnostics": diagnostics,
+            })
+        reports.append({
+            "id": report.id,
+            "celery_task_id": report.celery_task_id,
+            "trigger_type": report.trigger_type,
+            "status": report.status,
+            "summary": report.summary,
+            "checked_authors": report.checked_authors or 0,
+            "failed_authors": report.failed_authors or 0,
+            "remaining_authors": report.remaining_authors or 0,
+            "started_at": report.started_at.isoformat() if report.started_at else None,
+            "finished_at": report.finished_at.isoformat() if report.finished_at else None,
+            "failures": failures[:10],
+        })
+
+    activity = await asyncio.to_thread(redis_client.get_activity_logs, 0, 200)
+    relevant_logs = [{
+        **item,
+        "msg": redis_client.redact_sensitive_text(item.get("msg")),
+        "detail": redis_client.redact_sensitive_text(item.get("detail")),
+    }
+        for item in activity
+        if item.get("level") in {"warning", "error"}
+        and item.get("source") in {"task", "system", "storage-audit"}
+    ][:50]
+    runtime = await get_runtime_config(db)
+    risk = await asyncio.to_thread(redis_client.get_douyin_risk_state)
+    return {
+        "generated_at": generated_at,
+        "service_revision": runtime_revision() or "unknown",
+        "account": {
+            "status": account.get("status"),
+            "status_label": account.get("status_label"),
+            "cookie_fingerprint": account.get("cookie_fingerprint"),
+            "uifid_fingerprint": account.get("uifid_fingerprint"),
+            "has_uifid": account.get("has_uifid"),
+            "has_ms_token": account.get("has_ms_token"),
+            "last_success_at": account.get("last_success_at"),
+            "last_failure_at": account.get("last_failure_at"),
+            "last_failure_code": account.get("last_failure_code"),
+            "consecutive_failures": account.get("consecutive_failures"),
+        },
+        "request_context": request_context,
+        "risk_state": {
+            "active": bool(risk.get("active")),
+            "error_type": risk.get("error_type"),
+            "retry_after": risk.get("retry_after"),
+        },
+        "runtime": {
+            "auto_check_enabled": runtime.get("auto_check_enabled"),
+            "subscription_check_interval": runtime.get("subscription_check_interval"),
+            "douyin_request_delay": runtime.get("douyin_request_delay"),
+            "author_check_delay": runtime.get("author_check_delay"),
+            "subscription_max_pages": runtime.get("subscription_max_pages"),
+        },
+        "reports": reports,
+        "recent_warnings_and_errors": relevant_logs,
+        "privacy": "Cookie、UIFID、msToken、代理凭据和请求签名均未包含在此诊断中。",
+    }
 

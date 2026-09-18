@@ -468,7 +468,7 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
             tasks = json.loads(get("/api/tasks/?page=1&page_size=20", True))
             unified = json.loads(get("/api/operations/tasks?page=1&page_size=1", True))
             platforms = json.loads(get("/api/operations/platform-readiness", True))
-            storage = json.loads(get("/api/operations/storage-audit?max_records=100&max_files=100", True))
+            storage = json.loads(get("/api/operations/storage-audit", True))
             previewable = next((item for item in tasks.get("items", []) if item.get("local_preview_available")), None)
             if previewable:
                 get(f"/api/tasks/{previewable.get('id')}/preview", True)
@@ -478,7 +478,9 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                 raise RuntimeError("cross-platform operations payload is invalid")
             if len(platforms["items"]) < 6:
                 raise RuntimeError("platform readiness matrix is incomplete")
-            if storage.get("read_only") is not True:
+            if storage.get("status") not in {"idle", "queued", "running", "completed", "failed"}:
+                raise RuntimeError("storage audit status payload is invalid")
+            if storage.get("result") and storage["result"].get("read_only") is not True:
                 raise RuntimeError("storage audit did not preserve read-only semantics")
             for platform in platforms["items"]:
                 platform_id = platform["platform"]

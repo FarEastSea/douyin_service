@@ -8,6 +8,7 @@ Redis 客户端模块
 """
 
 import json
+import re
 from threading import RLock
 import time as _time
 from datetime import datetime
@@ -419,16 +420,48 @@ ACTIVITY_LOG_KEY = "douyin:activity_log"
 ACTIVITY_LOG_MAX = 500
 ACTIVITY_LOG_TTL = 7 * 24 * 3600
 
+_ACTIVITY_SECRET_PATTERNS = (
+    re.compile(r"(?i)(cookie)\s*[:=]\s*([^\r\n]+)"),
+    re.compile(r"(?i)(authorization|password|secret|proxy_url)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)(msToken|a_bogus|uifid|sessionid|sid_guard|passport_csrf_token|ttwid|odin_tt)=([^&;\s]+)"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+\-/=]+"),
+)
 
-def append_activity_log(level: str, source: str, message: str, detail: str = "") -> None:
-    """追加一条活动日志到 Redis（原子管道操作）"""
+
+def redact_sensitive_text(value: Any) -> str:
+    text = str(value or "")
+    for pattern in _ACTIVITY_SECRET_PATTERNS:
+        if pattern.pattern.lower().startswith("(?i)bearer"):
+            text = pattern.sub("Bearer [redacted]", text)
+        else:
+            text = pattern.sub(lambda match: f"{match.group(1)}=[redacted]", text)
+    return text
+
+
+def append_activity_log(
+    level: str,
+    source: str,
+    message: str,
+    detail: str = "",
+    *,
+    event_code: str = "",
+    correlation_id: str = "",
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    """追加一条脱敏活动日志；结构化字段用于复制诊断与事件关联。"""
     import time as _time
     entry = json.dumps({
         "ts": _time.time(),
         "level": level,
         "source": source,
-        "msg": message,
-        "detail": detail[:500] if detail else ""
+        "msg": redact_sensitive_text(message)[:500],
+        "detail": redact_sensitive_text(detail)[:2000] if detail else "",
+        "event_code": str(event_code or "")[:80],
+        "correlation_id": str(correlation_id or "")[:80],
+        "context": {
+            str(key)[:80]: redact_sensitive_text(value)[:500]
+            for key, value in (context or {}).items()
+        },
     }, ensure_ascii=False)
     pipe = redis_client.pipeline()
     pipe.lpush(ACTIVITY_LOG_KEY, entry)
@@ -452,6 +485,46 @@ def get_activity_logs(start: int = 0, count: int = 100) -> list:
 def clear_activity_logs() -> None:
     """清空活动日志"""
     redis_client.delete(ACTIVITY_LOG_KEY)
+
+
+# ============ 存储巡检任务状态 ============
+
+STORAGE_AUDIT_STATE_KEY = "douyin:operations:storage-audit:state"
+STORAGE_AUDIT_LOCK_KEY = "douyin:operations:storage-audit:lock"
+STORAGE_AUDIT_TTL = 7 * 24 * 3600
+
+
+def get_storage_audit_state() -> Dict[str, Any]:
+    raw = redis_client.get(STORAGE_AUDIT_STATE_KEY)
+    if not raw:
+        return {"status": "idle", "result": None}
+    try:
+        state = json.loads(raw)
+        return state if isinstance(state, dict) else {"status": "idle", "result": None}
+    except (TypeError, ValueError):
+        return {"status": "idle", "result": None}
+
+
+def set_storage_audit_state(state: Dict[str, Any]) -> None:
+    redis_client.set(
+        STORAGE_AUDIT_STATE_KEY,
+        json.dumps(state, ensure_ascii=False, default=str),
+        ex=STORAGE_AUDIT_TTL,
+    )
+
+
+def acquire_storage_audit_lock(job_id: str, ttl: int = 3600) -> bool:
+    return bool(redis_client.set(STORAGE_AUDIT_LOCK_KEY, job_id, nx=True, ex=ttl))
+
+
+def release_storage_audit_lock(job_id: str) -> None:
+    redis_client.eval(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then "
+        "return redis.call('del', KEYS[1]) else return 0 end",
+        1,
+        STORAGE_AUDIT_LOCK_KEY,
+        job_id,
+    )
 
 
 def get_activity_log_size() -> int:

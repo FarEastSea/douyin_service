@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Clock3, RefreshCw, Sparkles, Users, Zap } from '@lucide/vue'
+import { Clipboard, Clock3, RefreshCw, Sparkles, Users, Zap } from '@lucide/vue'
 import { api } from '../api'
 import { useAppStore } from '../stores/app'
 import { reportStatusLabel } from '../localization'
 
-const store = useAppStore(), reports = ref<any[]>([]), cycle = ref<any>({}), loading = ref(false), timer = ref<number>()
+const store = useAppStore(), reports = ref<any[]>([]), cycle = ref<any>({}), loading = ref(false), copying = ref(false), timer = ref<number>()
 const latest = computed(() => reports.value[0])
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -24,6 +24,15 @@ async function reconcile() {
   try { const result = await api<any>('/authors/reconcile-all', { method: 'POST' }); store.notify(result.message) }
   catch (error: any) { store.notify(error.message || '提交全量对账失败', 'error') }
 }
+async function copyDiagnostic() {
+  copying.value = true
+  try {
+    const diagnostic = await api<any>('/authors/reports/subscriptions/diagnostic')
+    await navigator.clipboard.writeText(JSON.stringify(diagnostic, null, 2))
+    store.notify('自动更新诊断已复制，敏感凭据已排除')
+  } catch (error: any) { store.notify(error.message || '复制诊断失败', 'error') }
+  finally { copying.value = false }
+}
 function triggerLabel(trigger: string) {
   if (trigger === 'reconcile') return '全量对账'
   return trigger === 'manual' ? '手动触发' : '自动调度'
@@ -34,10 +43,10 @@ onBeforeUnmount(() => clearInterval(timer.value))
 
 <template>
   <section class="workspace-card update-workspace">
-    <header class="workspace-header"><div><p class="eyebrow">AUTOMATION</p><h2>自动更新中心</h2><span>查看订阅检查周期、断点与新作品发现情况</span></div><div class="header-actions"><button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button><button class="btn ghost" :disabled="store.risk.active" @click="reconcile"><RefreshCw :size="16" />全量对账</button><button class="btn primary" :disabled="store.risk.active" @click="run"><Zap :size="16" />立即检查全部</button></div></header>
+    <header class="workspace-header"><div><p class="eyebrow">AUTOMATION</p><h2>自动更新中心</h2><span>查看订阅检查周期、断点与新作品发现情况</span></div><div class="header-actions"><button class="btn ghost" :disabled="copying" @click="copyDiagnostic"><Clipboard :size="16" />{{ copying ? '整理中…' : '复制诊断' }}</button><button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button><button class="btn ghost" :disabled="store.risk.active" @click="reconcile"><RefreshCw :size="16" />全量对账</button><button class="btn primary" :disabled="store.risk.active" @click="run"><Zap :size="16" />立即检查全部</button></div></header>
     <div class="metric-grid cycle-metrics"><article><Users /><div><strong>{{ cycle.total_authors || latest?.total_authors || store.stats.subscribed_authors }}</strong><span>订阅作者</span></div></article><article><Clock3 /><div><strong>{{ latest?.checked_authors || 0 }}</strong><span>本轮已检查</span></div></article><article><Clock3 /><div><strong>{{ cycle.checked_authors || 0 }}</strong><span>已检查</span></div></article><article><Sparkles /><div><strong>{{ cycle.new_works || latest?.new_works || 0 }}</strong><span>发现新作品</span></div></article><article><RefreshCw /><div><strong>{{ cycle.remaining_authors ?? latest?.remaining_authors ?? 0 }}</strong><span>等待续检</span></div></article></div>
     <div class="timeline" :class="{ loading }">
-      <article v-for="report in reports" :key="report.id" class="timeline-item"><i :data-tone="report.status" /><div class="timeline-head"><strong>{{ report.summary || '订阅检查' }}</strong><span class="status subtle" :data-tone="report.status">{{ reportStatusLabel(report.status) }}</span></div><p>{{ report.checked_authors }} 位已检查 · {{ report.success_authors }} 位成功 · {{ report.warning_authors + report.failed_authors }} 位异常</p><footer><time>{{ report.started_at ? new Date(report.started_at).toLocaleString() : '时间未知' }}</time><span>{{ triggerLabel(report.trigger_type) }}</span></footer></article>
+      <article v-for="report in reports" :key="report.id" class="timeline-item"><i :data-tone="report.status" /><div class="timeline-head"><strong>{{ report.summary || '订阅检查' }}</strong><span class="status subtle" :data-tone="report.status">{{ reportStatusLabel(report.status) }}</span></div><p>{{ report.checked_authors }} 位已检查 · {{ report.success_authors }} 位成功 · {{ report.warning_authors + report.failed_authors }} 位异常</p><details v-if="report.details?.some((item:any) => item.status === 'failed')" class="report-errors"><summary>查看本轮失败证据</summary><ul><li v-for="item in report.details.filter((entry:any) => entry.status === 'failed').slice(0, 10)" :key="`${report.id}-${item.author_id}`"><strong>{{ item.nickname || `作者 ${item.author_id}` }}</strong><span>{{ item.message || item.error || '未知错误' }}</span><small v-if="item.http_status || item.diagnostics?.request_id">HTTP {{ item.http_status || '—' }} · 请求 {{ item.diagnostics?.request_id || '未记录' }}</small></li></ul></details><footer><time>{{ report.started_at ? new Date(report.started_at).toLocaleString() : '时间未知' }}</time><span>{{ triggerLabel(report.trigger_type) }}</span></footer></article>
       <div v-if="!loading && !reports.length" class="empty-state"><Clock3 /><strong>暂无检查报告</strong><span>运行一次订阅检查后将在这里形成报告</span></div>
     </div>
   </section>
@@ -45,5 +54,10 @@ onBeforeUnmount(() => clearInterval(timer.value))
 
 <style scoped>
 .metric-grid.cycle-metrics { grid-template-columns: repeat(5, 1fr); }
+.report-errors { margin-top: 8px; color: var(--muted); font-size: 10px; }
+.report-errors summary { cursor: pointer; }
+.report-errors ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 7px; }
+.report-errors li { display: grid; gap: 2px; }
+.report-errors span, .report-errors small { color: var(--muted); overflow-wrap: anywhere; }
 @media (max-width: 900px) { .metric-grid.cycle-metrics { grid-template-columns: repeat(2, 1fr); } }
 </style>

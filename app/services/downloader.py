@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
 from urllib.parse import quote, unquote, urlsplit
+from uuid import uuid4
 
 from app.core.config import settings
 from app.core import redis_client
@@ -33,7 +34,12 @@ from app.services.douyin_errors import (
     parse_douyin_json_response,
 )
 from app.services.douyin_cookie import add_uifid_to_douyin_api_url
-from app.services.douyin_signature import add_douyin_api_signature, douyin_browser_name
+from app.services.douyin_signature import (
+    add_douyin_api_signature,
+    build_douyin_user_post_url,
+    douyin_browser_name,
+    douyin_signature_diagnostics,
+)
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -412,9 +418,18 @@ class DouyinDownloader:
         except DouyinRequestError as exc:
             self._record_risk_error(exc)
             endpoint_path = urlsplit(str(getattr(response, "url", "") or "")).path
+            exc.diagnostics.update({
+                "request_id": exc.diagnostics.get("request_id") or uuid4().hex[:12],
+                "endpoint": endpoint_path or "unknown",
+                "http_status": exc.status_code,
+                "request_context": douyin_signature_diagnostics(
+                    self.headers.get("cookie", ""), self.headers.get("user-agent", ""),
+                ),
+            })
             logger.warning(
-                "抖音接口请求被分类为 %s: endpoint=%s HTTP=%s detail=%s",
-                exc.code, endpoint_path or "unknown", exc.status_code, exc.detail[:300],
+                "抖音接口请求被分类为 %s: request_id=%s endpoint=%s HTTP=%s detail=%s",
+                exc.code, exc.diagnostics["request_id"], endpoint_path or "unknown",
+                exc.status_code, exc.detail[:300],
             )
             raise
 
@@ -436,6 +451,7 @@ class DouyinDownloader:
         original_url = url
         is_business_api = urlsplit(original_url).path.startswith("/aweme/")
         max_attempts = 3 if is_business_api else 1
+        request_id = uuid4().hex[:12]
 
         for attempt in range(1, max_attempts + 1):
             self._check_risk_gate()
@@ -480,13 +496,29 @@ class DouyinDownloader:
             if (
                 response_error
                 and response_error.code == "signature_missing"
-                and attempt < max_attempts
             ):
                 endpoint_path = urlsplit(final_url).path
+                response_error.diagnostics.update({
+                    "request_id": request_id,
+                    "endpoint": endpoint_path or "unknown",
+                    "http_status": response_error.status_code,
+                    "attempts": attempt,
+                    "max_attempts": max_attempts,
+                    "request_context": douyin_signature_diagnostics(
+                        self.headers.get("cookie", ""), self.headers.get("user-agent", ""),
+                    ),
+                })
+                if attempt >= max_attempts:
+                    logger.warning(
+                        "抖音请求签名在全部重试后仍被拒绝: request_id=%s endpoint=%s HTTP=%s attempts=%s",
+                        request_id, endpoint_path or "unknown", response_error.status_code, attempt,
+                    )
+                    response.close()
+                    raise response_error
                 logger.warning(
                     "抖音拒绝本次请求签名，正在生成新签名重试: "
-                    "endpoint=%s attempt=%s/%s",
-                    endpoint_path or "unknown", attempt, max_attempts,
+                    "request_id=%s endpoint=%s attempt=%s/%s",
+                    request_id, endpoint_path or "unknown", attempt, max_attempts,
                 )
                 response.close()
                 continue
@@ -802,9 +834,11 @@ class DouyinDownloader:
         Returns:
             包含 aweme_list, has_more, max_cursor 的字典
         """
-        encoded_sec_uid = quote(str(sec_uid), safe='')
-        browser_name = quote(self.douyin_browser_name, safe='')
-        url = f"https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id={encoded_sec_uid}&max_cursor={max_cursor}&locate_query=false&show_live_replay_strategy=1&need_time_list=1&time_list_query=0&count={count}&publish_video_strategy_type=2&pc_client_type=1&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name={browser_name}"
+        url = build_douyin_user_post_url(
+            str(sec_uid), max_cursor, count,
+            cookie=self.headers.get("cookie", ""),
+            user_agent=self.headers.get("user-agent", ""),
+        )
         
         res, _ = self._get_douyin_response(url)
         data = self._parse_json_response(res, expected_keys=("aweme_list",))

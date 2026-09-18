@@ -21,6 +21,7 @@ celery_app = Celery(
         "app.tasks.x_download_tasks",
         "app.tasks.notification_tasks",
         "app.tasks.platform_download_tasks",
+        "app.tasks.operations_tasks",
     ]
 )
 
@@ -101,8 +102,6 @@ from celery.signals import (
     worker_process_init,
     worker_ready,
     worker_shutdown,
-    task_prerun,
-    task_postrun,
     task_failure,
 )
 
@@ -190,21 +189,6 @@ def on_worker_shutdown(**kwargs):
         pass
 
 
-@task_prerun.connect
-def on_task_prerun(task_id, task, args, **kwargs):
-    """任务开始执行时记录"""
-    try:
-        from app.core import redis_client
-        task_short = task.name.rsplit(".", 1)[-1] if task.name else str(task)
-        redis_client.append_activity_log(
-            "info", "task",
-            f"▶ 任务开始执行: {task_short}",
-            f"celery_task_id={task_id}, args={args}"
-        )
-    except Exception:
-        pass
-
-
 @task_failure.connect
 def on_task_failure(task_id, exception, traceback, sender, **kwargs):
     """任务执行异常时记录"""
@@ -214,7 +198,10 @@ def on_task_failure(task_id, exception, traceback, sender, **kwargs):
         redis_client.append_activity_log(
             "error", "task",
             f"❌ 任务异常退出: {task_short}",
-            f"celery_task_id={task_id}, error={type(exception).__name__}: {str(exception)[:200]}"
+            f"celery_task_id={task_id}, error={type(exception).__name__}: {str(exception)[:1000]}",
+            event_code="celery_task_failed",
+            correlation_id=str(task_id),
+            context={"task": task_short},
         )
     except Exception:
         pass

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core import redis_client
 from app.core.config import settings
+from app.core.revision import runtime_revision
 from app.models.database import get_async_db
 from app.models.models import (
     Author,
@@ -40,8 +42,8 @@ from app.services.platform_registry import platform_registry
 from app.services.storage_maintenance import (
     apply_storage_repair_plan,
     build_storage_repair_plan,
-    find_rebase_candidate,
 )
+from app.tasks.operations_tasks import run_storage_audit_task
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
@@ -101,52 +103,6 @@ def _xhs_service_check() -> dict[str, Any]:
             session.close()
     except Exception:
         return {"ok": False, "status_code": None}
-
-
-def _scan_storage_files(
-    root: Path, known: set[str], max_files: int, allow_orphans: bool,
-) -> tuple[list[dict[str, Any]], list[str], int]:
-    partials: list[dict[str, Any]] = []
-    orphan_files: list[str] = []
-    scanned_files = 0
-    if not root.is_dir():
-        return partials, orphan_files, scanned_files
-    for path in root.rglob("*"):
-        if scanned_files >= max_files:
-            break
-        try:
-            if not path.is_file():
-                continue
-            try:
-                if path.relative_to(root).parts[0] == ".quarantine":
-                    continue
-            except (IndexError, ValueError):
-                continue
-            scanned_files += 1
-            resolved = str(path.resolve(strict=False))
-            if path.suffix.lower() in {".part", ".tmp", ".downloading"} and len(partials) < 200:
-                stat = path.stat()
-                age_seconds = max(0, datetime.now().timestamp() - stat.st_mtime)
-                if age_seconds < 6 * 3600:
-                    continue
-                partials.append({
-                    "path": resolved, "size_bytes": stat.st_size,
-                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "stale_seconds": int(age_seconds),
-                })
-            elif (
-                allow_orphans
-                and path.suffix.lower() in {
-                    ".jpg", ".jpeg", ".png", ".gif", ".webp",
-                    ".mp4", ".webm", ".mov", ".m4v",
-                }
-                and resolved not in known
-                and len(orphan_files) < 200
-            ):
-                orphan_files.append(resolved)
-        except OSError:
-            continue
-    return partials, orphan_files, scanned_files
 
 
 async def _platform_success_evidence(db: AsyncSession) -> dict[str, dict[str, Any]]:
@@ -287,24 +243,6 @@ async def _latest_artifact_evidence(db: AsyncSession) -> dict[str, dict[str, dic
     return result
 
 
-def _runtime_revision() -> str | None:
-    """不启动子进程地读取部署工作树版本。"""
-    for key in ("JENKINS_TARGET_SHA", "GIT_COMMIT"):
-        if value := str(os.environ.get(key) or "").strip():
-            return value
-    try:
-        git_path = Path(__file__).resolve().parents[2] / ".git"
-        if git_path.is_file():
-            line = git_path.read_text(encoding="utf-8").strip()
-            git_path = (git_path.parent / line.removeprefix("gitdir:").strip()).resolve()
-        head = (git_path / "HEAD").read_text(encoding="utf-8").strip()
-        if head.startswith("ref:"):
-            return (git_path / head.removeprefix("ref:").strip()).read_text(encoding="utf-8").strip()
-        return head
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
 @router.get("/platform-readiness")
 async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
     """返回本地就绪状态，以及数据库中可核验的真实成功任务证据。"""
@@ -401,7 +339,7 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
         })
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
-        "revision": _runtime_revision(),
+        "revision": runtime_revision(),
         "scope": "local_preflight_with_observed_success",
         "external_validation_required": external_validation_required,
         "items": items,
@@ -810,99 +748,98 @@ async def unified_task_actions(
 
 
 @router.get("/storage-audit")
-async def storage_audit(
+async def storage_audit_status():
+    """Return persisted audit progress/result without starting another scan."""
+    state = await asyncio.to_thread(redis_client.get_storage_audit_state)
+    if state.get("status") in {"queued", "running"}:
+        try:
+            updated_at = datetime.fromisoformat(str(state.get("updated_at") or ""))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            stale_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+        except (TypeError, ValueError):
+            stale_seconds = 0
+        if stale_seconds > 2100:
+            state.update({
+                "status": "failed",
+                "phase": "failed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "error": "巡检超过 35 分钟且无进度更新，后台任务可能已中断；可以重新扫描。",
+            })
+            await asyncio.to_thread(redis_client.set_storage_audit_state, state)
+            if state.get("job_id"):
+                await asyncio.to_thread(redis_client.release_storage_audit_lock, state["job_id"])
+    return state
+
+
+@router.post("/storage-audit")
+async def start_storage_audit(
     max_records: int = Query(200_000, ge=100, le=200_000),
     max_files: int = Query(50_000, ge=100, le=200_000),
-    db: AsyncSession = Depends(get_async_db),
 ):
-    """Read-only bounded audit. No file or database record is changed."""
-    current = await asyncio.to_thread(settings.snapshot)
-    root = Path(current.DOWNLOAD_ROOT).expanduser().resolve(strict=False)
-    known: set[str] = set()
-    relinkable: list[dict[str, Any]] = []
-    missing: list[dict[str, Any]] = []
-    zero_byte: list[dict[str, Any]] = []
-    scanned_records = 0
-    total_records = 0
-    for count_statement in (
-        select(func.count(DownloadTask.id)).where(
-            DownloadTask.status == "completed", DownloadTask.file_path.is_not(None),
-        ),
-        select(func.count(DownloadHistory.id)).where(DownloadHistory.file_path.is_not(None)),
-        select(func.count(XMediaAsset.id)),
-        select(func.count(PlatformMediaAsset.id)),
-    ):
-        total_records += int((await db.scalar(count_statement)) or 0)
-    record_rows: list[tuple[str, int, str]] = []
+    """Queue one bounded read-only scan; duplicate clicks reuse the active job."""
+    current = await asyncio.to_thread(redis_client.get_storage_audit_state)
+    if current.get("status") in {"queued", "running"}:
+        try:
+            updated_at = datetime.fromisoformat(str(current.get("updated_at") or ""))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            stale = (datetime.now(timezone.utc) - updated_at).total_seconds() > 2100
+        except (TypeError, ValueError):
+            stale = False
+        if not stale:
+            return current
+        if current.get("job_id"):
+            await asyncio.to_thread(redis_client.release_storage_audit_lock, current["job_id"])
 
-    async def consume(kind: str, statement, path_index: int = 1):
-        nonlocal scanned_records
-        rows = (await db.execute(statement.limit(max_records - scanned_records))).all()
-        for row in rows:
-            record_id, path_value = row[0], row[path_index]
-            if not path_value:
-                continue
-            scanned_records += 1
-            record_rows.append((kind, int(record_id), str(path_value)))
+    job_id = uuid4().hex
+    acquired = await asyncio.to_thread(redis_client.acquire_storage_audit_lock, job_id)
+    if not acquired:
+        state = await asyncio.to_thread(redis_client.get_storage_audit_state)
+        if state.get("status") in {"queued", "running"}:
+            return state
+        raise HTTPException(status_code=409, detail="已有存储巡检正在启动，请稍后刷新")
 
-    def inspect_records():
-        for kind, record_id, path_value in record_rows:
-            try:
-                candidate = Path(path_value).expanduser()
-                if not candidate.is_absolute():
-                    candidate = root / candidate
-                normalized = str(candidate.resolve(strict=False))
-            except (OSError, RuntimeError, ValueError):
-                normalized = str(path_value)
-            known.add(normalized)
-            exists, size = _safe_stat(normalized)
-            if not exists:
-                rebased = find_rebase_candidate(root, normalized)
-                if rebased is not None:
-                    rebased_path = str(rebased)
-                    known.add(rebased_path)
-                    if len(relinkable) + len(missing) < 200:
-                        relinkable.append({
-                            "kind": kind,
-                            "id": record_id,
-                            "path": normalized,
-                            "suggested_path": rebased_path,
-                        })
-                elif len(relinkable) + len(missing) < 200:
-                    missing.append({"kind": kind, "id": record_id, "path": normalized})
-            elif exists and size == 0 and len(zero_byte) < 200:
-                zero_byte.append({"kind": kind, "id": record_id, "path": normalized})
-
-    await consume("download_task", select(DownloadTask.id, DownloadTask.file_path).where(
-        DownloadTask.status == "completed", DownloadTask.file_path.is_not(None),
-    ))
-    if scanned_records < max_records:
-        await consume("download_history", select(DownloadHistory.id, DownloadHistory.file_path).where(DownloadHistory.file_path.is_not(None)))
-    if scanned_records < max_records:
-        await consume("x_media", select(XMediaAsset.id, XMediaAsset.file_path))
-    if scanned_records < max_records:
-        await consume("platform_media", select(PlatformMediaAsset.id, PlatformMediaAsset.file_path))
-    await asyncio.to_thread(inspect_records)
-
-    records_truncated = total_records > scanned_records
-    partials, orphan_files, scanned_files = await asyncio.to_thread(
-        _scan_storage_files, root, known, max_files, not records_truncated,
-    )
-    disk_target = root
-    while not disk_target.exists() and disk_target != disk_target.parent:
-        disk_target = disk_target.parent
-    disk = await asyncio.to_thread(shutil.disk_usage, disk_target)
-    return {
-        "checked_at": datetime.now(timezone.utc).isoformat(), "read_only": True,
-        "root": str(root), "scanned_records": scanned_records, "scanned_files": scanned_files,
-        "total_records": total_records, "records_truncated": records_truncated, "files_truncated": scanned_files >= max_files,
-        "orphan_scan_reliable": not records_truncated,
-        "relinkable_records": relinkable,
-        "missing_records": missing, "zero_byte_files": zero_byte,
-        "partial_files": partials, "orphan_files": orphan_files,
-        "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "used_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0},
-        "note": "结果仅用于核对；旧根目录记录可在预演确认后回填，文件不会移动。其他问题也不会自动处理。",
+    now = datetime.now(timezone.utc).isoformat()
+    state = {
+        "job_id": job_id,
+        "status": "queued",
+        "phase": "queued",
+        "started_at": now,
+        "updated_at": now,
+        "progress": {"scanned_records": 0, "scanned_files": 0},
+        "result": None,
+        "error": None,
     }
+    await asyncio.to_thread(redis_client.set_storage_audit_state, state)
+    try:
+        task = await asyncio.to_thread(
+            run_storage_audit_task.apply_async,
+            args=(job_id, max_records, max_files),
+        )
+        latest = await asyncio.to_thread(redis_client.get_storage_audit_state)
+        if latest.get("job_id") == job_id:
+            latest["celery_task_id"] = task.id
+            await asyncio.to_thread(redis_client.set_storage_audit_state, latest)
+            state = latest
+        await asyncio.to_thread(
+            redis_client.append_activity_log,
+            "info", "storage-audit", "存储巡检已进入后台队列",
+            f"上限：记录={max_records}，文件={max_files}",
+            event_code="storage_audit_queued",
+            correlation_id=job_id,
+        )
+        return state
+    except Exception as exc:
+        await asyncio.to_thread(redis_client.release_storage_audit_lock, job_id)
+        state.update({
+            "status": "failed",
+            "phase": "failed",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "error": f"后台任务提交失败：{type(exc).__name__}: {str(exc)[:500]}",
+        })
+        await asyncio.to_thread(redis_client.set_storage_audit_state, state)
+        raise HTTPException(status_code=503, detail=state["error"]) from exc
 
 
 @router.post("/storage-repair")
