@@ -1145,7 +1145,8 @@ async def get_subscription_diagnostic(db: AsyncSession = Depends(get_async_db)):
     request_context: dict = {
         "contract": "unavailable",
         "has_uifid": bool(account.get("has_uifid")),
-        "has_ms_token": bool(account.get("has_ms_token")),
+        "ms_token_strategy": "automatic_refresh",
+        "ms_token_state": "not_requested",
         "browser_name": account.get("browser_name"),
         "browser_version": account.get("browser_version"),
     }
@@ -1219,7 +1220,6 @@ async def get_subscription_diagnostic(db: AsyncSession = Depends(get_async_db)):
             "cookie_fingerprint": account.get("cookie_fingerprint"),
             "uifid_fingerprint": account.get("uifid_fingerprint"),
             "has_uifid": account.get("has_uifid"),
-            "has_ms_token": account.get("has_ms_token"),
             "last_success_at": account.get("last_success_at"),
             "last_failure_at": account.get("last_failure_at"),
             "last_failure_code": account.get("last_failure_code"),
@@ -1240,6 +1240,6 @@ async def get_subscription_diagnostic(db: AsyncSession = Depends(get_async_db)):
         },
         "reports": reports,
         "recent_warnings_and_errors": relevant_logs,
-        "privacy": "Cookie、UIFID、msToken、代理凭据和请求签名均未包含在此诊断中。",
+        "privacy": "Cookie、UIFID、代理凭据、请求令牌和请求签名均未包含在此诊断中。",
     }
 

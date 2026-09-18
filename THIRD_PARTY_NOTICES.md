@@ -16,6 +16,11 @@ The upstream attribution and license notice is retained in the derived file.
 The complete license text is available at
 <https://www.apache.org/licenses/LICENSE-2.0>.
 
+`app/services/vendor/douyin_mstoken_bootstrap.py` contains the Douyin
+`msToken` bootstrap request constants from `f2/conf/conf.yaml` at the same
+upstream revision. The application implements its own bounded cache,
+invalidation and retry lifecycle around that public Apache-2.0 contract.
+
 ## Xiaohongshu isolated collector
 
 Jenkins installs the separately isolated collector declared in `xhs-engine.lock`

@@ -37,12 +37,12 @@ ERROR_INFO = {
     "signature_missing": DouyinErrorInfo(
         "signature_missing", "upstream",
         "抖音拒绝了本次请求签名。",
-        "系统已自动刷新签名并有限重试；若多个作者连续失败，请检查服务端签名依赖与请求参数。",
+        "系统已自动刷新 msToken 与请求签名并有限重试；若仍连续失败，请复制诊断信息排查签名契约。",
     ),
     "signature_generation_failed": DouyinErrorInfo(
         "signature_generation_failed", "upstream",
         "抖音请求签名生成失败。",
-        "请检查服务端签名依赖与日志，修复后再继续订阅检查。",
+        "系统无法自动获取 msToken 或生成 a_bogus；请复制诊断信息检查具体失败阶段。",
     ),
     "rate_limited": DouyinErrorInfo(
         "rate_limited", "risk_control",
@@ -242,9 +242,9 @@ def localize_douyin_reason(code: Optional[str], reason: Optional[str]) -> str:
     if code == "browser_identity_missing" or "uifid not found" in lowered:
         return "请求缺少或未识别 UIFID 浏览器身份标识，抖音安全校验拒绝了本次请求。"
     if code == "signature_missing":
-        return "抖音连续拒绝了重新生成的请求签名；系统已停止本轮请求并等待续检。"
+        return "系统已重新获取 msToken 并生成新签名，但抖音仍连续拒绝请求；本轮已停止并等待续检。"
     if code == "signature_generation_failed":
-        return "服务端未能生成抖音业务接口所需的有效请求签名，与 Cookie 是否能打开网页无关。"
+        return "服务端未能自动获取 msToken 或生成抖音业务接口签名；诊断信息会标明具体失败阶段。"
     if code == "argus_blocked" or "argussecurityplugin" in lowered:
         return "抖音安全校验拒绝了本次请求。"
     if code == "rate_limited":

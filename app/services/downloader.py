@@ -36,9 +36,16 @@ from app.services.douyin_errors import (
 from app.services.douyin_cookie import add_uifid_to_douyin_api_url
 from app.services.douyin_signature import (
     add_douyin_api_signature,
+    add_douyin_ms_token,
     build_douyin_user_post_url,
     douyin_browser_name,
     douyin_signature_diagnostics,
+)
+from app.services.douyin_mstoken import (
+    DouyinMsTokenError,
+    build_ms_token_scope,
+    get_douyin_ms_token,
+    invalidate_ms_token,
 )
 
 # 配置日志
@@ -357,6 +364,12 @@ class DouyinDownloader:
         proxy_url = getattr(request_context, "proxy_url", None)
         if proxy_url:
             self.session.proxies.update({'http': proxy_url, 'https': proxy_url})
+        self.ms_token_scope = build_ms_token_scope(
+            self.account_context_version or cookie,
+            self.headers['user-agent'],
+            proxy_url or "direct",
+        )
+        self.ms_token_state = "not_requested"
         # 设置重试
         adapter = requests.adapters.HTTPAdapter(
             max_retries=self.download_retry_count
@@ -410,6 +423,42 @@ class DouyinDownloader:
             logger.warning("更新抖音账号健康状态失败: %s", account_exc)
             return False
 
+    def _signature_diagnostics(self) -> Dict[str, Any]:
+        return douyin_signature_diagnostics(
+            self.headers.get("cookie", ""),
+            self.headers.get("user-agent", ""),
+            ms_token_state=self.ms_token_state,
+        )
+
+    def _get_ms_token(self, *, force_refresh: bool) -> str:
+        try:
+            token = get_douyin_ms_token(
+                scope=self.ms_token_scope,
+                user_agent=self.headers.get("user-agent", ""),
+                cookie=self.headers.get("cookie", ""),
+                proxies=dict(self.session.proxies),
+                timeout=min(float(self.download_timeout), 15.0),
+                force_refresh=force_refresh,
+            )
+        except DouyinMsTokenError as exc:
+            self.ms_token_state = "generation_failed"
+            raise DouyinRequestError(
+                "signature_generation_failed",
+                detail=f"msToken 自动获取失败: {exc}",
+                status_code=exc.status_code,
+                diagnostics={
+                    "stage": "ms_token",
+                    "request_context": self._signature_diagnostics(),
+                },
+            ) from exc
+        self.ms_token_state = token.source
+        if not token.source.startswith("cache_"):
+            logger.info(
+                "抖音 msToken 已自动获取: source=%s context=%s",
+                token.source, self.ms_token_scope[:12],
+            )
+        return token.value
+
     def _parse_json_response(self, response, *, expected_keys=()) -> Dict[str, Any]:
         try:
             data = parse_douyin_json_response(response, expected_keys=expected_keys)
@@ -422,9 +471,7 @@ class DouyinDownloader:
                 "request_id": exc.diagnostics.get("request_id") or uuid4().hex[:12],
                 "endpoint": endpoint_path or "unknown",
                 "http_status": exc.status_code,
-                "request_context": douyin_signature_diagnostics(
-                    self.headers.get("cookie", ""), self.headers.get("user-agent", ""),
-                ),
+                "request_context": self._signature_diagnostics(),
             })
             logger.warning(
                 "抖音接口请求被分类为 %s: request_id=%s endpoint=%s HTTP=%s detail=%s",
@@ -452,6 +499,8 @@ class DouyinDownloader:
         is_business_api = urlsplit(original_url).path.startswith("/aweme/")
         max_attempts = 3 if is_business_api else 1
         request_id = uuid4().hex[:12]
+        force_ms_token_refresh = False
+        omit_ms_token = False
 
         for attempt in range(1, max_attempts + 1):
             self._check_risk_gate()
@@ -470,6 +519,27 @@ class DouyinDownloader:
                 )
                 self._record_risk_error(error)
                 raise error from validation_error
+            if is_business_api and not omit_ms_token:
+                try:
+                    request_url = add_douyin_ms_token(
+                        request_url,
+                        self._get_ms_token(force_refresh=force_ms_token_refresh),
+                    )
+                    force_ms_token_refresh = False
+                except DouyinRequestError:
+                    raise
+                except Exception as token_error:
+                    self.ms_token_state = "generation_failed"
+                    raise DouyinRequestError(
+                        "signature_generation_failed",
+                        detail=f"msToken 请求参数生成失败: {token_error}",
+                        diagnostics={
+                            "stage": "ms_token",
+                            "request_context": self._signature_diagnostics(),
+                        },
+                    ) from token_error
+            elif is_business_api:
+                self.ms_token_state = "omitted_after_token_rejections"
             try:
                 request_url = add_douyin_api_signature(
                     request_url, self.headers.get("user-agent", "")
@@ -498,16 +568,22 @@ class DouyinDownloader:
                 and response_error.code == "signature_missing"
             ):
                 endpoint_path = urlsplit(final_url).path
+                attempted_ms_token_state = self.ms_token_state
+                self.ms_token_state = f"rejected_{attempted_ms_token_state}"
                 response_error.diagnostics.update({
                     "request_id": request_id,
                     "endpoint": endpoint_path or "unknown",
                     "http_status": response_error.status_code,
                     "attempts": attempt,
                     "max_attempts": max_attempts,
-                    "request_context": douyin_signature_diagnostics(
-                        self.headers.get("cookie", ""), self.headers.get("user-agent", ""),
-                    ),
+                    "request_context": self._signature_diagnostics(),
                 })
+                invalidate_ms_token(
+                    self.ms_token_scope,
+                    reject_account_cookie=attempted_ms_token_state == "account_cookie",
+                )
+                force_ms_token_refresh = attempt == 1
+                omit_ms_token = attempt >= 2
                 if attempt >= max_attempts:
                     logger.warning(
                         "抖音请求签名在全部重试后仍被拒绝: request_id=%s endpoint=%s HTTP=%s attempts=%s",
@@ -515,11 +591,18 @@ class DouyinDownloader:
                     )
                     response.close()
                     raise response_error
-                logger.warning(
-                    "抖音拒绝本次请求签名，正在生成新签名重试: "
-                    "request_id=%s endpoint=%s attempt=%s/%s",
-                    request_id, endpoint_path or "unknown", attempt, max_attempts,
-                )
+                if omit_ms_token:
+                    logger.warning(
+                        "抖音连续拒绝带 msToken 的请求，最后一次将按无 msToken 兼容模式重新签名: "
+                        "request_id=%s endpoint=%s attempt=%s/%s",
+                        request_id, endpoint_path or "unknown", attempt, max_attempts,
+                    )
+                else:
+                    logger.warning(
+                        "抖音拒绝本次请求签名，正在重新获取 msToken 并生成新签名: "
+                        "request_id=%s endpoint=%s attempt=%s/%s",
+                        request_id, endpoint_path or "unknown", attempt, max_attempts,
+                    )
                 response.close()
                 continue
             return response, final_url
@@ -836,7 +919,6 @@ class DouyinDownloader:
         """
         url = build_douyin_user_post_url(
             str(sec_uid), max_cursor, count,
-            cookie=self.headers.get("cookie", ""),
             user_agent=self.headers.get("user-agent", ""),
         )
         

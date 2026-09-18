@@ -9,7 +9,7 @@ from app.services.douyin_cookie import get_cookie_value
 from app.services.vendor.douyin_abogus import ABogus, BrowserFingerprintGenerator
 
 
-DOUYIN_SIGNATURE_CONTRACT = "web-post-a_bogus-v2"
+DOUYIN_SIGNATURE_CONTRACT = "web-post-a_bogus-mstoken-v3"
 
 
 def douyin_browser_name(user_agent: str) -> str:
@@ -38,10 +38,13 @@ def build_douyin_user_post_url(
     max_cursor: int,
     count: int,
     *,
-    cookie: str,
     user_agent: str,
 ) -> str:
-    """Build the full browser request contract before signing the user-post API."""
+    """Build the browser request contract before signing the user-post API.
+
+    ``msToken`` is not an account Cookie requirement. It is obtained separately
+    in the same browser/proxy context and appended before generating a_bogus.
+    """
     browser_name = douyin_browser_name(user_agent)
     browser_version = douyin_browser_version(user_agent)
     if browser_version == "unknown":
@@ -87,12 +90,38 @@ def build_douyin_user_post_url(
         ("effective_type", "4g"),
         ("round_trip_time", "50"),
     ]
-    if ms_token := get_cookie_value(cookie, "msToken"):
-        params.append(("msToken", ms_token))
     return "https://www.douyin.com/aweme/v1/web/aweme/post/?" + urlencode(params)
 
 
-def douyin_signature_diagnostics(cookie: str, user_agent: str) -> dict[str, object]:
+def add_douyin_ms_token(url: str, ms_token: str) -> str:
+    """把自动获取的 msToken 加入业务参数，随后才能计算 a_bogus。"""
+    parsed = urlsplit(url)
+    if not parsed.path.startswith("/aweme/"):
+        return url
+    normalized = str(ms_token or "").strip()
+    if not normalized:
+        raise ValueError("抖音业务请求缺少自动生成的 msToken")
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() != "mstoken"
+    ]
+    query.append(("msToken", normalized))
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urlencode(query),
+        parsed.fragment,
+    ))
+
+
+def douyin_signature_diagnostics(
+    cookie: str,
+    user_agent: str,
+    *,
+    ms_token_state: str = "not_requested",
+) -> dict[str, object]:
     """Return a copy-safe request summary; never expose Cookie or identity values."""
     return {
         "contract": DOUYIN_SIGNATURE_CONTRACT,
@@ -100,7 +129,8 @@ def douyin_signature_diagnostics(cookie: str, user_agent: str) -> dict[str, obje
         "browser_name": douyin_browser_name(user_agent),
         "browser_version": douyin_browser_version(user_agent),
         "has_uifid": bool(get_cookie_value(cookie, "UIFID")),
-        "has_ms_token": bool(get_cookie_value(cookie, "msToken")),
+        "ms_token_strategy": "automatic_refresh",
+        "ms_token_state": str(ms_token_state or "unknown"),
         "user_agent_configured": bool(str(user_agent or "").strip()),
     }
 
