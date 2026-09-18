@@ -491,6 +491,7 @@ def clear_activity_logs() -> None:
 
 STORAGE_AUDIT_STATE_KEY = "douyin:operations:storage-audit:state"
 STORAGE_AUDIT_LOCK_KEY = "douyin:operations:storage-audit:lock"
+STORAGE_REPAIR_STATE_KEY = "douyin:operations:storage-repair:last"
 STORAGE_AUDIT_TTL = 7 * 24 * 3600
 
 
@@ -508,6 +509,25 @@ def get_storage_audit_state() -> Dict[str, Any]:
 def set_storage_audit_state(state: Dict[str, Any]) -> None:
     redis_client.set(
         STORAGE_AUDIT_STATE_KEY,
+        json.dumps(state, ensure_ascii=False, default=str),
+        ex=STORAGE_AUDIT_TTL,
+    )
+
+
+def get_storage_repair_state() -> Dict[str, Any] | None:
+    raw = redis_client.get(STORAGE_REPAIR_STATE_KEY)
+    if not raw:
+        return None
+    try:
+        state = json.loads(raw)
+        return state if isinstance(state, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def set_storage_repair_state(state: Dict[str, Any]) -> None:
+    redis_client.set(
+        STORAGE_REPAIR_STATE_KEY,
         json.dumps(state, ensure_ascii=False, default=str),
         ex=STORAGE_AUDIT_TTL,
     )

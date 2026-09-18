@@ -117,11 +117,23 @@ def validate_douyin_url(url: str) -> str:
     return parsed.geturl()
 
 
-def get_douyin_response(session, url: str, *, timeout: int, max_redirects: int = 5):
+def get_douyin_response(
+    session,
+    url: str,
+    *,
+    timeout: int,
+    max_redirects: int = 5,
+    headers: dict[str, str] | None = None,
+):
     """逐跳校验重定向，禁止跳出受信任的抖音域名集合。"""
     current_url = validate_douyin_url(url)
     for _ in range(max_redirects + 1):
-        response = session.get(current_url, allow_redirects=False, timeout=timeout)
+        response = session.get(
+            current_url,
+            allow_redirects=False,
+            timeout=timeout,
+            headers=headers or None,
+        )
         if response.status_code not in {301, 302, 303, 307, 308}:
             return response, current_url
 

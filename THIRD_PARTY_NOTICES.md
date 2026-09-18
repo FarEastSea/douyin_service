@@ -21,6 +21,20 @@ The complete license text is available at
 upstream revision. The application implements its own bounded cache,
 invalidation and retry lifecycle around that public Apache-2.0 contract.
 
+## Douyin Web signature implementation
+
+`app/services/vendor/douyin_websign.py` is derived from
+`src/dtk/signing/native/websign.py` in
+[Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API),
+revision `9fa3e5406694c80ec0a97399f410948f130d0f9e`.
+
+- License: Apache License 2.0
+- Purpose: generate the `x-secsdk-web-signature` required by Douyin's
+  sign-protected Web API paths.
+
+The upstream attribution is retained; the complete license text is available at
+<https://www.apache.org/licenses/LICENSE-2.0>.
+
 ## Xiaohongshu isolated collector
 
 Jenkins installs the separately isolated collector declared in `xhs-engine.lock`

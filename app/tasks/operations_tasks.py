@@ -73,8 +73,11 @@ def run_storage_audit_task(
             "storage-audit",
             "存储巡检完成",
             f"记录={report['scanned_records']}/{report['total_records']}，文件={report['scanned_files']}，"
-            f"缺失={len(report['missing_records'])}，临时文件={len(report['partial_files'])}，"
-            f"孤立媒体={len(report['orphan_files'])}",
+            f"旧路径={report['issue_counts']['relinkable_records']}，"
+            f"缺失={report['issue_counts']['missing_records']}，"
+            f"临时文件={report['issue_counts']['partial_files']}，"
+            f"孤立媒体={report['issue_counts']['orphan_files']}，"
+            f"样本上限={report['sample_limit']}",
             event_code="storage_audit_completed",
             correlation_id=job_id,
         )

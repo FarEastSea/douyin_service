@@ -7,9 +7,26 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from app.services.douyin_cookie import get_cookie_value
 from app.services.vendor.douyin_abogus import ABogus, BrowserFingerprintGenerator
+from app.services.vendor.douyin_websign import sign as sign_web_request
 
 
-DOUYIN_SIGNATURE_CONTRACT = "web-post-a_bogus-mstoken-v3"
+DOUYIN_SIGNATURE_CONTRACT = "web-a_bogus-websign-v4"
+DOUYIN_WEB_SIGNED_PATHS = frozenset({
+    "/aweme/v1/web/aweme/detail/",
+    "/aweme/v1/web/aweme/post/",
+    "/aweme/v1/web/aweme/favorite/",
+    "/aweme/v1/web/aweme/listcollection/",
+    "/aweme/v1/web/mix/aweme/",
+    "/aweme/v1/web/tab/feed/",
+    "/aweme/v1/web/mix/list/",
+    "/aweme/v1/web/music/aweme/",
+    "/aweme/v1/web/music/list/",
+    "/aweme/v1/web/mix/detail/",
+    "/aweme/v1/web/mix/listcollection/",
+    "/aweme/v1/web/music/detail/",
+    "/aweme/v1/web/collects/list/",
+    "/aweme/v1/web/collects/video/list/",
+})
 
 
 def douyin_browser_name(user_agent: str) -> str:
@@ -125,24 +142,30 @@ def douyin_signature_diagnostics(
     """Return a copy-safe request summary; never expose Cookie or identity values."""
     return {
         "contract": DOUYIN_SIGNATURE_CONTRACT,
-        "algorithm": "a_bogus",
+        "algorithm": "a_bogus+x-secsdk-web-signature",
         "browser_name": douyin_browser_name(user_agent),
         "browser_version": douyin_browser_version(user_agent),
         "has_uifid": bool(get_cookie_value(cookie, "UIFID")),
+        "has_verify_fp": bool(get_cookie_value(cookie, "s_v_web_id")),
         "ms_token_strategy": "automatic_refresh",
         "ms_token_state": str(ms_token_state or "unknown"),
+        "web_signature_state": "generated_per_attempt",
         "user_agent_configured": bool(str(user_agent or "").strip()),
     }
 
 
-def add_douyin_api_signature(url: str, user_agent: str) -> str:
-    """为抖音业务 API 的最终查询串生成 a_bogus。"""
+def add_douyin_api_signature(
+    url: str,
+    user_agent: str,
+    cookie: str = "",
+) -> tuple[str, dict[str, str]]:
+    """Generate A-Bogus and the protected-path Web signature as one contract."""
     parsed = urlsplit(url)
     if not parsed.path.startswith("/aweme/"):
-        return url
+        return url, {}
 
     if any(key.casefold() == "a_bogus" and value for key, value in parse_qsl(parsed.query)):
-        return url
+        raise ValueError("抖音业务请求不能复用旧签名")
     if not parsed.query:
         raise ValueError("抖音业务 API 缺少可签名的查询参数")
 
@@ -160,10 +183,21 @@ def add_douyin_api_signature(url: str, user_agent: str) -> str:
 
     # 签名器针对 parsed.query 的原始字节生成摘要，因此保留原查询串，
     # 不能在生成签名后再用 urlencode 重排或二次编码。
+    a_bogus_query = f"{parsed.query}&a_bogus={quote(signature, safe='')}"
+    normalized_path = parsed.path if parsed.path.endswith("/") else f"{parsed.path}/"
+    if normalized_path not in DOUYIN_WEB_SIGNED_PATHS:
+        return urlunsplit((
+            parsed.scheme, parsed.netloc, parsed.path, a_bogus_query, parsed.fragment,
+        )), {}
+
+    uifid = get_cookie_value(cookie, "UIFID")
+    if not uifid:
+        raise ValueError("抖音签名保护接口缺少 Cookie 中的 UIFID")
+    pairs = parse_qsl(a_bogus_query, keep_blank_values=True)
+    verify_fp = get_cookie_value(cookie, "s_v_web_id")
+    if verify_fp:
+        pairs.extend((("verifyFp", verify_fp), ("fp", verify_fp)))
+    signed_query, _, signature_headers = sign_web_request(pairs, uifid)
     return urlunsplit((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        f"{parsed.query}&a_bogus={quote(signature, safe='')}",
-        parsed.fragment,
-    ))
+        parsed.scheme, parsed.netloc, parsed.path, signed_query, parsed.fragment,
+    )), signature_headers

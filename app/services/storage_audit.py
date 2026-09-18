@@ -38,12 +38,14 @@ def _scan_storage_files(
     max_files: int,
     allow_orphans: bool,
     progress: ProgressCallback | None,
-) -> tuple[list[dict[str, Any]], list[str], int]:
+) -> tuple[list[dict[str, Any]], list[str], int, int, int]:
     partials: list[dict[str, Any]] = []
     orphan_files: list[str] = []
     scanned_files = 0
+    partial_count = 0
+    orphan_count = 0
     if not root.is_dir():
-        return partials, orphan_files, scanned_files
+        return partials, orphan_files, scanned_files, partial_count, orphan_count
     for path in root.rglob("*"):
         if scanned_files >= max_files:
             break
@@ -59,17 +61,19 @@ def _scan_storage_files(
             if progress and scanned_files % 1000 == 0:
                 progress({"phase": "files", "scanned_files": scanned_files})
             resolved = str(path.resolve(strict=False))
-            if path.suffix.lower() in {".part", ".tmp", ".downloading"} and len(partials) < 200:
+            if path.suffix.lower() in {".part", ".tmp", ".downloading"}:
                 stat = path.stat()
                 age_seconds = max(0, datetime.now().timestamp() - stat.st_mtime)
                 if age_seconds < 6 * 3600:
                     continue
-                partials.append({
-                    "path": resolved,
-                    "size_bytes": stat.st_size,
-                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "stale_seconds": int(age_seconds),
-                })
+                partial_count += 1
+                if len(partials) < 200:
+                    partials.append({
+                        "path": resolved,
+                        "size_bytes": stat.st_size,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        "stale_seconds": int(age_seconds),
+                    })
             elif (
                 allow_orphans
                 and path.suffix.lower() in {
@@ -77,12 +81,13 @@ def _scan_storage_files(
                     ".mp4", ".webm", ".mov", ".m4v",
                 }
                 and resolved not in known
-                and len(orphan_files) < 200
             ):
-                orphan_files.append(resolved)
+                orphan_count += 1
+                if len(orphan_files) < 200:
+                    orphan_files.append(resolved)
         except OSError:
             continue
-    return partials, orphan_files, scanned_files
+    return partials, orphan_files, scanned_files, partial_count, orphan_count
 
 
 def run_storage_audit(
@@ -99,6 +104,9 @@ def run_storage_audit(
     relinkable: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
     zero_byte: list[dict[str, Any]] = []
+    relinkable_count = 0
+    missing_count = 0
+    zero_byte_count = 0
     scanned_records = 0
     total_records = 0
     for count_statement in (
@@ -115,7 +123,7 @@ def run_storage_audit(
         progress({"phase": "records", "total_records": total_records, "scanned_records": 0})
 
     def consume(kind: str, statement) -> None:
-        nonlocal scanned_records
+        nonlocal scanned_records, relinkable_count, missing_count, zero_byte_count
         remaining = max_records - scanned_records
         if remaining <= 0:
             return
@@ -136,6 +144,7 @@ def run_storage_audit(
             if not exists:
                 rebased = find_rebase_candidate(root, normalized)
                 if rebased is not None:
+                    relinkable_count += 1
                     rebased_path = str(rebased)
                     known.add(rebased_path)
                     if len(relinkable) + len(missing) < 200:
@@ -145,10 +154,14 @@ def run_storage_audit(
                             "path": normalized,
                             "suggested_path": rebased_path,
                         })
-                elif len(relinkable) + len(missing) < 200:
-                    missing.append({"kind": kind, "id": int(record_id), "path": normalized})
-            elif size == 0 and len(zero_byte) < 200:
-                zero_byte.append({"kind": kind, "id": int(record_id), "path": normalized})
+                else:
+                    missing_count += 1
+                    if len(relinkable) + len(missing) < 200:
+                        missing.append({"kind": kind, "id": int(record_id), "path": normalized})
+            elif size == 0:
+                zero_byte_count += 1
+                if len(zero_byte) < 200:
+                    zero_byte.append({"kind": kind, "id": int(record_id), "path": normalized})
             if progress and scanned_records % 1000 == 0:
                 progress({
                     "phase": "records",
@@ -173,7 +186,7 @@ def run_storage_audit(
             "scanned_records": scanned_records,
             "scanned_files": 0,
         })
-    partials, orphan_files, scanned_files = _scan_storage_files(
+    partials, orphan_files, scanned_files, partial_count, orphan_count = _scan_storage_files(
         root, known, max_files, not records_truncated, progress,
     )
     disk_target = root
@@ -190,6 +203,14 @@ def run_storage_audit(
         "records_truncated": records_truncated,
         "files_truncated": scanned_files >= max_files,
         "orphan_scan_reliable": not records_truncated,
+        "sample_limit": 200,
+        "issue_counts": {
+            "relinkable_records": relinkable_count,
+            "missing_records": missing_count,
+            "zero_byte_files": zero_byte_count,
+            "partial_files": partial_count,
+            "orphan_files": orphan_count,
+        },
         "relinkable_records": relinkable,
         "missing_records": missing,
         "zero_byte_files": zero_byte,

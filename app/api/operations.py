@@ -769,6 +769,7 @@ async def storage_audit_status():
             await asyncio.to_thread(redis_client.set_storage_audit_state, state)
             if state.get("job_id"):
                 await asyncio.to_thread(redis_client.release_storage_audit_lock, state["job_id"])
+    state["last_repair"] = await asyncio.to_thread(redis_client.get_storage_repair_state)
     return state
 
 
@@ -863,6 +864,19 @@ async def storage_repair(
             "note": "预演没有修改任何文件或记录；确认后才会回填旧路径或执行可恢复隔离。",
         }
     result = await apply_storage_repair_plan(db, root, targets)
+    repair_state = {
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+        "planned": result["planned"],
+        "applied": result["applied"],
+        "relinked": len(result["relinked"]),
+        "moved": len(result["moved"]),
+        "marked_tasks": len(result["marked_tasks"]),
+        "errors": len(result["apply_errors"]),
+    }
+    try:
+        await asyncio.to_thread(redis_client.set_storage_repair_state, repair_state)
+    except Exception as exc:
+        logger.warning("存储维护已完成，但最近处理摘要写入失败: %s", exc)
     try:
         await asyncio.to_thread(
             redis_client.append_activity_log,
@@ -875,5 +889,6 @@ async def storage_repair(
     return {
         "dry_run": False,
         **result,
+        "repair_state": repair_state,
         "message": "处理完成；旧路径已回填，文件未删除，隔离项可按清单恢复",
     }
