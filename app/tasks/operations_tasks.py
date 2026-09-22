@@ -44,6 +44,7 @@ async def _apply_all_storage_targets(
         "skipped": 0,
         "errors": 0,
         "batches": 0,
+        "skipped_reasons": {},
     }
     try:
         for offset in range(0, len(targets), 200):
@@ -55,6 +56,9 @@ async def _apply_all_storage_targets(
             totals["moved"] += len(result["moved"])
             totals["marked_tasks"] += len(result["marked_tasks"])
             totals["skipped"] += len(result["skipped"])
+            for item in result["skipped"]:
+                reason = str(item.get("reason") or "未满足安全处理条件")[:160]
+                totals["skipped_reasons"][reason] = totals["skipped_reasons"].get(reason, 0) + 1
             totals["errors"] += len(result["apply_errors"])
             totals["batches"] += 1
             state.update({

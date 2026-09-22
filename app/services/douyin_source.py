@@ -25,6 +25,10 @@ class DouyinTraversalLimitError(RuntimeError):
         self.metrics = metrics
 
 
+class DouyinScanDeadlineExceeded(RuntimeError):
+    """本轮订阅检查时间预算耗尽；作者应留待续检。"""
+
+
 class ResolvedDouyinInput(TypedDict):
     type: Literal["author", "work"]
     canonical_url: str
@@ -79,7 +83,7 @@ class DouyinSource(Protocol):
     def cache_author_avatar(self, author_id: int, source_url: str | None): ...
     def cache_work_cover(self, work_id: int, source_url: str | None): ...
     def scan_all_works(
-        self, sec_uid: str, known_aweme_ids: Iterable[str] = ()
+        self, sec_uid: str, known_aweme_ids: Iterable[str] = (), *, deadline: float | None = None
     ) -> DouyinScanResult: ...
     def scan_incremental_works(
         self,
@@ -89,6 +93,7 @@ class DouyinSource(Protocol):
         known_streak: int,
         max_pages: int,
         safe_lookback_pages: int,
+        deadline: float | None = None,
     ) -> DouyinScanResult: ...
 
 
@@ -179,7 +184,7 @@ class DouyinWebAdapter:
         )
 
     def scan_all_works(
-        self, sec_uid: str, known_aweme_ids: Iterable[str] = ()
+        self, sec_uid: str, known_aweme_ids: Iterable[str] = (), *, deadline: float | None = None
     ) -> DouyinScanResult:
         known_ids = {str(value) for value in known_aweme_ids if value is not None}
         cursor: int | str = 0
@@ -188,6 +193,8 @@ class DouyinWebAdapter:
         pages_requested = 0
         known_hits = 0
         while True:
+            if deadline is not None and time.monotonic() >= deadline - 60:
+                raise DouyinScanDeadlineExceeded("本轮时间预算不足，暂停全量翻页并等待续检")
             cursor_key = str(cursor)
             if cursor_key in seen_cursors:
                 metrics: DouyinScanMetrics = {
@@ -240,6 +247,7 @@ class DouyinWebAdapter:
         known_streak: int,
         max_pages: int,
         safe_lookback_pages: int,
+        deadline: float | None = None,
     ) -> DouyinScanResult:
         """从最新页向后扫描，跨过置顶项，在连续已知作品处安全停止。"""
         known_ids = {str(value) for value in known_aweme_ids if value is not None}
@@ -256,6 +264,8 @@ class DouyinWebAdapter:
         collected_ids: set[str] = set()
 
         for page_number in range(1, page_limit + 1):
+            if deadline is not None and time.monotonic() >= deadline - 60:
+                raise DouyinScanDeadlineExceeded("本轮时间预算不足，暂停增量翻页并等待续检")
             page = self.list_works(sec_uid, cursor=cursor)
             for item in page["items"]:
                 aweme_id = str(item.get("aweme_id") or "")

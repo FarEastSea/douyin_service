@@ -200,6 +200,8 @@ def _serialize_download_task(
     )
 
     item = DownloadTaskResponse.model_validate(task)
+    if task.status != "downloading":
+        item.download_speed = 0
     item.author_id = author.id if author else None
     item.author_nickname = author.nickname if author else None
     item.aweme_id = work.aweme_id if work else None
@@ -663,7 +665,7 @@ async def get_task_progress(task_id: int, db: AsyncSession = Depends(get_async_d
         total_bytes=task.total_bytes,
         downloaded_bytes=task.downloaded_bytes,
         progress_percent=task.progress_percent,
-        download_speed=task.download_speed,
+        download_speed=task.download_speed if task.status == "downloading" else 0,
         eta_seconds=None
     )
 

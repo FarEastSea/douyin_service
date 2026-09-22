@@ -7,16 +7,18 @@ from pathlib import Path
 import shutil
 from typing import Any, Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.models.models import (
     DownloadHistory,
     DownloadTask,
+    PlatformDownloadTask,
     PlatformMediaAsset,
+    XDownloadTask,
     XMediaAsset,
 )
-from app.services.storage_maintenance import find_rebase_candidate
+from app.services.storage_maintenance import STORAGE_MISSING_ERROR, find_rebase_candidate
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -109,6 +111,7 @@ def run_storage_audit(
     relinkable_count = 0
     missing_count = 0
     zero_byte_count = 0
+    acknowledged_missing_count = 0
     scanned_records = 0
     total_records = 0
     for count_statement in (
@@ -125,12 +128,15 @@ def run_storage_audit(
         progress({"phase": "records", "total_records": total_records, "scanned_records": 0})
 
     def consume(kind: str, statement) -> None:
-        nonlocal scanned_records, relinkable_count, missing_count, zero_byte_count
+        nonlocal scanned_records, relinkable_count, missing_count, zero_byte_count, acknowledged_missing_count
         remaining = max_records - scanned_records
         if remaining <= 0:
             return
         rows = db.execute(statement.limit(remaining)).all()
-        for record_id, path_value in rows:
+        for row in rows:
+            record_id, path_value = row[:2]
+            task_status = row[2] if len(row) > 2 else "completed"
+            already_marked_missing = bool(row[3]) if len(row) > 3 else False
             if not path_value:
                 continue
             scanned_records += 1
@@ -142,6 +148,9 @@ def run_storage_audit(
             except (OSError, RuntimeError, ValueError):
                 normalized = str(path_value)
             known.add(normalized)
+            # A previously acknowledged missing file remains in history for auditability,
+            # but must not be presented as a fresh, repeatable repair action.
+            acknowledged = task_status == "failed" and already_marked_missing
             exists, size = _safe_stat(normalized)
             if not exists:
                 rebased = find_rebase_candidate(root, normalized)
@@ -157,6 +166,9 @@ def run_storage_audit(
                             "suggested_path": rebased_path,
                         })
                 else:
+                    if acknowledged:
+                        acknowledged_missing_count += 1
+                        continue
                     missing_count += 1
                     if len(relinkable) + len(missing) < sample_limit:
                         missing.append({"kind": kind, "id": int(record_id), "path": normalized})
@@ -171,16 +183,44 @@ def run_storage_audit(
                     "scanned_records": scanned_records,
                 })
 
-    consume("download_task", select(DownloadTask.id, DownloadTask.file_path).where(
+    consume("download_task", select(
+        DownloadTask.id, DownloadTask.file_path, DownloadTask.status,
+    ).where(
         DownloadTask.status == "completed", DownloadTask.file_path.is_not(None),
     ))
-    consume("download_history", select(DownloadHistory.id, DownloadHistory.file_path).where(
+    consume("download_history", select(
+        DownloadHistory.id, DownloadHistory.file_path,
+        DownloadTask.status,
+        and_(DownloadTask.status == "failed", DownloadTask.error_message == STORAGE_MISSING_ERROR),
+    ).join(DownloadTask, DownloadHistory.task_id == DownloadTask.id).where(
         DownloadHistory.file_path.is_not(None),
     ))
-    consume("x_media", select(XMediaAsset.id, XMediaAsset.file_path))
-    consume("platform_media", select(PlatformMediaAsset.id, PlatformMediaAsset.file_path))
+    consume("x_media", select(
+        XMediaAsset.id, XMediaAsset.file_path,
+        XDownloadTask.status,
+        and_(XDownloadTask.status == "failed", XDownloadTask.error_code == "storage_missing"),
+    ).join(XDownloadTask, XMediaAsset.task_id == XDownloadTask.id))
+    consume("platform_media", select(
+        PlatformMediaAsset.id, PlatformMediaAsset.file_path,
+        PlatformDownloadTask.status,
+        and_(PlatformDownloadTask.status == "failed", PlatformDownloadTask.error_code == "storage_missing"),
+    ).join(PlatformDownloadTask, PlatformMediaAsset.task_id == PlatformDownloadTask.id))
 
     records_truncated = total_records > scanned_records
+    if not records_truncated:
+        # Non-completed tasks are not repair candidates, but their existing
+        # files still belong to them and must not be classified as orphans.
+        other_paths = db.execute(select(DownloadTask.file_path).where(
+            DownloadTask.status != "completed", DownloadTask.file_path.is_not(None),
+        )).scalars()
+        for path_value in other_paths:
+            try:
+                candidate = Path(str(path_value)).expanduser()
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                known.add(str(candidate.resolve(strict=False)))
+            except (OSError, RuntimeError, ValueError):
+                known.add(str(path_value))
     if progress:
         progress({
             "phase": "files",
@@ -204,6 +244,7 @@ def run_storage_audit(
         "total_records": total_records,
         "records_truncated": records_truncated,
         "files_truncated": scanned_files >= max_files,
+        "acknowledged_missing_records": acknowledged_missing_count,
         "orphan_scan_reliable": not records_truncated,
         "sample_limit": sample_limit,
         "issue_counts": {
@@ -224,7 +265,7 @@ def run_storage_audit(
             "free": disk.free,
             "used_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0,
         },
-        "note": "结果仅用于核对；旧根目录记录可在预演确认后回填，文件不会移动。其他问题也不会自动处理。",
+        "note": "待处理数不含已标记任务失败的历史缺失记录；历史路径仍保留供重试核对。旧根目录记录可预演回填，隔离操作不会直接删除文件。",
     }
 
 

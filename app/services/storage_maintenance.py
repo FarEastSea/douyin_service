@@ -24,6 +24,7 @@ from app.models.models import (
 
 PARTIAL_SUFFIXES = {".part", ".tmp", ".downloading"}
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", ".mov", ".m4v"}
+STORAGE_MISSING_ERROR = "存储巡检确认本地文件缺失或为空，请重试任务恢复媒体"
 RECORD_MODELS = {
     "download_task": (DownloadTask, DownloadTask.file_path),
     "download_history": (DownloadHistory, DownloadHistory.file_path),
@@ -226,7 +227,7 @@ async def _mark_related_task_failed(
         task.phase = "failed"
     if hasattr(task, "error_code"):
         task.error_code = "storage_missing"
-    task.error_message = "存储巡检确认本地文件缺失或为空，请重试任务恢复媒体"
+    task.error_message = STORAGE_MISSING_ERROR
     task.completed_at = datetime.now().replace(tzinfo=None)
     return f"{getattr(task, 'platform', 'douyin')}:{task.id}"
 
@@ -293,8 +294,9 @@ async def apply_storage_repair_plan(
                 task_key = await _mark_related_task_failed(
                     db, item.get("record_kind"), item.get("record_id"),
                 )
-                if task_key:
-                    marked_tasks.append(task_key)
+                if not task_key:
+                    raise ValueError("关联任务不存在，无法标记文件缺失")
+                marked_tasks.append(task_key)
             elif item["action"] == "relink_record":
                 relinked.append(await _relink_record(
                     db,

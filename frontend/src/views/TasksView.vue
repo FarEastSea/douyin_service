@@ -31,6 +31,14 @@ function bytes(value = 0) {
 function statusLabel(value: string) {
   return ({ pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', skipped: '规则跳过', failed: '失败', cancelled: '已取消' } as Record<string, string>)[value] || value
 }
+function transferLabel(task: Task) {
+  if (task.status === 'completed') return '传输完成'
+  if (task.status === 'paused') return '已暂停传输'
+  if (task.status === 'skipped') return '无需传输'
+  if (task.status === 'failed') return '传输失败'
+  if (task.status === 'cancelled') return '已取消传输'
+  return task.download_speed > 0 ? `${bytes(task.download_speed)}/s` : '等待传输'
+}
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
@@ -140,7 +148,7 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
           <tr v-for="task in tasks" :key="task.id">
             <td><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><p v-if="task.error_message" :class="task.status === 'skipped' ? 'inline-note' : 'inline-error'" :title="task.error_message">{{ task.error_message }}</p></div></div></td>
             <td><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b>{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div><small v-if="task.error_action">{{ task.error_action }}</small></td>
-            <td><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ task.download_speed ? `${bytes(task.download_speed)}/s` : '等待传输' }}</span></td>
+            <td><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ transferLabel(task) }}</span></td>
             <td><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>
             <td><div class="row-actions">
               <button v-if="task.preview_url" class="icon-btn" title="预览" @click="preview(task)"><Eye :size="17" /></button>

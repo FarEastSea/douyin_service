@@ -46,6 +46,7 @@ from app.services.douyin_account import get_request_context_sync
 from app.services.douyin_errors import DouyinRequestError
 from app.services.douyin_source import (
     DouyinSource,
+    DouyinScanDeadlineExceeded,
     DouyinTraversalLimitError,
     build_author_profile_url,
     build_douyin_source,
@@ -277,10 +278,13 @@ def _known_work_ids(db: Session, author_id: int) -> set[str]:
     }
 
 
-def _collect_author_works(source, author: Author, db: Session, runtime_config: dict, *, incremental: bool) -> dict:
+def _collect_author_works(
+    source, author: Author, db: Session, runtime_config: dict, *,
+    incremental: bool, deadline: float | None = None,
+) -> dict:
     known_ids = _known_work_ids(db, author.id)
     if not incremental or not known_ids:
-        return source.scan_all_works(author.sec_uid, known_ids)
+        return source.scan_all_works(author.sec_uid, known_ids, deadline=deadline)
     return source.scan_incremental_works(
         author.sec_uid,
         known_ids,
@@ -289,6 +293,7 @@ def _collect_author_works(source, author: Author, db: Session, runtime_config: d
         safe_lookback_pages=int(runtime_config.get(
             "subscription_safe_lookback_pages", settings.SUBSCRIPTION_SAFE_LOOKBACK_PAGES
         )),
+        deadline=deadline,
     )
 
 
@@ -625,6 +630,7 @@ def _download_single_file_impl(
             .where(DownloadTask.id == task_id, DownloadTask.status == "pending")
             .values(
                 status="downloading",
+                download_speed=0,
                 celery_task_id=self_task.request.id,
                 started_at=datetime.now(),
             )
@@ -842,6 +848,7 @@ def _download_single_file_impl(
         
         if result.get("paused"):
             task.status = "paused"
+            task.download_speed = 0
             task.temp_file_path = result.get("temp_path")
             db.commit()
             logger.info(f"任务 {task_id} 已暂停, 已下载: {task.downloaded_bytes}/{task.total_bytes}")
@@ -849,6 +856,7 @@ def _download_single_file_impl(
 
         if result.get("filtered"):
             task.status = "skipped"
+            task.download_speed = 0
             task.error_message = result.get("error") or "文件大小不符合归档规则"
             task.completed_at = datetime.now()
             task.downloaded_bytes = 0
@@ -869,6 +877,7 @@ def _download_single_file_impl(
                 file_path, archive_rules, author, work, task.file_index,
             )
             task.status = "completed"
+            task.download_speed = 0
             task.completed_at = datetime.now()
             task.downloaded_bytes = result["downloaded_bytes"]
             task.total_bytes = result["total_bytes"]
@@ -1341,6 +1350,9 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
     
     定时任务，由 Celery Beat 调度执行
     """
+    # 留出报告提交和续检调度时间，不能等到 Celery 的 25 分钟软中断
+    # 才尝试收尾；信号可能在数据库提交或请求间隔期间抵达。
+    round_deadline = time.monotonic() + 18 * 60
     db = get_sync_db()
     report = None
     lock_token = str(getattr(getattr(self, "request", None), "id", None) or uuid4().hex)
@@ -1534,6 +1546,10 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             db.commit()
         
         for author in authors:
+            if time.monotonic() >= round_deadline:
+                stopped_for_timeout = True
+                logger.info("订阅检查达到单轮时间预算，剩余作者交由续检处理")
+                break
             # 检查是否到达检查时间
             if not force and author.last_check_time:
                 elapsed = (datetime.now() - author.last_check_time).total_seconds()
@@ -1602,6 +1618,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     db,
                     runtime_config,
                     incremental=not run_full_reconcile,
+                    deadline=round_deadline,
                 )
                 work_list = scan_result["items"]
                 scan_audit = _scan_audit_fields(scan_result)
@@ -1623,6 +1640,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         db,
                         runtime_config,
                         incremental=not run_full_reconcile,
+                        deadline=round_deadline,
                     )
                     work_list = scan_result["items"]
                     scan_audit = _scan_audit_fields(scan_result)
@@ -1709,7 +1727,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         ),
                     )
                 
-            except SoftTimeLimitExceeded:
+            except (SoftTimeLimitExceeded, DouyinScanDeadlineExceeded):
                 # 接近 Celery 软超时：优雅退出。已检查作者的进度都已逐个提交，
                 # 未检查的作者会在下一轮（最久未检查优先）继续处理。
                 stopped_for_timeout = True
@@ -1920,8 +1938,8 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 _update_running_progress()
 
             # 请求间隔
-            if author_delay > 0:
-                time.sleep(author_delay)
+            if author_delay > 0 and time.monotonic() < round_deadline:
+                time.sleep(min(author_delay, max(0, round_deadline - time.monotonic())))
         
         # 若因接近超时被迫提前结束，清除全局冷却，让下一次 Beat 立即继续。
         if stopped_for_timeout and not force:
@@ -2011,11 +2029,11 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         # 纯执行超时属于容量分片，可短延迟承接；风控中断则严格等待下一个
         # 设置中心定义的自动更新周期，避免过早重试加重账号风险。
         continuation_task_id = None
-        if not force and stopped_for_timeout and remaining_count > 0:
+        if stopped_for_timeout and remaining_count > 0:
             countdown = 30
             try:
                 continuation = check_subscriptions.apply_async(kwargs={
-                    "force": False,
+                    "force": force,
                     "author_ids": resume_author_ids,
                     "cycle_id": cycle_id,
                     "cycle_total": cycle_total,
