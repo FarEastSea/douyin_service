@@ -139,7 +139,7 @@ select { min-height: 38px; font-size: 13px; }
 .empty-state strong { color: var(--text); font-size: 15px; }
 .empty-state span { font-size: 13px; }
 .risk-banner { width: min(100%, 1600px); margin: 0 auto 20px; background: color-mix(in srgb, var(--amber) 8%, var(--surface)); border-color: color-mix(in srgb, var(--amber) 35%, var(--line)); }
-.settings-workspace .settings-tabs { padding: 9px 22px; gap: 6px; background: var(--surface-2); }
+.settings-workspace .settings-tabs { background: var(--surface-2); }
 .settings-panel { padding: 25px; }
 .settings-panel h3 { font-size: 17px; }
 .settings-panel header p, .settings-panel .form-grid label > span { font-size: 13px; }

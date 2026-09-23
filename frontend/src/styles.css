@@ -49,7 +49,7 @@ svg { flex:0 0 auto }
 .collapsed .brand { justify-content:center }.collapsed .platform-switch { grid-template-columns:1fr }.collapsed .main-nav a { justify-content:center; padding:0 }.collapsed .sidebar>footer { justify-content:center }.collapsed .service-state { display:none }
 .main-area { min-width:0; min-height:100vh; padding:0 30px 30px }
 .topbar { height:74px; display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--line) }
-.topbar>div:first-of-type { display:grid; gap:2px }.topbar span { color:var(--muted); font-size:11px }.topbar strong { font-size:14px }.topbar-actions { margin-left:auto; display:flex; gap:8px }.profile-button { width:36px; height:36px; border:1px solid var(--line); border-radius:50%; background:var(--surface); color:var(--muted); cursor:pointer }.profile-button svg { width:17px }
+.topbar>div:first-of-type { display:grid; gap:2px }.topbar-title span { color:var(--muted); font-size:11px }.topbar strong { font-size:14px }.topbar-actions { margin-left:auto; display:flex; gap:8px }.profile-button { width:36px; height:36px; border:1px solid var(--line); border-radius:50%; background:var(--surface); color:var(--muted); cursor:pointer }.profile-button svg { width:17px }
 .mobile-menu { display:none!important }
 .summary-grid { padding:22px 0 18px; display:grid; grid-template-columns:repeat(5,minmax(120px,1fr)); gap:12px }
 .summary-grid article { position:relative; min-height:88px; padding:16px 18px; display:grid; align-content:center; gap:6px; border:1px solid var(--line); border-radius:14px; background:var(--surface) }

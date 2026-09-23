@@ -78,6 +78,10 @@ const visibleGeneralFields = computed(() => generalFields.value.filter(field => 
 const xCookieFile = ref('')
 const settingsTabs = [['general', '常规设置'], ['account', '平台账号'], ['runtime', '下载与风控'], ['archive', '归档与导出']]
 const maintenanceTabs = [['process', '服务进程'], ['operations', '平台与存储'], ['logs', '活动日志'], ['about', '诊断与关于']]
+const tabDescriptions: Record<string, string> = {
+  general: '应用与基础设施', account: '登录凭据与账号', runtime: '任务节奏与限制', archive: '文件组织与元数据',
+  process: 'Worker 与调度器', operations: '平台状态与存储', logs: '事件与失败证据', about: '版本与系统诊断',
+}
 const tabs = computed(() => props.mode === 'maintenance' ? maintenanceTabs : settingsTabs)
 function selectTab(value: string) { tab.value = value; void router.replace({ query: { ...route.query, tab: value } }) }
 watch(() => [route.query.tab, props.mode] as const, () => {
@@ -286,9 +290,11 @@ watch(() => props.mode, () => { void init() })
 <template>
   <section class="workspace-card settings-workspace">
     <header class="workspace-header"><div><h2>{{ props.mode === 'maintenance' ? '运行维护' : '设置' }}</h2><span>{{ props.mode === 'maintenance' ? '查看服务、平台、存储与日志；维护动作始终由你确认。' : '所有网页配置在保存后动态生效。' }}</span></div><button class="btn ghost" @click="init"><RefreshCw :size="16" />刷新状态</button></header>
-    <nav class="settings-tabs" :aria-label="props.mode === 'maintenance' ? '运行维护分类' : '设置分类'"><button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" :aria-current="tab === item[0] ? 'page' : undefined" @click="selectTab(item[0])">{{ item[1] }}</button></nav>
+    <div class="settings-layout">
+      <nav class="settings-tabs" :aria-label="props.mode === 'maintenance' ? '运行维护分类' : '设置分类'"><button v-for="item in tabs" :key="item[0]" :class="{ active: tab === item[0] }" :aria-current="tab === item[0] ? 'page' : undefined" @click="selectTab(item[0])"><strong>{{ item[1] }}</strong><span>{{ tabDescriptions[item[0]] }}</span></button></nav>
+      <div class="settings-content">
 
-    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库、后台任务与通知配置</p></div><div class="header-actions"><select v-if="generalGroup === '通知'" v-model="notificationTestChannel" aria-label="通知测试渠道"><option value="all">全部渠道</option><option value="webhook">Webhook</option><option value="bark">Bark</option><option value="email">邮件</option><option value="gotify">Gotify</option></select><button v-if="generalGroup === '通知'" class="btn ghost" :disabled="notificationTestBusy || !resourceState.all.loaded" @click="testNotification"><BellRing :size="16" />保存并测试</button><button class="btn primary" :disabled="!resourceState.all.loaded" @click="saveAll"><Save :size="16" />保存</button></div></header><p v-if="resourceState.all.error || !resourceState.all.loaded" class="inline-note" role="alert">{{ resourceState.all.error ? `基础配置读取失败：${resourceState.all.error}。${resourceState.all.loaded ? '当前保留上次读取值。' : '为避免覆盖服务端现有值，保存已禁用。'}` : '正在读取基础配置…' }}</p><nav v-if="resourceState.all.loaded" class="settings-subtabs" aria-label="基础配置分组"><button v-for="group in generalGroups" :key="group" :class="{ active: generalGroup === group }" :aria-pressed="generalGroup === group" @click="generalGroup = group">{{ group }}</button></nav><div v-if="resourceState.all.loaded" class="form-grid">
+    <div v-if="tab === 'general'" class="settings-panel"><header><Settings2 /><div><h3>基础配置</h3><p>按用途分类管理应用、目录、数据库、后台任务与通知配置</p></div><div class="header-actions"><select v-if="generalGroup === '通知'" v-model="notificationTestChannel" aria-label="通知测试渠道"><option value="all">全部渠道</option><option value="webhook">Webhook</option><option value="bark">Bark</option><option value="email">邮件</option><option value="gotify">Gotify</option></select><button v-if="generalGroup === '通知'" class="btn ghost" :disabled="notificationTestBusy || !resourceState.all.loaded" @click="testNotification"><BellRing :size="16" />保存并测试</button><button class="btn primary" :disabled="!resourceState.all.loaded" @click="saveAll"><Save :size="16" />保存</button></div></header><p v-if="resourceState.all.error || !resourceState.all.loaded" class="inline-note" role="alert">{{ resourceState.all.error ? `基础配置读取失败：${resourceState.all.error}。${resourceState.all.loaded ? '当前保留上次读取值。' : '为避免覆盖服务端现有值，保存已禁用。'}` : '正在读取基础配置…' }}</p><div v-if="resourceState.all.loaded" class="settings-group-picker"><label for="general-group"><span>配置分组</span><select id="general-group" v-model="generalGroup"><option v-for="group in generalGroups" :key="group" :value="group">{{ group }}</option></select></label><p>当前显示 {{ generalGroup }} · {{ visibleGeneralFields.length }} 项配置</p></div><div v-if="resourceState.all.loaded" class="form-grid">
       <label v-for="field in visibleGeneralFields" :key="field.key"><span>{{ field.label }}</span><input v-if="field.secret" v-model="secretValues[field.key]" type="password" placeholder="留空保持当前值" /><button v-else-if="isBooleanField(field)" type="button" class="setting-switch" :class="{ on: booleanFieldValue(field) }" role="switch" :aria-checked="booleanFieldValue(field)" @click="toggleBooleanField(field)"><span class="switch-track"><i /></span><span>{{ booleanFieldValue(field) ? '已开启' : '已关闭' }}</span></button><input v-else v-model="allValues[field.key].value" :placeholder="field.default" /><small>{{ field.help || (field.secret ? '敏感值不会回显' : field.group) }}</small></label>
     </div><div v-if="generalGroup === '通知' && Object.keys(notificationTestResult).length" class="notification-test-result"><article v-for="(result, channel) in notificationTestResult" :key="channel" :data-success="result.success"><strong>{{ channel }}</strong><span>{{ result.message }}</span></article></div></div>
 
@@ -327,13 +333,25 @@ watch(() => props.mode, () => { void init() })
     <div v-else-if="tab === 'logs'" class="settings-panel log-panel"><header><Activity /><div><h3>活动日志</h3><p>记录可操作事件、失败证据和关联请求；高频周期任务不再逐次刷屏</p></div><div class="header-actions"><button type="button" class="setting-switch" :class="{ on: live }" role="switch" :aria-checked="live" @click="live = !live"><span class="switch-track"><i /></span><span>实时刷新</span></button><button class="btn ghost compact" :disabled="!resourceState.logs.loaded" @click="copyLogs"><Clipboard :size="15" />复制</button><button class="btn ghost compact" :disabled="!resourceState.logs.loaded" @click="clearLogs"><Trash2 :size="15" />清空</button><button class="btn ghost compact" @click="loadLogs"><RefreshCw :size="15" />刷新</button></div></header><p v-if="resourceState.logs.error || !resourceState.logs.loaded" class="inline-note" role="alert">{{ resourceState.logs.error ? `活动日志读取失败：${resourceState.logs.error}。${resourceState.logs.loaded ? '下方保留上次读取结果。' : '当前日志状态未确认。'}` : '正在读取活动日志…' }}</p><div class="log-filters"><button v-for="level in ['info','warning','error']" :key="level" :class="{ active: logLevels.includes(level) }" :aria-pressed="logLevels.includes(level)" :disabled="!resourceState.logs.loaded" @click="toggleLevel(level)">{{ level }}</button></div><div class="log-console"><article v-for="(item, index) in filteredLogs" :key="`${item.ts}-${index}`" :data-level="item.level"><time>{{ new Date(item.ts * 1000).toLocaleString() }}</time><b>[{{ item.source }}]<template v-if="item.event_code"> [{{ item.event_code }}]</template></b><span>{{ item.msg }}</span><small v-if="item.detail">{{ item.detail }}</small><small v-if="item.correlation_id || Object.keys(item.context || {}).length">{{ item.correlation_id ? `请求 ${item.correlation_id}` : '' }}{{ Object.keys(item.context || {}).length ? ` · ${JSON.stringify(item.context)}` : '' }}</small></article><div v-if="resourceState.logs.loaded && !filteredLogs.length" class="empty-state">暂无符合筛选条件的日志</div><div v-else-if="!resourceState.logs.loaded" class="empty-state">日志状态未确认</div></div></div>
 
     <div v-else-if="tab === 'about'" class="settings-panel"><header><Database /><div><h3>诊断与关于</h3><p>版本检查、更新诊断与运维入口</p></div></header><div class="about-grid"><article><strong>当前版本 {{ updateInfo.current?.short || '—' }}</strong><p>{{ updateInfo.message || '正在读取本地版本信息' }}<br />分支：{{ updateInfo.branch || '—' }}</p><div class="header-actions"><button class="btn ghost" :disabled="updateBusy" @click="checkUpdate">检查更新</button><button class="btn ghost" @click="diagnoseUpdate">复制诊断</button><button v-if="updateInfo.has_update" class="btn primary" :disabled="updateBusy || !updateInfo.update_supported" @click="applyUpdate">安装更新</button></div></article><article><strong>媒体下载管理系统</strong><p>FastAPI · PostgreSQL · Redis · Celery · Vue 3</p><div class="header-actions"><a class="btn ghost" href="/docs" target="_blank">API 文档</a><a class="btn ghost" href="/legacy">旧版界面</a></div></article></div><pre v-if="diagnostic" class="diagnostic-preview">{{ JSON.stringify(diagnostic, null, 2) }}</pre></div>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
-.settings-subtabs { margin: -4px 0 16px; padding-bottom: 12px; display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--line); }
-.settings-subtabs button { padding: 7px 11px; white-space: nowrap; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); cursor: pointer; }
-.settings-subtabs button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.settings-layout { min-height: 0; display: grid; grid-template-columns: 206px minmax(0, 1fr); flex: 1; }
+.settings-content { min-width: 0; }
+.settings-tabs { padding: 18px 12px; display: grid; align-content: start; gap: 5px; overflow: visible; border-right: 1px solid var(--line); border-bottom: 0; background: var(--surface-2); }
+.settings-tabs button { width: 100%; min-height: 56px; padding: 9px 11px; display: grid; align-content: center; gap: 2px; text-align: left; border-radius: 7px; }
+.settings-tabs button strong { color: inherit; font-size: 13px; font-weight: 700; }
+.settings-tabs button span { color: var(--faint); font-size: 11px; font-weight: 520; }
+.settings-tabs button.active { background: var(--accent-soft); color: var(--accent); }
+.settings-tabs button.active span { color: color-mix(in srgb, var(--accent) 72%, var(--muted)); }
+.settings-group-picker { margin: -2px 0 18px; padding: 12px 14px; display: flex; align-items: end; justify-content: space-between; gap: 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.settings-group-picker label { min-width: 220px; display: grid; gap: 6px; }
+.settings-group-picker label > span { color: var(--muted); font-size: 12px; font-weight: 680; }
+.settings-group-picker select { width: 100%; }
+.settings-group-picker p { margin: 0 0 8px; color: var(--faint); font-size: 12px; }
 .notification-test-result { margin-top: 14px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .notification-test-result article { padding: 10px 12px; display: grid; gap: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
 .notification-test-result article[data-success="true"] { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
@@ -382,8 +400,7 @@ watch(() => props.mode, () => { void init() })
 .repair-plan { display:grid; gap:6px; margin:12px 0; padding:12px; border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line)); border-radius:10px; background:var(--accent-soft); }
 .repair-plan>span,.repair-plan li { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .repair-plan ul { margin:8px 0 0; padding-left:18px; }
-@media(max-width:900px){.notification-test-result{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:900px){.readiness-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:900px){.platform-audit-grid{grid-template-columns:repeat(2,1fr)}.storage-metrics{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:900px){.settings-layout{display:block}.settings-tabs{padding:10px 12px;display:grid;grid-template-columns:repeat(4,minmax(132px,1fr));overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.settings-tabs button{min-height:52px}.notification-test-result{grid-template-columns:repeat(2,1fr)}.readiness-grid{grid-template-columns:repeat(2,1fr)}.platform-audit-grid{grid-template-columns:repeat(2,1fr)}.storage-metrics{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:720px){.archive-grid{grid-template-columns:1fr}.archive-pair{grid-template-columns:1fr}}
+@media(max-width:620px){.settings-tabs{grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.settings-group-picker{align-items:stretch;flex-direction:column;gap:8px}.settings-group-picker label{min-width:0}.settings-group-picker p{margin:0}}
 </style>
