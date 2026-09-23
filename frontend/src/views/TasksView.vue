@@ -13,6 +13,7 @@ const router = useRouter()
 const tasks = ref<Task[]>([])
 const total = ref(0), pages = ref(1), page = ref(1)
 const loading = ref(false), status = ref(''), query = ref(''), shareUrl = ref('')
+const loadError = ref('')
 const timer = ref<number>(), queryTimer = ref<number>()
 const statusCounts = ref<Record<string, number>>({})
 const createBusy = ref(false), bulkBusy = ref(false)
@@ -46,8 +47,8 @@ async function load(silent = false) {
     if (status.value) params.set('status', status.value)
     if (query.value.trim()) params.set('q', query.value.trim())
     const data = await api<PageData<Task> & { status_counts: Record<string, number> }>(`/tasks/?${params}`)
-    tasks.value = data.items; total.value = data.total; pages.value = data.pages; statusCounts.value = data.status_counts || {}
-  } catch (error: any) { if (!silent) store.notify(error.message || '加载任务失败', 'error') }
+    tasks.value = data.items; total.value = data.total; pages.value = data.pages; statusCounts.value = data.status_counts || {}; loadError.value = ''
+  } catch (error: any) { loadError.value = error.message || '加载任务失败'; if (!silent) store.notify(loadError.value, 'error') }
   finally { loading.value = false }
 }
 async function createTask() {
@@ -98,6 +99,12 @@ async function copyErrors() {
     await navigator.clipboard.writeText(result.data.errors.join('\n\n')); store.notify(`已复制 ${result.data.count} 条失败原因`)
   } catch (error: any) { store.notify(error.message || '复制失败', 'error') }
 }
+async function copyTaskError(task: Task) {
+  try {
+    await navigator.clipboard.writeText(`抖音任务 #${task.id}\n作品：${task.work_title || task.file_name || '未知'}\n错误代码：${task.error_code || '未提供'}\n失败原因：${task.error_message || '未提供'}\n建议操作：${task.error_action || '请检查任务详情'}`)
+    store.notify('任务诊断已复制')
+  } catch { store.notify('复制失败，请检查浏览器剪贴板权限', 'error') }
+}
 function preview(task: Task) {
   if (!task.preview_url) return
   openMedia([{ url: task.preview_url, type: task.preview_media_type === 'video' ? 'video' : 'image', title: task.work_title || task.file_name }])
@@ -112,14 +119,14 @@ watch(query, () => {
     else page.value = 1
   }, 350)
 })
-onMounted(() => { load(); timer.value = window.setInterval(() => load(true), 5000) })
+onMounted(() => { void load(); timer.value = window.setInterval(() => { if (!document.hidden) void load(true) }, 5000) })
 onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null) window.clearTimeout(queryTimer.value) })
 </script>
 
 <template>
   <section class="workspace-card task-workspace">
     <header class="workspace-header">
-      <div><p class="eyebrow">DOUYIN TASKS</p><h2>下载任务</h2><span>管理队列、进度、失败诊断与媒体资源</span></div>
+      <div><h2>抖音任务</h2><span>专项队列、进度和失败诊断；跨平台任务请使用“全部任务”。</span></div>
       <div class="header-actions">
         <button v-if="total && (status === 'failed' || failedCount)" class="btn ghost" @click="copyErrors"><Clipboard :size="16" />复制所有失败原因</button>
         <button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button>
@@ -131,14 +138,15 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
         </div></details>
       </div>
     </header>
+    <div v-if="loadError" class="load-error-banner" role="alert">抖音任务暂不可用：{{ loadError }}{{ tasks.length ? '；下方为上次读取的结果。' : '' }}<button class="text-button" @click="load()">重试</button></div>
 
     <form class="command-bar" @submit.prevent="createTask">
-      <Download :size="18" /><input v-model="shareUrl" placeholder="粘贴作者主页或单个作品分享链接…" autocomplete="off" /><button class="btn primary" :disabled="store.risk.active || createBusy">{{ createBusy ? '正在提交…' : '开始下载' }}</button>
+      <Download :size="18" /><input v-model="shareUrl" aria-label="抖音作者主页或单个作品分享链接" placeholder="粘贴作者主页或单个作品分享链接…" autocomplete="off" /><button class="btn primary" :disabled="store.risk.active || createBusy">{{ createBusy ? '正在提交…' : '开始下载' }}</button>
     </form>
 
     <div class="filter-row">
-      <nav class="segmented"><button v-for="item in statuses" :key="item[0]" :class="{ active: status === item[0] }" @click="setStatus(item[0])">{{ item[1] }} <small>{{ statusCount(item[0]) }}</small></button></nav>
-      <label class="search compact-search"><Search :size="15" /><input v-model="query" placeholder="搜索全部任务、作品或作者" /></label>
+      <nav class="segmented"><button v-for="item in statuses" :key="item[0]" :class="{ active: status === item[0] }" @click="setStatus(item[0])">{{ item[1] }} <small>{{ loadError && !tasks.length ? '—' : statusCount(item[0]) }}</small></button></nav>
+      <label class="search compact-search"><Search :size="15" /><input v-model="query" aria-label="搜索抖音任务" placeholder="搜索全部任务、作品或作者" /></label>
     </div>
 
     <div class="table-shell" :class="{ loading }">
@@ -146,22 +154,22 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
         <thead><tr><th>任务</th><th>状态与进度</th><th>传输</th><th>时间</th><th class="actions-col">操作</th></tr></thead>
         <tbody>
           <tr v-for="task in tasks" :key="task.id">
-            <td><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><p v-if="task.error_message" :class="task.status === 'skipped' ? 'inline-note' : 'inline-error'" :title="task.error_message">{{ task.error_message }}</p></div></div></td>
-            <td><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b>{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div><small v-if="task.error_action">{{ task.error_action }}</small></td>
-            <td><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ transferLabel(task) }}</span></td>
-            <td><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>
-            <td><div class="row-actions">
-              <button v-if="task.preview_url" class="icon-btn" title="预览" @click="preview(task)"><Eye :size="17" /></button>
-               <button v-if="task.status === 'downloading' || task.status === 'pending'" class="icon-btn" title="暂停" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'pause')"><Pause :size="17" /></button>
-               <button v-if="task.status === 'paused'" class="icon-btn" title="恢复" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'resume')"><Play :size="17" /></button>
-               <button v-if="task.status === 'failed' || task.status === 'cancelled'" class="icon-btn" :title="task.error_category === 'risk_control' ? '刷新链接后重试' : '重试'" :disabled="busyTaskIds.has(task.id)" @click="action(task, task.error_category === 'risk_control' ? 'refresh-retry' : 'retry')"><RotateCcw :size="17" /></button>
-              <button class="icon-btn danger" title="删除" @click="remove(task)"><Trash2 :size="17" /></button>
+            <td data-label="任务"><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><details v-if="task.error_message" class="task-error-detail"><summary>{{ task.status === 'skipped' ? '查看跳过原因' : '查看失败原因' }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_action">建议：{{ task.error_action }}</small><button class="text-button" @click="copyTaskError(task)">复制诊断</button></details></div></div></td>
+            <td data-label="状态与进度"><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b>{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div></td>
+            <td data-label="传输"><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ transferLabel(task) }}</span></td>
+            <td data-label="时间"><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>
+            <td data-label="操作"><div class="row-actions">
+              <button v-if="task.preview_url" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" @click="preview(task)"><Eye :size="17" /></button>
+               <button v-if="task.status === 'downloading' || task.status === 'pending'" class="icon-btn" title="暂停" :aria-label="`暂停任务 ${task.id}`" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'pause')"><Pause :size="17" /></button>
+               <button v-if="task.status === 'paused'" class="icon-btn" title="恢复" :aria-label="`恢复任务 ${task.id}`" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'resume')"><Play :size="17" /></button>
+               <button v-if="task.status === 'failed' || task.status === 'cancelled'" class="icon-btn" :title="task.error_category === 'risk_control' ? '刷新链接后重试' : '重试'" :aria-label="`${task.error_category === 'risk_control' ? '刷新链接后重试' : '重试'}任务 ${task.id}`" :disabled="busyTaskIds.has(task.id)" @click="action(task, task.error_category === 'risk_control' ? 'refresh-retry' : 'retry')"><RotateCcw :size="17" /></button>
+              <button class="icon-btn danger" title="删除" :aria-label="`删除任务 ${task.id}`" @click="remove(task)"><Trash2 :size="17" /></button>
             </div></td>
           </tr>
         </tbody>
       </table>
-      <div v-if="!loading && !tasks.length" class="empty-state"><Download /><strong>暂无任务</strong><span>粘贴分享链接即可开始</span></div>
+      <div v-if="!loading && !tasks.length && !loadError" class="empty-state"><Download /><strong>暂无任务</strong><span>粘贴分享链接即可开始</span></div>
     </div>
-    <Pager :page="page" :pages="pages" :total="total" @change="page = $event" />
+    <Pager v-if="!loadError || tasks.length" :page="page" :pages="pages" :total="total" @change="page = $event" />
   </section>
 </template>

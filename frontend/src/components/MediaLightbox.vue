@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Download, X } from '@lucide/vue'
+import { focusFirst, restoreFocus, trapFocus } from '../focus'
 import type { MediaItem } from '../types'
 
 const props = defineProps<{ open: boolean; items: MediaItem[]; start?: number }>()
 const emit = defineEmits<{ close: [] }>()
 const index = ref(0)
 const failed = ref(false)
+const dialogElement = ref<HTMLElement | null>(null)
+let returnFocus: HTMLElement | null = null
 const current = computed(() => props.items[index.value])
 
 function move(delta: number) {
@@ -20,14 +23,21 @@ function keydown(event: KeyboardEvent) {
   if (event.key === 'Escape') close()
   if (event.key === 'ArrowLeft') move(-1)
   if (event.key === 'ArrowRight') move(1)
+  trapFocus(event, dialogElement.value)
 }
 watch(() => props.open, async open => {
   document.body.classList.toggle('modal-open', open)
   if (open) {
+    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     index.value = Math.min(Math.max(props.start || 0, 0), Math.max(0, props.items.length - 1))
     failed.value = false
     await nextTick()
-    document.querySelector<HTMLElement>('.lightbox-close')?.focus()
+    focusFirst(dialogElement.value, dialogElement.value?.querySelector<HTMLElement>('.lightbox-close'))
+  } else {
+    const target = returnFocus
+    returnFocus = null
+    await nextTick()
+    restoreFocus(target)
   }
 })
 onMounted(() => window.addEventListener('keydown', keydown))
@@ -37,12 +47,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); document
 <template>
   <Teleport to="body">
     <Transition name="fade">
-      <div v-if="open" class="lightbox" role="dialog" aria-modal="true" aria-label="媒体预览" @click.self="close">
+      <div v-if="open" ref="dialogElement" class="lightbox" role="dialog" aria-modal="true" aria-label="媒体预览" tabindex="-1" @click.self="close">
         <header class="lightbox-bar">
           <div><strong>{{ current?.title || '媒体预览' }}</strong><span v-if="items.length > 1">{{ index + 1 }} / {{ items.length }}</span></div>
           <div>
             <a v-if="current" class="icon-btn" :href="current.url" download title="下载"><Download :size="18" /></a>
-            <button class="icon-btn lightbox-close" title="关闭" @click="close"><X :size="20" /></button>
+            <button class="icon-btn lightbox-close" title="关闭" aria-label="关闭媒体预览" @click="close"><X :size="20" /></button>
           </div>
         </header>
         <main class="lightbox-stage">

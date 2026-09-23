@@ -1,21 +1,29 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X } from '@lucide/vue'
 import { api, jsonBody } from '../api'
 import Pager from '../components/Pager.vue'
 import { openMedia } from '../media'
+import { focusFirst, restoreFocus, trapFocus } from '../focus'
 import { useAppStore } from '../stores/app'
 import type { MediaItem, UnifiedTask, UnifiedTaskActionResult, UnifiedTaskPage } from '../types'
 
 const store = useAppStore()
-const tasks = ref<UnifiedTask[]>([]), page = ref(1), pages = ref(1), total = ref(0)
-const platform = ref(''), status = ref(''), search = ref(''), loading = ref(false)
+const route = useRoute(), router = useRouter()
+const queryText = (value: unknown) => typeof value === 'string' ? value : ''
+const queryPage = (value: unknown) => Math.max(1, Number.parseInt(queryText(value), 10) || 1)
+const tasks = ref<UnifiedTask[]>([]), page = ref(queryPage(route.query.page)), pages = ref(1), total = ref(0)
+const platform = ref(queryText(route.query.platform)), status = ref(queryText(route.query.status)), search = ref(queryText(route.query.q)), loading = ref(false)
+const loadError = ref(''), summaryLoaded = ref(false)
 const statusSummary = ref<Record<string, number>>({}), selectedKeys = ref<string[]>([])
 const actionBusy = ref(false), rowBusy = ref<string[]>([])
 const actionFailures = ref<Array<{ task_key: string; message: string; status_code: number }>>([])
 const statsTask = ref<UnifiedTask>(), statsData = ref<any>({ snapshots: [] }), statsBusy = ref(false)
+const statsDialog = ref<HTMLElement | null>(null)
 const statsMetric = ref<'view_count' | 'like_count' | 'comment_count' | 'share_count'>('view_count')
 let searchTimer: number | undefined
+let statsReturnFocus: HTMLElement | null = null
 const platformNames: Record<string, string> = { douyin: '抖音', x: 'X', tiktok: 'TikTok', weibo: '微博', bilibili: 'B站', xhs: '小红书' }
 const statusNames: Record<string, string> = { pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', skipped: '已跳过', failed: '失败', cancelled: '已取消' }
 const phaseNames: Record<string, string> = { queued: '排队中', preparing: '准备中', downloading: '下载中', completed: '已完成', failed: '失败', cancelled: '已取消' }
@@ -56,11 +64,25 @@ async function load() {
     pages.value = data.pages
     total.value = data.total
     statusSummary.value = data.status_summary || {}
+    summaryLoaded.value = true
+    loadError.value = ''
     selectedKeys.value = []
-  } catch (error: any) { store.notify(error.message || '加载统一任务失败', 'error') }
+  } catch (error: any) {
+    loadError.value = error.message || '加载统一任务失败'
+    tasks.value = []; total.value = 0; pages.value = 1; statusSummary.value = {}; summaryLoaded.value = false; selectedKeys.value = []
+    store.notify(loadError.value, 'error')
+  }
   finally { loading.value = false }
 }
-function resetAndLoad() { page.value = 1; selectedKeys.value = []; void load() }
+function syncQuery() {
+  const query: Record<string, string> = {}
+  if (platform.value) query.platform = platform.value
+  if (status.value) query.status = status.value
+  if (search.value.trim()) query.q = search.value.trim()
+  if (page.value > 1) query.page = String(page.value)
+  void router.replace({ path: '/operations/tasks', query })
+}
+function resetAndLoad() { page.value = 1; selectedKeys.value = []; syncQuery(); void load() }
 function queueSearch() { window.clearTimeout(searchTimer); searchTimer = window.setTimeout(resetAndLoad, 350) }
 function toggleTask(taskKey: string) {
   selectedKeys.value = selectedKeys.value.includes(taskKey)
@@ -100,30 +122,59 @@ async function preview(task: UnifiedTask) {
 }
 async function showStats(task: UnifiedTask) {
   if (!task.stats_endpoint) return
+  statsReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   statsTask.value = task; statsBusy.value = true; statsData.value = { snapshots: [] }
+  document.body.classList.add('modal-open')
+  void nextTick(() => focusFirst(statsDialog.value))
   try { statsData.value = await api<any>(task.stats_endpoint) }
   catch (error: any) { store.notify(error.message || '互动趋势加载失败', 'error') }
   finally { statsBusy.value = false }
 }
-function changePage(value: number) { page.value = value; void load() }
-onMounted(load)
-onBeforeUnmount(() => window.clearTimeout(searchTimer))
+function closeStats() {
+  statsTask.value = undefined
+  document.body.classList.remove('modal-open')
+  const target = statsReturnFocus
+  statsReturnFocus = null
+  void nextTick(() => restoreFocus(target))
+}
+function statsKeydown(event: KeyboardEvent) {
+  if (!statsTask.value) return
+  if (event.key === 'Escape') { event.preventDefault(); closeStats() }
+  else trapFocus(event, statsDialog.value)
+}
+function changePage(value: number) { page.value = value; syncQuery(); void load() }
+async function copyFailure(task: UnifiedTask) {
+  try {
+    await navigator.clipboard.writeText(`平台：${platformNames[task.platform] || task.platform}\n任务：${task.key}\n来源：${task.source_label}\n错误代码：${task.error_code || '未提供'}\n失败原因：${task.error_message || '未提供'}`)
+    store.notify('失败信息已复制')
+  } catch { store.notify('复制失败，请检查浏览器剪贴板权限', 'error') }
+}
+onMounted(() => { void load(); document.addEventListener('keydown', statsKeydown) })
+onBeforeUnmount(() => { window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
+watch(() => route.fullPath, () => {
+  const nextPlatform = queryText(route.query.platform), nextStatus = queryText(route.query.status)
+  const nextSearch = queryText(route.query.q), nextPage = queryPage(route.query.page)
+  if (nextPlatform === platform.value && nextStatus === status.value && nextSearch === search.value.trim() && nextPage === page.value) return
+  platform.value = nextPlatform; status.value = nextStatus; search.value = nextSearch; page.value = nextPage
+  void load()
+})
 </script>
 
 <template>
   <section class="workspace-card">
     <header class="workspace-header">
-      <div><p class="eyebrow">UNIFIED QUEUE</p><h2>全部平台任务</h2><span>统一检索、批量操作、错误追踪和本地预览</span></div>
+      <div><h2>全部任务</h2><span>跨平台检索、批量处理与失败诊断；筛选会保留在链接中。</span></div>
       <button class="btn ghost" :disabled="loading" @click="load"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
     </header>
+    <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用：{{ loadError }}<button class="text-button" @click="load">重试</button></div>
     <div class="filter-row unified-filters">
       <select v-model="platform" aria-label="平台" @change="resetAndLoad"><option value="">全部平台</option><option v-for="item in store.platforms" :key="item.id" :value="item.id">{{ item.name }}</option></select>
       <select v-model="status" aria-label="状态" @change="resetAndLoad"><option value="">全部状态</option><option value="pending">等待中</option><option value="downloading">下载中</option><option value="paused">已暂停</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
-      <label class="search"><Search :size="15" /><input v-model="search" placeholder="搜索作者、标题、作品 ID、文件名或来源链接" @input="queueSearch" /></label>
+      <label class="search"><Search :size="16" /><input v-model="search" aria-label="搜索任务" placeholder="搜索作者、标题、作品 ID、文件名或来源链接" @input="queueSearch" /></label>
     </div>
     <div class="status-strip" aria-label="当前筛选结果状态汇总">
-      <button :class="{ active: !status }" @click="setStatus('')"><span>全部</span><b>{{ summaryTotal.toLocaleString() }}</b></button>
-      <button v-for="item in visibleSummaries" :key="item" :class="{ active: status === item }" @click="setStatus(item)"><span>{{ statusNames[item] || item }}</span><b>{{ statusSummary[item].toLocaleString() }}</b></button>
+      <button :class="{ active: !status }" :aria-pressed="!status" @click="setStatus('')"><span>全部</span><b>{{ summaryLoaded ? summaryTotal.toLocaleString() : '—' }}</b></button>
+      <button v-for="item in visibleSummaries" :key="item" :class="{ active: status === item }" :aria-pressed="status === item" @click="setStatus(item)"><span>{{ statusNames[item] || item }}</span><b>{{ Number(statusSummary[item] || 0).toLocaleString() }}</b></button>
     </div>
     <div v-if="selectedKeys.length" class="selection-bar" role="status">
       <span>已选择 <b>{{ selectedKeys.length }}</b> 个当前页任务</span>
@@ -137,19 +188,19 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer))
       <table class="data-table">
         <thead><tr><th class="select-col"><input type="checkbox" aria-label="选择当前页全部任务" :checked="allPageSelected" @change="togglePage" /></th><th>平台与来源</th><th>元数据</th><th>状态</th><th>进度</th><th>结果</th><th class="actions-col">操作</th></tr></thead>
         <tbody><tr v-for="task in tasks" :key="task.key" :class="{ selected: selectedKeys.includes(task.key) }">
-          <td class="select-col"><input type="checkbox" :aria-label="`选择任务 ${task.id}`" :checked="selectedKeys.includes(task.key)" @change="toggleTask(task.key)" /></td>
-          <td><div class="media-cell"><span class="media-icon">{{ platformNames[task.platform] || task.platform }}</span><div><strong :title="task.source_label">{{ task.source_label }}</strong><span>{{ task.source_type === 'profile' ? '作者主页' : '单条作品' }} · #{{ task.id }}</span></div></div></td>
-          <td><strong :title="task.author_name || ''">{{ task.author_name || '作者未知' }}</strong><span>{{ task.published_at ? new Date(task.published_at).toLocaleString() : (task.media_type || '元数据待采集') }}</span></td>
-          <td><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small></td>
-          <td><strong>{{ Number(task.progress_percent || 0).toFixed(1) }}%</strong><span>{{ task.file_count }} 个文件</span></td>
-          <td class="result-cell"><span :class="{ 'inline-error': task.error_message }" :title="task.error_message || ''">{{ task.error_message || '—' }}</span><small v-if="task.error_code">{{ task.error_code }}</small></td>
-          <td><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
+          <td class="select-col" data-label="选择"><input type="checkbox" :aria-label="`选择任务 ${task.id}`" :checked="selectedKeys.includes(task.key)" @change="toggleTask(task.key)" /></td>
+          <td data-label="平台与来源"><div class="media-cell"><span class="media-icon">{{ platformNames[task.platform] || task.platform }}</span><div><strong :title="task.source_label">{{ task.source_label }}</strong><span>{{ task.source_type === 'profile' ? '作者主页' : '单条作品' }} · #{{ task.id }}</span></div></div></td>
+          <td data-label="元数据"><strong :title="task.author_name || ''">{{ task.author_name || '作者未知' }}</strong><span>{{ task.published_at ? new Date(task.published_at).toLocaleString() : (task.media_type || '元数据待采集') }}</span></td>
+          <td data-label="状态"><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small></td>
+          <td data-label="进度"><strong>{{ Number(task.progress_percent || 0).toFixed(1) }}%</strong><span>{{ task.file_count }} 个文件</span></td>
+          <td class="result-cell" data-label="结果"><template v-if="task.error_message"><details class="task-error-detail"><summary>{{ task.error_message }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_code">错误代码：{{ task.error_code }}</small><button class="text-button" @click="copyFailure(task)">复制诊断</button></details></template><span v-else>{{ task.status === 'completed' ? '文件已保存' : '—' }}</span></td>
+          <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" :aria-label="`查看任务 ${task.id} 互动趋势`" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :aria-label="`重试任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :aria-label="`取消任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
         </tr></tbody>
       </table>
-      <div v-if="!loading && !tasks.length" class="empty-state"><strong>暂无符合条件的任务</strong><span>可调整平台、状态或搜索条件后重试</span></div>
+      <div v-if="!loading && !tasks.length && !loadError" class="empty-state"><strong>暂无符合条件的任务</strong><span>可调整平台、状态或搜索条件后重试</span></div>
     </div>
-    <Pager :page="page" :pages="pages" :total="total" @change="changePage" />
-    <Teleport to="body"><div v-if="statsTask" class="trend-overlay" @click.self="statsTask = undefined"><section class="trend-dialog"><header><div><p class="eyebrow">CROSS-PLATFORM ANALYTICS</p><h3>{{ statsData.label || statsTask.source_label }}</h3><span>{{ platformNames[statsTask.platform] }} · {{ statsSeries.length }} 个统计快照</span></div><button class="icon-btn" @click="statsTask = undefined"><X /></button></header><nav><button v-for="metric in statsMetrics" :key="metric[0]" :class="{ active: statsMetric === metric[0] }" @click="statsMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="statsBusy" class="empty-state">正在读取趋势…</div><template v-else-if="statsSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(statsSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(statsSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="statsSummary.unusual"><strong>+{{ formatCount(statsSummary.latestDelta) }}</strong><span>最近增量{{ statsSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="跨平台互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="statsPoints" /></svg><div class="trend-table"><article v-for="(snapshot, index) in [...statsSeries].reverse().slice(0, 30)" :key="snapshot.id || index"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[statsMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>该平台尚未返回互动统计</strong><span>后续下载取得统计字段时会自动开始记录</span></div></section></div></Teleport>
+    <Pager v-if="!loadError" :page="page" :pages="pages" :total="total" @change="changePage" />
+    <Teleport to="body"><div v-if="statsTask" class="trend-overlay" @click.self="closeStats"><section ref="statsDialog" class="trend-dialog" role="dialog" aria-modal="true" aria-labelledby="task-trend-title" tabindex="-1"><header><div><p class="eyebrow">CROSS-PLATFORM ANALYTICS</p><h3 id="task-trend-title">{{ statsData.label || statsTask.source_label }}</h3><span>{{ platformNames[statsTask.platform] }} · {{ statsSeries.length }} 个统计快照</span></div><button class="icon-btn" aria-label="关闭互动趋势" @click="closeStats"><X /></button></header><nav aria-label="趋势指标"><button v-for="metric in statsMetrics" :key="metric[0]" :class="{ active: statsMetric === metric[0] }" :aria-pressed="statsMetric === metric[0]" @click="statsMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="statsBusy" class="empty-state">正在读取趋势…</div><template v-else-if="statsSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(statsSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(statsSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="statsSummary.unusual"><strong>+{{ formatCount(statsSummary.latestDelta) }}</strong><span>最近增量{{ statsSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="跨平台互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="statsPoints" /></svg><div class="trend-table"><article v-for="(snapshot, index) in [...statsSeries].reverse().slice(0, 30)" :key="snapshot.id || index"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[statsMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>该平台尚未返回互动统计</strong><span>后续下载取得统计字段时会自动开始记录</span></div></section></div></Teleport>
   </section>
 </template>
 
@@ -187,7 +238,7 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer))
 .trend-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
 .trend-kpis article { padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
 .trend-kpis strong,.trend-kpis span { display:block; }
-.trend-kpis span { margin-top:4px; color:var(--muted); font-size:10px; }
+.trend-kpis span { margin-top:4px; color:var(--muted); font-size:12px; }
 .trend-kpis article[data-alert="true"] { border-color:var(--amber); }
 .trend-chart { width:100%; height:210px; margin:18px 0; overflow:visible; }
 .trend-chart line { stroke:var(--line); stroke-width:.5; }
