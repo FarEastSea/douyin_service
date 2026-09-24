@@ -41,15 +41,15 @@ const attention = computed(() => {
   if (risk.value?.active) items.push({
     title: '抖音请求已暂停',
     detail: risk.value.requires_account_update ? '账号请求上下文需要检查；新抖音请求暂不可用。' : '正在保护性冷却，等待后再检查。',
-    to: '/settings?tab=account', tone: 'critical',
+    to: '/settings/account-douyin', tone: 'critical',
   })
   if (failedCount.value) items.push({ title: `${failedCount.value.toLocaleString()} 个下载任务失败`, detail: '查看失败原因，按任务决定是否重试。', to: '/operations/tasks?status=failed', tone: 'critical' })
   if (report.value && ['failed', 'interrupted', 'partial_upstream', 'partial_authentication'].includes(report.value.status)) items.push({
     title: ['failed', 'interrupted'].includes(report.value.status) ? '最近一次订阅检查异常终止' : '订阅检查需要核对',
     detail: report.value.summary || '查看本轮失败证据和续检状态。', to: '/douyin/updates', tone: 'warning',
   })
-  if (storage.value?.status === 'failed') items.push({ title: '存储巡检未完成', detail: storage.value.error || '可在运行维护中查看原因并重新扫描。', to: '/operations/maintenance?tab=operations', tone: 'warning' })
-  else if (storageIssues.value) items.push({ title: `上次存储巡检发现 ${storageIssues.value.toLocaleString()} 项问题`, detail: '先查看样本与预演，再决定是否处理。', to: '/operations/maintenance?tab=operations', tone: 'warning' })
+  if (storage.value?.status === 'failed') items.push({ title: '存储巡检未完成', detail: storage.value.error || '可在运行维护中查看原因并重新扫描。', to: '/operations/maintenance/storage', tone: 'warning' })
+  else if (storageIssues.value) items.push({ title: `上次存储巡检发现 ${storageIssues.value.toLocaleString()} 项问题`, detail: '先查看样本与预演，再决定是否处理。', to: '/operations/maintenance/storage', tone: 'warning' })
   return items
 })
 
@@ -163,6 +163,6 @@ onBeforeUnmount(() => {
       <div v-else class="dashboard-empty"><Download :size="20" /><strong>还没有下载任务</strong><span>使用上方“新建下载”开始。</span></div>
     </section>
 
-    <footer class="dashboard-footer"><HardDrive :size="16" /><span>存储巡检{{ errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? `更新于 ${formatTime(storage.updated_at)}` : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录' }}</span><button @click="router.push('/operations/maintenance?tab=operations')">打开运行维护 <ArrowRight :size="15" /></button></footer>
+    <footer class="dashboard-footer"><HardDrive :size="16" /><span>存储巡检{{ errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? `更新于 ${formatTime(storage.updated_at)}` : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录' }}</span><button @click="router.push('/operations/maintenance/storage')">打开存储维护 <ArrowRight :size="15" /></button></footer>
   </div>
 </template>

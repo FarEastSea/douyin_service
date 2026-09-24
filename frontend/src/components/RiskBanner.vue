@@ -28,7 +28,7 @@ async function copy() {
       <AlertTriangle :size="20" />
       <div><strong>{{ store.risk.requires_account_update ? '抖音账号请求上下文不可用' : '抖音接口保护性冷却中' }}</strong><span>{{ store.risk.requires_account_update ? '系统已隔离该账号，请检查 Cookie、User-Agent 与代理后重新保存。' : '系统已停止新的抖音业务请求，已有直链下载与 X 功能不受影响。' }}</span></div>
       <time>{{ store.risk.requires_account_update ? '等待更新账号档案' : format(store.risk.retry_after) }}</time>
-      <button class="btn ghost compact" @click="router.push('/douyin/settings?tab=account')"><Settings2 :size="15" />更新账号</button>
+      <button class="btn ghost compact" @click="router.push('/settings/account-douyin')"><Settings2 :size="15" />更新账号</button>
       <button class="btn ghost compact" @click="copy"><Clipboard :size="15" />复制诊断</button>
     </section>
   </Transition>

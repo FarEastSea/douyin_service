@@ -38,8 +38,8 @@ const platforms = computed(() => store.platforms.length ? store.platforms : fall
 const pageTitle = computed(() => {
   if (route.path === '/dashboard') return '工作台'
   if (route.path === '/operations/tasks') return '全部任务'
-  if (route.path === '/operations/maintenance') return '运行维护'
-  if (route.path === '/settings') return '设置'
+  if (route.path.startsWith('/operations/maintenance')) return '运行维护'
+  if (route.path.startsWith('/settings')) return '设置'
   if (route.path.includes('/works')) return '作者作品'
   if (route.path === '/douyin/authors') return '作者与作品'
   if (route.path === '/douyin/updates') return '自动更新'
@@ -168,10 +168,10 @@ onBeforeUnmount(() => {
         </div>
       </nav>
       <nav class="main-nav utility-nav" aria-label="系统">
-        <RouterLink to="/operations/maintenance" title="运行维护" @click="closeSidebar"><HardDrive /><span>运行维护</span></RouterLink>
-        <RouterLink to="/settings" title="设置" @click="closeSidebar"><Settings /><span>设置</span></RouterLink>
+        <RouterLink to="/operations/maintenance/services" title="运行维护" @click="closeSidebar"><HardDrive /><span>运行维护</span></RouterLink>
+        <RouterLink to="/settings/application" title="设置" @click="closeSidebar"><Settings /><span>设置</span></RouterLink>
       </nav>
-      <footer><RouterLink to="/operations/maintenance?tab=process" class="service-state" :data-state="readiness" @click="closeSidebar"><i /><span>{{ readiness === 'ready' ? '服务就绪' : readiness === 'not_ready' ? '服务需检查' : '状态未确认' }}</span></RouterLink><button class="icon-btn" :title="`主题：${store.theme}`" :aria-label="`切换主题，当前为${store.theme}`" @click="store.cycleTheme"><component :is="themeIcon" /></button></footer>
+      <footer><RouterLink to="/operations/maintenance/services" class="service-state" :data-state="readiness" @click="closeSidebar"><i /><span>{{ readiness === 'ready' ? '服务就绪' : readiness === 'not_ready' ? '服务需检查' : '状态未确认' }}</span></RouterLink><button class="icon-btn" :title="`主题：${store.theme}`" :aria-label="`切换主题，当前为${store.theme}`" @click="store.cycleTheme"><component :is="themeIcon" /></button></footer>
     </aside>
     <button class="mobile-backdrop" aria-label="关闭导航" @click="dismissSidebar" />
 
