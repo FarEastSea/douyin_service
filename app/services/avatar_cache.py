@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import filecmp
 import os
 import threading
 from pathlib import Path
@@ -71,7 +72,7 @@ def ensure_author_avatar_cached(
     session: requests.Session,
     timeout: int = 20,
 ) -> Optional[Path]:
-    """Download only when the local file is absent or its source URL changed."""
+    """Refresh changed sources, but publish only changed image content."""
     if not source_url:
         return find_cached_author_avatar(author_id, download_dir)
 
@@ -113,7 +114,12 @@ def ensure_author_avatar_cached(
                     output.write(chunk)
             if total == 0:
                 raise ValueError("头像响应为空")
-            os.replace(temp_path, target_path)
+            # CDN hosts, signatures and image variants can change without changing
+            # the avatar itself. Preserve the original inode and mtime in that case.
+            if cached_path and filecmp.cmp(temp_path, cached_path, shallow=False):
+                target_path = cached_path
+            else:
+                os.replace(temp_path, target_path)
             source_path.write_text(digest, encoding="ascii")
             for old_extension in _CONTENT_EXTENSIONS.values():
                 old_path = cache_dir / f"{author_id}{old_extension}"
