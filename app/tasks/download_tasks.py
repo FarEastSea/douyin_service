@@ -405,37 +405,45 @@ def _reset_subscription_check_cooldown(db: Session):
         pass
 
 
-def _queue_scanned_new_works(
+def _queue_scanned_works(
     db: Session,
     author: Author,
-    new_works: list[dict],
+    scanned_works: list[dict],
 ) -> dict:
-    """直接持久化本轮已验证的新作品，避免再次扫描导致历史缺口被停止边界挡住。"""
+    """仅根据本轮真实扫描结果创建新作品或补建缺失任务，不自动重试已有任务。"""
     task_ids: list[int] = []
     persisted_works = 0
+    restored_tasks = 0
     filtered_works = 0
     archive_rules = get_archive_rules_sync(db)
     archive_snapshot = serialize_archive_rules(archive_rules)
-    for item in new_works:
+    payloads = {str(item.get("aweme_id") or ""): item for item in scanned_works}
+    if "" in payloads:
+        raise ValueError("扫描结果缺少 aweme_id")
+    known_works = {str(work.aweme_id): work for work in db.scalars(select(Work).where(
+        Work.author_id == author.id, Work.aweme_id.in_(list(payloads)),
+    )).all()}
+    existing_indices: dict[int, set[int]] = {}
+    if known_works:
+        for work_id, file_index in db.execute(select(DownloadTask.work_id, DownloadTask.file_index).where(
+            DownloadTask.work_id.in_([work.id for work in known_works.values()]),
+        )).all():
+            existing_indices.setdefault(work_id, set()).add(file_index)
+    for aweme_id, item in payloads.items():
         aweme_id = str(item.get("aweme_id") or "")
         if not aweme_id:
             raise ValueError("扫描结果缺少 aweme_id")
-        existing = db.execute(
-            select(Work).where(Work.aweme_id == aweme_id)
-        ).scalar_one_or_none()
-        if existing:
+        work = known_works.get(aweme_id)
+        was_known = work is not None
+        if work is None:
+            work = Work(aweme_id=aweme_id, author_id=author.id,
+                        title=item.get("desc", ""), work_type="video")
+            apply_work_payload(db, work, item)
+            db.add(work)
+            db.flush()
+            persisted_works += 1
+        elif work.is_excluded:
             continue
-
-        work = Work(
-            aweme_id=aweme_id,
-            author_id=author.id,
-            title=item.get("desc", ""),
-            work_type="video",
-        )
-        apply_work_payload(db, work, item)
-        db.add(work)
-        db.flush()
-        persisted_works += 1
 
         matches, _ = work_matches_archive_rules(work, archive_rules)
         if not matches:
@@ -444,12 +452,16 @@ def _queue_scanned_new_works(
 
         file_indices = [0] if work.work_type == "video" else list(range(work.image_count))
         for file_index in file_indices:
+            if file_index in work.excluded_file_indices or file_index in existing_indices.get(work.id, set()):
+                continue
             task, action = ensure_download_task_sync(
                 db, work.id, file_index, archive_rule_snapshot=archive_snapshot,
+                reuse_failed=False,
             )
-            if action in {"created", "reused"}:
+            if action == "created":
                 task_ids.append(task.id)
                 work.is_downloaded = False
+                restored_tasks += int(was_known)
 
     recalc_author_counts_sync(db, author)
     db.commit()
@@ -461,6 +473,7 @@ def _queue_scanned_new_works(
     db.commit()
     return {
         "persisted_works": persisted_works,
+        "restored_tasks": restored_tasks,
         "file_tasks": len(task_ids),
         "filtered_works": filtered_works,
         "celery_task_ids": celery_task_ids,
@@ -1715,18 +1728,20 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 # 检查是否有新作品：以数据库已入库作品为基准，避免置顶作品卡死增量游标
                 new_works = _detect_new_works(db, author.id, work_list)
 
-                if new_works:
-                    queue_result = _queue_scanned_new_works(db, author, new_works)
+                queue_result = _queue_scanned_works(db, author, work_list)
+                if queue_result["persisted_works"] or queue_result["file_tasks"]:
                     results.append({
                         "author_id": author.id,
                         "nickname": author.nickname,
                         "new_works": queue_result["persisted_works"],
                         "file_tasks": queue_result["file_tasks"],
+                        "restored_tasks": queue_result["restored_tasks"],
                         "task_ids": queue_result["celery_task_ids"][:20],
-                        "status": "new_works",
+                        "status": "new_works" if queue_result["persisted_works"] else "success",
                         "message": (
                             f"发现 {queue_result['persisted_works']} 个新作品，"
                             f"已提交 {queue_result['file_tasks']} 个文件任务"
+                            f"（补建缺失任务 {queue_result['restored_tasks']} 个）"
                         ),
                         **scan_audit,
                     })
@@ -1763,7 +1778,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     author.last_aweme_id = latest_work["aweme_id"]
                 author.last_error = None
                 db.commit()
-                if new_works:
+                if queue_result["persisted_works"]:
                     _notify_event(
                         "new_works",
                         f"{author.nickname or f'作者 {author.id}'} 发布了新作品",

@@ -48,6 +48,7 @@ def ensure_download_task_sync(
     work_id: int,
     file_index: int,
     archive_rule_snapshot: str | None = None,
+    *, reuse_failed: bool = True,
 ) -> Tuple[DownloadTask, TaskAction]:
     """Celery 同步会话中的原子 get-or-create。"""
     if db.bind.dialect.name == "postgresql":
@@ -67,13 +68,13 @@ def ensure_download_task_sync(
             raise RuntimeError("下载任务原子创建后无法读取")
         if not task.archive_rule_snapshot and archive_rule_snapshot:
             task.archive_rule_snapshot = archive_rule_snapshot
-        return task, "created" if inserted_id is not None else _reuse_if_terminal(task)
+        return task, "created" if inserted_id is not None else (_reuse_if_terminal(task) if reuse_failed else "existing")
 
     existing = _sync_existing(db, work_id, file_index)
     if existing is not None:
         if not existing.archive_rule_snapshot and archive_rule_snapshot:
             existing.archive_rule_snapshot = archive_rule_snapshot
-        return existing, _reuse_if_terminal(existing)
+        return existing, _reuse_if_terminal(existing) if reuse_failed else "existing"
     try:
         with db.begin_nested():
             task = DownloadTask(
@@ -91,7 +92,7 @@ def ensure_download_task_sync(
             raise
         if not existing.archive_rule_snapshot and archive_rule_snapshot:
             existing.archive_rule_snapshot = archive_rule_snapshot
-        return existing, _reuse_if_terminal(existing)
+        return existing, _reuse_if_terminal(existing) if reuse_failed else "existing"
 
 
 async def ensure_download_task_async(

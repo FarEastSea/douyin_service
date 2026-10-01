@@ -151,7 +151,7 @@ async function retryAllFailed() {
 async function runAction(taskKeys: string[], action: TaskAction) {
   if (!taskKeys.length || actionBusy.value) return
   if (action === 'cancel' && !confirm(`确定取消 ${taskKeys.length} 个任务？已保存的文件不会删除。`)) return
-  if (action === 'delete' && !confirm(`删除 ${taskKeys.length} 个失败或已取消任务？\n删除任务及关联下载历史，不删除磁盘文件、作者或作品。\n抖音对应文件会停止自动重新排队，可在作品管理中主动重新下载。\n其他平台已保存部分媒体的任务会保留并说明原因。此操作不可撤销。`)) return
+  if (action === 'delete' && !confirm(`删除 ${taskKeys.length} 个失败或已取消任务？\n删除任务及关联下载历史，不删除磁盘文件、作者或作品。\n后续订阅扫描若再次发现该作品，会补建缺失任务并重新下载；本次不立即重试。\n其他平台已保存部分媒体的任务会保留并说明原因。任务记录删除不可撤销。`)) return
   actionBusy.value = true
   try {
     const result = await api<UnifiedTaskActionResult>('/operations/tasks/actions', {

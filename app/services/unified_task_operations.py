@@ -187,8 +187,7 @@ async def _delete_failed_task(db: AsyncSession, platform: str, task_id: int) -> 
     if platform == "douyin":
         from app.services.work_manager import refresh_work_download_state, recalc_author_counts
         work = await _load_for_update(db, Work, task.work_id)
-        # 沿用作品的文件排除规则，订阅扫描不能又创建用户刚删除的失败任务。
-        work.excluded_file_indices = sorted(set(work.excluded_file_indices) | {task.file_index})
+        # 删除任务不等于排除作品；后续扫描确认作品仍存在时允许补建任务。
         # 兼容尚未启用级联外键的历史安装。只删记录，不触碰磁盘文件。
         await db.execute(delete(DownloadHistory).where(DownloadHistory.task_id == task_id))
         await db.delete(task)
