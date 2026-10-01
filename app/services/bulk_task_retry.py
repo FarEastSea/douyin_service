@@ -1,4 +1,4 @@
-"""Snapshot-based failed-task retry jobs; never iterate a changing failed page."""
+"""Snapshot-based failed-task operations; never iterate a changing failed page."""
 
 from __future__ import annotations
 
@@ -47,15 +47,15 @@ async def failed_task_keys(db: AsyncSession, platform: str = "") -> list[str]:
     return [f"{row.platform}:{row.id}" for row in (await db.execute(combined)).all()]
 
 
-def get_job(job_id: str | None = None) -> dict:
+def get_job(job_id: str | None = None, *, action: str = "retry") -> dict:
     client = redis_client.redis_client
-    job_id = job_id or client.get(PREFIX + "latest")
+    job_id = job_id or client.get(PREFIX + ("latest" if action == "retry" else "latest:delete"))
     raw = client.get(PREFIX + str(job_id)) if job_id else None
     if not raw:
         return {"status": "idle"}
     state = json.loads(raw)
     if state["status"] in {"queued", "running"} and client.get(PREFIX + "lock") != state["job_id"]:
-        state.update(status="interrupted", error="后台作业已中断或等待超时；已提交的任务仍有效，请核对后重新重试剩余失败任务。")
+        state.update(status="interrupted", error="后台作业已中断或等待超时；已完成操作仍有效，请核对剩余失败任务。")
     return state
 
 
@@ -70,23 +70,25 @@ def release_lock(job_id: str) -> None:
     )
 
 
-def create_job(keys: list[str], platform: str) -> tuple[dict, bool]:
+def create_job(keys: list[str], platform: str, *, action: str = "retry") -> tuple[dict, bool]:
+    if action not in {"retry", "delete"}:
+        raise ValueError("不支持的全部失败任务操作")
     client = redis_client.redis_client
     job_id = uuid4().hex
     if not client.set(PREFIX + "lock", job_id, nx=True, ex=LOCK_TTL):
         active_id = client.get(PREFIX + "lock")
         state = get_job(active_id) if active_id else {"status": "idle"}
-        if state["status"] == "idle":
-            raise TaskOperationError("另一个重试作业正在提交，请稍后刷新", 409)
+        if state["status"] == "idle" or state.get("action", "retry") != action or state.get("platform") != platform:
+            raise TaskOperationError("另一个失败任务批量作业正在执行，请稍后刷新", 409)
         return state, False
-    state = {"job_id": job_id, "platform": platform, "status": "queued", "created_at": now(),
+    state = {"job_id": job_id, "platform": platform, "action": action, "status": "queued", "created_at": now(),
              "updated_at": now(), "total": len(keys), "processed": 0, "succeeded": 0,
              "skipped": 0, "failed": 0, "failures": [], "error": None}
     try:
         with client.pipeline(transaction=True) as pipe:
             pipe.set(PREFIX + job_id + ":keys", json.dumps(keys), ex=TTL)
             pipe.set(PREFIX + job_id, json.dumps(state, ensure_ascii=False), ex=TTL)
-            pipe.set(PREFIX + "latest", job_id, ex=TTL)
+            pipe.set(PREFIX + ("latest" if action == "retry" else "latest:delete"), job_id, ex=TTL)
             pipe.execute()
     except Exception:
         release_lock(job_id)
@@ -119,6 +121,9 @@ def release_claim(job_id: str, token: str) -> None:
 
 async def run_job(job_id: str, token: str) -> dict:
     state = get_job(job_id)
+    action = state.get("action", "retry")
+    if action not in {"retry", "delete"}:
+        raise ValueError("后台作业操作无效")
     keys = json.loads(redis_client.redis_client.get(PREFIX + job_id + ":keys") or "[]")
     engine = create_isolated_async_engine()
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -136,7 +141,7 @@ async def run_job(job_id: str, token: str) -> dict:
             save_job(state)
         for key in keys[state["processed"]:]:
             if not await asyncio.to_thread(renew_job, job_id, token):
-                raise RuntimeError("重试作业执行权已失效，停止投递以避免重复操作")
+                raise RuntimeError("后台作业执行权已失效，停止以避免重复操作")
             try:
                 async with sessions() as db:
                     platform, task_id = parse_task_key(key)
@@ -151,7 +156,7 @@ async def run_job(job_id: str, token: str) -> dict:
                     else:
                         state["in_flight"] = key
                         await asyncio.to_thread(save_job, state)
-                        await asyncio.wait_for(operate_task(db, key, "retry"), timeout=60)
+                        await asyncio.wait_for(operate_task(db, key, action), timeout=60)
                         state["succeeded"] += 1
             except (SoftTimeLimitExceeded, TimeoutError):
                 raise

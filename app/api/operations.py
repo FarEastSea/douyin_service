@@ -45,7 +45,7 @@ from app.services.storage_maintenance import (
     storage_journals, restore_quarantined,
 )
 from app.tasks.operations_tasks import run_storage_audit_task, run_storage_repair_all_task
-from app.tasks.operations_tasks import retry_all_failed_task
+from app.tasks.operations_tasks import retry_all_failed_task, delete_all_failed_task
 from app.services.bulk_task_retry import create_job, failed_task_keys, get_job, release_lock, save_job
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
@@ -755,24 +755,51 @@ async def submit_retry_all_failed(
     request: RetryAllFailedRequest,
     db: AsyncSession = Depends(get_async_db),
 ):
-    keys = await failed_task_keys(db, request.platform)
+    return await _submit_failed_task_operation(db, request.platform, "retry")
+
+
+async def _submit_failed_task_operation(db: AsyncSession, platform: str, action: str):
+    label = "删除" if action == "delete" else "重试"
+    worker = delete_all_failed_task if action == "delete" else retry_all_failed_task
+    keys = await failed_task_keys(db, platform)
     if not keys:
         return MessageResponse(success=True, message="该平台范围没有失败任务", data={"status": "idle", "total": 0})
     try:
-        state, created = await asyncio.to_thread(create_job, keys, request.platform)
+        state, created = await asyncio.to_thread(create_job, keys, platform, action=action)
         if created:
             try:
-                await asyncio.to_thread(retry_all_failed_task.delay, state["job_id"])
+                await asyncio.to_thread(worker.delay, state["job_id"])
             except Exception as exc:
-                state.update(status="interrupted", error="队列暂不可用，未启动全部重试；任务尚未修改。")
+                state.update(status="interrupted", error=f"队列暂不可用，未启动全部{label}；任务尚未修改。")
                 await asyncio.to_thread(save_job, state)
                 await asyncio.to_thread(release_lock, state["job_id"])
                 raise HTTPException(503, state["error"]) from exc
         return MessageResponse(success=True,
-            message=f"已提交 {state['total']} 个失败任务的后台重试" if created else "已有全部重试作业，正在显示其进度",
+            message=f"已提交 {state['total']} 个失败任务的后台{label}" if created else f"已有全部{label}作业，正在显示其进度",
             data=state)
     except TaskOperationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@router.get("/tasks/delete-all-failed/preview")
+async def preview_delete_all_failed(
+    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs"] = "",
+    db: AsyncSession = Depends(get_async_db),
+):
+    return {"platform": platform, "total": len(await failed_task_keys(db, platform))}
+
+
+@router.get("/tasks/delete-all-failed")
+async def delete_all_failed_status():
+    return await asyncio.to_thread(get_job, action="delete")
+
+
+@router.post("/tasks/delete-all-failed", response_model=MessageResponse)
+async def submit_delete_all_failed(
+    request: RetryAllFailedRequest,
+    db: AsyncSession = Depends(get_async_db),
+):
+    return await _submit_failed_task_operation(db, request.platform, "delete")
 
 
 @router.post("/tasks/actions", response_model=MessageResponse)

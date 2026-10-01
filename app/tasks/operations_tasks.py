@@ -23,15 +23,26 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True, name="app.tasks.operations_tasks.retry_all_failed")
 def retry_all_failed_task(self, job_id: str):
+    return _run_failed_task_job(self, job_id, "retry")
+
+
+@celery_app.task(bind=True, name="app.tasks.operations_tasks.delete_all_failed")
+def delete_all_failed_task(self, job_id: str):
+    return _run_failed_task_job(self, job_id, "delete")
+
+
+def _run_failed_task_job(task, job_id: str, action: str):
     from uuid import uuid4
     from app.services.bulk_task_retry import claim_job, get_job, run_job
     state = get_job(job_id)
+    if state.get("action", "retry") != action:
+        raise ValueError("后台任务与作业操作不匹配")
     if state.get("status") not in {"queued", "running"}:
         return state
     token = uuid4().hex
     if not claim_job(job_id, token):
         # A worker lost during execution may be redelivered before its lease expires.
-        raise self.retry(countdown=125, max_retries=None)
+        raise task.retry(countdown=125, max_retries=None)
     try:
         return asyncio.run(run_job(job_id, token))
     finally:
@@ -39,14 +50,14 @@ def retry_all_failed_task(self, job_id: str):
             result = get_job(job_id)
             redis_client.append_activity_log(
                 "info" if result.get("status") == "completed" else "warning", "unified-tasks",
-                "全部失败任务重试投递结束",
+                "全部失败任务删除结束" if action == "delete" else "全部失败任务重试投递结束",
                 f"状态={result.get('status')}，范围={result.get('platform') or '全部平台'}，"
-                f"已提交={result.get('succeeded', 0)}，跳过={result.get('skipped', 0)}，"
-                f"未提交={result.get('failed', 0)}，已处理={result.get('processed', 0)}/{result.get('total', 0)}",
-                event_code="retry_all_failed_finished", correlation_id=job_id,
+                f"成功={result.get('succeeded', 0)}，跳过={result.get('skipped', 0)}，"
+                f"失败={result.get('failed', 0)}，已处理={result.get('processed', 0)}/{result.get('total', 0)}",
+                event_code=f"{action}_all_failed_finished", correlation_id=job_id,
             )
         except Exception:
-            logger.warning("全部重试作业诊断日志写入失败 job_id=%s", job_id, exc_info=True)
+            logger.warning("失败任务批量作业诊断日志写入失败 job_id=%s", job_id, exc_info=True)
 
 
 async def _apply_all_storage_targets(

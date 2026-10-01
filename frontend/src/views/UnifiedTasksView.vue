@@ -25,6 +25,10 @@ interface RetryJob {
 }
 const retryJob = ref<RetryJob>({ status: 'idle' }), retryAllBusy = ref(false), retryJobError = ref('')
 const retryJobActive = computed(() => ['queued', 'running'].includes(retryJob.value.status))
+const deleteJob = ref<RetryJob>({ status: 'idle' }), deleteAllBusy = ref(false), deleteJobError = ref('')
+const deleteJobActive = computed(() => ['queued', 'running'].includes(deleteJob.value.status))
+const deleteJobNames: Record<string, string> = { queued: '等待后台删除', running: '正在删除失败任务', completed: '失败任务删除完成', partial: '失败任务部分删除', interrupted: '删除作业中断' }
+let deleteJobSequence = 0, deletePollInFlight = false
 const retryJobNames: Record<string, string> = { queued: '等待后台执行', running: '正在提交重试', completed: '重试提交完成', partial: '部分提交完成', interrupted: '作业中断' }
 let retryJobSequence = 0, retryPollInFlight = false
 const actionFailures = ref<Array<{ task_key: string; message: string; status_code: number }>>([])
@@ -128,7 +132,7 @@ async function loadRetryJob() {
   } finally { retryPollInFlight = false }
 }
 async function retryAllFailed() {
-  if (retryAllBusy.value || retryJobActive.value || actionBusy.value) return
+  if (retryAllBusy.value || retryJobActive.value || deleteAllBusy.value || deleteJobActive.value || actionBusy.value) return
   retryAllBusy.value = true
   ++retryJobSequence
   const targetPlatform = platform.value
@@ -163,6 +167,35 @@ async function runAction(taskKeys: string[], action: TaskAction) {
     await load()
   } catch (error: any) { store.notify(error.message || '任务操作失败', 'error') }
   finally { actionBusy.value = false }
+}
+async function loadDeleteJob() {
+  if (deletePollInFlight || deleteAllBusy.value) return
+  deletePollInFlight = true
+  const sequence = ++deleteJobSequence
+  try {
+    const data = await api<RetryJob>('/operations/tasks/delete-all-failed')
+    if (sequence === deleteJobSequence) { deleteJob.value = data; deleteJobError.value = '' }
+  } catch (error: any) {
+    if (sequence === deleteJobSequence) deleteJobError.value = error.message || '删除进度暂不可用，请刷新核对，不要重复提交。'
+  } finally { deletePollInFlight = false }
+}
+async function deleteAllFailed() {
+  if (deleteAllBusy.value || deleteJobActive.value || retryAllBusy.value || retryJobActive.value || actionBusy.value) return
+  deleteAllBusy.value = true
+  ++deleteJobSequence
+  const targetPlatform = platform.value
+  const scope = targetPlatform ? (platformNames[targetPlatform] || targetPlatform) : '全部平台'
+  try {
+    const preview = await api<{ total: number }>(`/operations/tasks/delete-all-failed/preview?platform=${encodeURIComponent(targetPlatform)}`)
+    if (!preview.total) { store.notify(`${scope}没有失败任务`, 'info'); return }
+    if (!confirm(`删除${scope}的全部 ${preview.total.toLocaleString()} 个失败任务？\n跨所有分页，不受搜索和当前选择限制，不包含已取消任务。\n删除任务及关联下载历史，保留磁盘文件、作者和作品；任务记录删除不可撤销。\n后续订阅再次发现作品时，会补建缺失任务重新下载。状态已变化或保存部分媒体的任务会跳过并说明原因。`)) return
+    const result = await api<{ message: string; data: RetryJob }>('/operations/tasks/delete-all-failed', {
+      method: 'POST', ...jsonBody({ platform: targetPlatform }),
+    })
+    deleteJob.value = result.data; deleteJobError.value = ''
+    store.notify(result.message, 'info'); await load()
+  } catch (error: any) { store.notify(error.message || '全部删除提交失败，请核对后台作业状态', 'error') }
+  finally { deleteAllBusy.value = false; void loadDeleteJob() }
 }
 async function action(task: UnifiedTask, actionName: TaskAction) {
   if (rowBusy.value.includes(task.key)) return
@@ -211,13 +244,15 @@ async function copyFailure(task: UnifiedTask) {
 onMounted(() => {
   void load()
   void loadRetryJob()
+  void loadDeleteJob()
   pollTimer = window.setInterval(() => {
     if (!document.hidden && !loading.value && !actionBusy.value) void load(true)
     if (!document.hidden) void loadRetryJob()
+    if (!document.hidden) void loadDeleteJob()
   }, 5000)
   document.addEventListener('keydown', statsKeydown)
 })
-onBeforeUnmount(() => { loadSequence++; retryJobSequence++; window.clearInterval(pollTimer); window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
+onBeforeUnmount(() => { loadSequence++; retryJobSequence++; deleteJobSequence++; window.clearInterval(pollTimer); window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
 watch(() => route.fullPath, (path, previousPath) => {
   const nextPlatform = queryText(route.query.platform), nextStatus = queryText(route.query.status)
   const nextSearch = queryText(route.query.q), nextPage = queryPage(route.query.page)
@@ -232,8 +267,9 @@ watch(() => route.fullPath, (path, previousPath) => {
     <header class="workspace-header">
       <div><h2>全部任务</h2><span>跨平台检索、批量处理与失败诊断；筛选会保留在链接中。</span></div>
       <div class="header-actions">
-        <button class="btn ghost" title="普通重试；抖音直链返回 403、404、410 时自动尝试刷新。需强制刷新请使用任务行的刷新链接重试。" :disabled="retryAllBusy || retryJobActive || actionBusy" @click="retryAllFailed"><RotateCcw :size="16" />{{ retryAllBusy ? '正在核对…' : retryJobActive ? '后台重试中…' : '重试全部失败' }}</button>
-        <button class="btn ghost" :disabled="loading" @click="load(); loadRetryJob()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
+        <button class="btn ghost" title="普通重试；抖音直链返回 403、404、410 时自动尝试刷新。需强制刷新请使用任务行的刷新链接重试。" :disabled="retryAllBusy || retryJobActive || deleteAllBusy || deleteJobActive || actionBusy" @click="retryAllFailed"><RotateCcw :size="16" />{{ retryAllBusy ? '正在核对…' : retryJobActive ? '后台重试中…' : '重试全部失败' }}</button>
+        <button class="btn danger" :disabled="deleteAllBusy || deleteJobActive || retryAllBusy || retryJobActive || actionBusy" @click="deleteAllFailed"><Trash2 :size="16" />{{ deleteAllBusy ? '正在核对…' : deleteJobActive ? '后台删除中…' : '删除全部失败任务' }}</button>
+        <button class="btn ghost" :disabled="loading" @click="load(); loadRetryJob(); loadDeleteJob()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
       </div>
     </header>
     <div v-if="retryJobError" class="load-error-banner" role="alert">重试作业状态暂不可用：{{ retryJobError }}<button class="text-button" @click="loadRetryJob">核对进度</button></div>
@@ -243,6 +279,14 @@ watch(() => route.fullPath, (path, previousPath) => {
       <small>这是重试投递结果，不代表下载已完成。仅处理提交时的失败任务；状态已变化的任务会跳过。</small>
       <p v-if="retryJob.error">{{ retryJob.error }}</p>
       <details v-if="retryJob.failures?.length"><summary>查看未提交与待核对原因（最多 200 条）</summary><ul><li v-for="item in retryJob.failures" :key="item.task_key"><b>{{ item.task_key }}</b> {{ item.message }}</li></ul></details>
+    </div>
+    <div v-if="deleteJobError" class="load-error-banner" role="alert">删除作业状态暂不可用：{{ deleteJobError }}<button class="text-button" @click="loadDeleteJob">核对进度</button></div>
+    <div v-if="deleteJob.status !== 'idle'" class="retry-job-report" role="status" aria-live="polite">
+      <strong>{{ deleteJobNames[deleteJob.status] || deleteJob.status }} · {{ deleteJob.platform ? platformNames[deleteJob.platform] : '全部平台' }}</strong>
+      <span>已处理 {{ deleteJob.processed || 0 }}/{{ deleteJob.total || 0 }} · 已删除 {{ deleteJob.succeeded || 0 }} · 跳过 {{ deleteJob.skipped || 0 }} · 删除失败 {{ deleteJob.failed || 0 }} · 未处理 {{ Math.max(0, (deleteJob.total || 0) - (deleteJob.processed || 0)) }}</span>
+      <small>只处理提交时的失败任务，不删除磁盘文件。状态已变化的任务会跳过；订阅仍可补建缺失任务。</small>
+      <p v-if="deleteJob.error">{{ deleteJob.error }}</p>
+      <details v-if="deleteJob.failures?.length"><summary>查看删除失败与待核对原因（最多 200 条）</summary><ul><li v-for="item in deleteJob.failures" :key="item.task_key"><b>{{ item.task_key }}</b> {{ item.message }}</li></ul></details>
     </div>
     <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用，保留上次结果：{{ loadError }}<button class="text-button" @click="load()">重试</button></div>
     <div v-if="route.query.task_key" class="selection-bar" role="status"><span>当前定位任务 {{ route.query.task_key }}</span><button class="text-button" @click="resetAndLoad">返回任务列表</button></div>
