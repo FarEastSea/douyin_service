@@ -27,6 +27,8 @@ RESTART_REQUIRED=0
 XHS_ENGINE_CANDIDATE=""
 PREVIOUS_XHS_ENGINE=""
 XHS_ENGINE_SWITCHED=0
+DEPENDENCIES_CHANGED=0
+DEPENDENCY_BACKUP=""
 
 validate_layout() {
     test -d "$SERVICE_ROOT/.git" || {
@@ -52,6 +54,7 @@ prepare_runtime_environment() {
         return 1
     fi
     echo "Installing project dependencies into the BT Panel environment..."
+    DEPENDENCIES_CHANGED=1
     "$python_bin" -m pip install -r "$requirements_file"
     "$python_bin" -m pip check
     "$python_bin" - "$requirements_file" <<'PY'
@@ -90,6 +93,10 @@ PY
 }
 
 prepare_xhs_engine() {
+    if ! (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -c 'from app.core.config import settings; raise SystemExit(not settings.XHS_SERVICE_ENABLED)'); then
+        echo "Xiaohongshu isolated service disabled; skipping optional installation."
+        return 0
+    fi
     local lock_file="$CANDIDATE_DIR/xhs-engine.lock"
     local repository=""
     local revision=""
@@ -146,6 +153,7 @@ prepare_xhs_engine() {
 }
 
 activate_xhs_engine() {
+    [ -n "$XHS_ENGINE_CANDIDATE" ] || return 0
     local engine_root="$SERVICE_ROOT/.xhs-engine"
     local current="$engine_root/current"
     local next="$engine_root/.current.next"
@@ -420,7 +428,7 @@ base = f"http://127.0.0.1:{os.environ['APP_PORT']}"
 allow_legacy_health = os.environ.get("ALLOW_LEGACY_HEALTH") == "1"
 token = settings.ADMIN_TOKEN
 headers = {"Authorization": f"Bearer {token}"} if token else {}
-xhs_api_url = "http://127.0.0.1:5556"
+xhs_api_url = "http://127.0.0.1:5556" if getattr(settings, "XHS_SERVICE_ENABLED", False) else None
 
 def get(path, auth=False):
     request = urllib.request.Request(base + path, headers=headers if auth else {})
@@ -460,9 +468,12 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
         get("/")
         get("/docs")
         if xhs_api_url:
-            with urllib.request.urlopen(xhs_api_url.rstrip("/") + "/health", timeout=5) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"Xiaohongshu downloader returned HTTP {response.status}")
+            try:
+                with urllib.request.urlopen(xhs_api_url.rstrip("/") + "/health", timeout=5) as response:
+                    if response.status != 200:
+                        print("Optional Xiaohongshu service is not ready")
+            except Exception:
+                print("Optional Xiaohongshu service unavailable; main service check continues")
         if token:
             authors = json.loads(get("/api/authors/?page=1&page_size=1", True))
             tasks = json.loads(get("/api/tasks/?page=1&page_size=20", True))
@@ -607,16 +618,38 @@ rollback() {
     stop_managed_xhs_engine || true
     restore_xhs_engine
     git reset --hard "$PREVIOUS_SHA"
+    if [ "$DEPENDENCIES_CHANGED" -eq 1 ]; then
+        "$RUNTIME_VENV/bin/python" - "$DEPENDENCY_BACKUP/packages.txt" <<'PY'
+import importlib.metadata
+import re
+import subprocess
+import sys
+from pathlib import Path
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+baseline = {normalize(line.split("==", 1)[0].split(" @ ", 1)[0])
+            for line in Path(sys.argv[1]).read_text().splitlines() if line and not line.startswith("#")}
+extra = [item.metadata["Name"] for item in importlib.metadata.distributions()
+         if normalize(item.metadata["Name"]) not in baseline]
+if extra:
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", *extra], check=True)
+PY
+        "$RUNTIME_VENV/bin/python" -m pip install --no-index --find-links "$DEPENDENCY_BACKUP/wheels" -r "$DEPENDENCY_BACKUP/packages.txt"
+        "$RUNTIME_VENV/bin/python" -m pip check
+    fi
     start_runtime
     smoke_check 1 30
     cleanup_candidate
-    echo "Rollback completed. BT Panel is running the previous root version." >&2
+    echo "Code/dependency rollback completed. Database changes are not rolled back by Git." >&2
     exit "$exit_code"
 }
 
 trap rollback ERR
 validate_layout
 mkdir -p "$SERVICE_ROOT/logs"
+mkdir -p "$SERVICE_ROOT/.runtime"
+command -v flock >/dev/null
+exec 200>"$SERVICE_ROOT/.runtime/deploy.lock"
+flock -n 200 || { echo "Another deployment is running." >&2; exit 1; }
 
 echo "Preparing ${PROJECT_NAME} deployment for BT Panel..."
 PREVIOUS_SHA="$(git rev-parse HEAD)"
@@ -632,15 +665,24 @@ reconcile_published_worktree_changes "$PREVIOUS_SHA" "$TARGET_SHA"
 
 prepare_candidate
 preflight
-prepare_runtime_environment
 prepare_xhs_engine
 
 if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
+    DEPENDENCY_BACKUP="$SERVICE_ROOT/.runtime/deploy-recovery/$(date -u +%Y%m%dT%H%M%SZ)-dependencies"
+    mkdir -p "$DEPENDENCY_BACKUP/wheels"
+    chmod 700 "$DEPENDENCY_BACKUP"
+    "$RUNTIME_VENV/bin/python" -m pip freeze --all > "$DEPENDENCY_BACKUP/packages.txt"
+    "$RUNTIME_VENV/bin/python" -m pip download --no-deps -r "$DEPENDENCY_BACKUP/packages.txt" -d "$DEPENDENCY_BACKUP/wheels"
+    if [ -f "$SERVICE_ROOT/.env" ]; then
+        cp -p "$SERVICE_ROOT/.env" "$DEPENDENCY_BACKUP/runtime.env"
+        chmod 600 "$DEPENDENCY_BACKUP/runtime.env"
+    fi
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。
+    CODE_SWITCHED=1
     stop_running_instances
     stop_managed_xhs_engine
-    CODE_SWITCHED=1
     RESTART_REQUIRED=1
+    prepare_runtime_environment
     activate_xhs_engine
     git reset --hard "$TARGET_SHA"
 fi

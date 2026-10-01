@@ -31,7 +31,8 @@ class XDownloadEngine(Protocol):
     def download_profile(self, *, profile_url: str, username: str, destination: str,
                          cookie_file: Optional[str] = None,
                          on_line: Optional[Callable[[str], None]] = None,
-                         task_id: Optional[int] = None) -> XDownloadRunResult: ...
+                         task_id: Optional[int] = None,
+                         on_process: Optional[Callable[[int], None]] = None) -> XDownloadRunResult: ...
 
 
 def convert_cookie_header_to_netscape(raw_cookie: str, domain: str = ".x.com") -> str:
@@ -60,7 +61,8 @@ class GalleryDlXDownloadEngine:
     def download_profile(self, *, profile_url: str, username: str, destination: str,
                          cookie_file: Optional[str] = None,
                          on_line: Optional[Callable[[str], None]] = None,
-                         task_id: Optional[int] = None) -> XDownloadRunResult:
+                         task_id: Optional[int] = None,
+                         on_process: Optional[Callable[[int], None]] = None) -> XDownloadRunResult:
         if importlib.util.find_spec("gallery_dl") is None:
             return XDownloadRunResult(False, 0, -1, error_code="engine_unavailable",
                                       error_message="gallery-dl 未安装，请重新安装 requirements.txt 依赖")
@@ -94,10 +96,13 @@ class GalleryDlXDownloadEngine:
         log(f"[X] 目标目录: {user_folder}")
         log("[X] 已启用请求间隔、限流冷却、有限重试和下载归档")
         before = set(list_media_files(user_folder))
+        process = None
         try:
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, encoding="utf-8", errors="replace", bufsize=1)
-            if task_id is not None:
+            if on_process is not None:
+                on_process(process.pid)
+            elif task_id is not None:
                 try:
                     from app.core import redis_client
                     redis_client.set_x_task_pid(task_id, process.pid)
@@ -117,6 +122,9 @@ class GalleryDlXDownloadEngine:
         except Exception as exc:
             return XDownloadRunResult(False, 0, -1, error_code="engine_exception",
                                       error_message=f"{type(exc).__name__}: {exc}")
+        finally:
+            from app.services.child_process import close_download_process
+            close_download_process(process)
 
 
 def is_media_download_line(line: str) -> bool:

@@ -53,8 +53,8 @@ _sync_retry_after = 0.0
 
 
 def _current_engine_config():
-    current, config_key = settings.snapshot_with_key()
-    return current, config_key
+    current = settings.snapshot()
+    return current, (current.effective_database_url, current.DEBUG)
 
 
 async def get_async_engine() -> AsyncEngine:
@@ -64,7 +64,7 @@ async def get_async_engine() -> AsyncEngine:
         if _async_engine is not None and _async_engine_key == config_key:
             return _async_engine
         if _async_engine is not None and _async_failed_key == config_key and time.monotonic() < _async_retry_after:
-            return _async_engine
+            raise RuntimeError("当前数据库配置不可用，已停止向旧数据库写入")
 
     candidate: Optional[AsyncEngine] = None
     try:
@@ -89,16 +89,18 @@ async def get_async_engine() -> AsyncEngine:
         with _engine_lock:
             _async_failed_key = config_key
             _async_retry_after = time.monotonic() + 1.0
-            if _async_engine is not None:
-                return _async_engine
         raise RuntimeError("新的异步数据库配置不可用") from exc
 
+    if _current_engine_config()[1] != config_key:
+        await candidate.dispose()
+        return await get_async_engine()
     duplicate_engine: Optional[AsyncEngine] = None
     with _engine_lock:
+        stale_candidate = _current_engine_config()[1] != config_key
         # 候选连接验证期间，另一个请求可能已完成同一版本的切换。
         # 此时保留已发布的引擎并释放本次重复创建的候选，避免把刚
         # 返回给并发请求的引擎立即 dispose。
-        if _async_engine is not None and _async_engine_key == config_key:
+        if stale_candidate or (_async_engine is not None and _async_engine_key == config_key):
             duplicate_engine = candidate
             selected_engine = _async_engine
             old_engine = None
@@ -112,6 +114,8 @@ async def get_async_engine() -> AsyncEngine:
     clear_runtime_error("DATABASE_ASYNC_CONNECTION")
     if duplicate_engine is not None:
         await duplicate_engine.dispose()
+    if stale_candidate:
+        return await get_async_engine()
     if old_engine is not None and old_engine is not candidate:
         await old_engine.dispose()
     return selected_engine
@@ -139,7 +143,7 @@ def get_sync_engine() -> Engine:
         if _sync_engine is not None and _sync_engine_key == config_key:
             return _sync_engine
         if _sync_engine is not None and _sync_failed_key == config_key and time.monotonic() < _sync_retry_after:
-            return _sync_engine
+            raise RuntimeError("当前数据库配置不可用，已停止向旧数据库写入")
 
     candidate: Optional[Engine] = None
     try:
@@ -161,13 +165,15 @@ def get_sync_engine() -> Engine:
         with _engine_lock:
             _sync_failed_key = config_key
             _sync_retry_after = time.monotonic() + 1.0
-            if _sync_engine is not None:
-                return _sync_engine
         raise RuntimeError("新的同步数据库配置不可用") from exc
 
+    if _current_engine_config()[1] != config_key:
+        candidate.dispose()
+        return get_sync_engine()
     duplicate_engine: Optional[Engine] = None
     with _engine_lock:
-        if _sync_engine is not None and _sync_engine_key == config_key:
+        stale_candidate = _current_engine_config()[1] != config_key
+        if stale_candidate or (_sync_engine is not None and _sync_engine_key == config_key):
             duplicate_engine = candidate
             selected_engine = _sync_engine
             old_engine = None
@@ -182,6 +188,8 @@ def get_sync_engine() -> Engine:
     clear_runtime_error("DATABASE_SYNC_CONNECTION")
     if duplicate_engine is not None:
         duplicate_engine.dispose()
+    if stale_candidate:
+        return get_sync_engine()
     if old_engine is not None and old_engine is not candidate:
         old_engine.dispose()
     return selected_engine

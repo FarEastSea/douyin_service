@@ -43,6 +43,7 @@ from app.core.health import build_readiness
 from app.core.runtime_config import (
     RUNTIME_CONFIG_ENV_KEYS,
     RUNTIME_CONFIG_SCHEMA,
+    get_runtime_schema,
     get_runtime_config,
     save_runtime_config as persist_runtime_config,
 )
@@ -50,6 +51,7 @@ from app.core.runtime_config import (
 from app.services.media_paths import migrate_download_paths
 from app.services.notifications import send_notification
 from app.services.archive_rules import get_archive_rules, save_archive_rules
+from app.core.queue_configuration import QueueDrainRequired, resuming_change, stage_queue_change
 
 router = APIRouter(tags=["系统管理"])
 
@@ -214,7 +216,7 @@ async def get_runtime_settings(db: AsyncSession = Depends(get_async_db)):
             "unit": spec.get("unit"),
             "default": spec.get("default"),
         }
-        for key, spec in RUNTIME_CONFIG_SCHEMA.items()
+        for key, spec in get_runtime_schema().items()
     }
     return {
         "success": True,
@@ -288,11 +290,21 @@ async def get_complete_settings(db: AsyncSession = Depends(get_async_db)):
 async def save_complete_settings(
     request: CompleteConfigUpdate,
     db: AsyncSession = Depends(get_async_db),
+    preview: bool = Query(False),
 ):
+    from app.core.config_transaction import configuration_session
+    async with configuration_session():
+        return await _save_complete_settings(request, db, preview=preview is True)
+
+
+async def _save_complete_settings(request: CompleteConfigUpdate, db: AsyncSession, *, preview: bool = False):
     """统一保存全部网页配置，并同步运行时配置与平台 Cookie。"""
-    updates = {key: value for key, value in request.values.items() if key in FIELD_MAP}
+    updates = {key: value for key, value in request.values.items() if key in FIELD_MAP
+               and not (FIELD_MAP[key].secret and (value is None or str(value).strip() in {"", "********"}))}
     if not updates:
         raise HTTPException(status_code=400, detail="没有可保存的配置")
+    if preview and any(key != "DOWNLOAD_ROOT" and not key.endswith("_DOWNLOAD_SUBDIR") for key in updates):
+        raise HTTPException(status_code=400, detail="预演仅支持下载目录配置")
     douyin_cookie_update = updates.get("DOUYIN_COOKIE")
     if douyin_cookie_update not in {None, "", "********"}:
         try:
@@ -301,6 +313,35 @@ async def save_complete_settings(
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     current = await asyncio.to_thread(read_env_file)
+    credential_keys = {"DOUYIN_COOKIE", *GENERIC_PLATFORM_COOKIE_KEYS}
+    supplied_credentials = set(updates) & credential_keys
+    if supplied_credentials:
+        if len(updates) != 1:
+            raise HTTPException(status_code=400, detail="平台凭据请在对应账号页面单独保存，不能与其他设置混合提交")
+        key = next(iter(supplied_credentials))
+        if key == "DOUYIN_COOKIE":
+            await save_account_profile(db, cookie=str(updates[key]).strip(), user_agent=None,
+                                       proxy_enabled=None, proxy_url=None)
+        else:
+            platform = next(p for p, (_, _, cookie_key) in GENERIC_PLATFORM_CONFIG.items() if cookie_key == key)
+            await save_platform_cookie(db, platform, str(updates[key]).strip())
+        return MessageResponse(success=True, message="平台凭据已更新")
+    for key, value in updates.items():
+        from app.core.env_config import _validate_env_value
+        try:
+            _validate_env_value(key, "" if value is None else str(value))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from app.core.env_config import _check_database, _check_redis
+    connection_values = {**(await asyncio.to_thread(settings.snapshot)).model_dump(), **updates}
+    if set(updates) & {"DB_TYPE", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"}:
+        error = await asyncio.to_thread(_check_database, connection_values, require_schema=True)
+        if error:
+            raise HTTPException(status_code=400, detail="目标数据库连接或结构验证失败，配置未保存；目标必须具有当前应用表结构，本操作不会搬迁数据")
+    if set(updates) & {"REDIS_URL", "REDIS_PASSWORD"}:
+        error = await asyncio.to_thread(_check_redis, connection_values)
+        if error:
+            raise HTTPException(status_code=400, detail="目标 Redis 连接验证失败，配置未保存")
     platform_subdir_keys = tuple(
         item[0] for item in GENERIC_PLATFORM_CONFIG.values()
     )
@@ -338,16 +379,15 @@ async def save_complete_settings(
     )
 
     try:
+        runtime_environment = {}
         if runtime_updates:
-            await persist_runtime_config(db, runtime_updates)
+            runtime_environment = await persist_runtime_config(db, runtime_updates, commit=False)
 
         environment_updates = {
             key: value for key, value in updates.items()
             if key not in runtime_by_env
             and key not in {"DOUYIN_COOKIE", *GENERIC_PLATFORM_COOKIE_KEYS}
         }
-        if environment_updates:
-            await asyncio.to_thread(write_env_updates, environment_updates)
         legacy_douyin = current.get("DOWNLOAD_DIR")
         old_root = current.get("DOWNLOAD_ROOT") or (str(Path(legacy_douyin).parent) if legacy_douyin else "/downloads")
         old_douyin = legacy_douyin or str(Path(old_root) / current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))
@@ -387,6 +427,12 @@ async def save_complete_settings(
                 new_x_download_dir=new_x,
                 platform_download_dirs=platform_download_dirs,
             )
+            if path_changes.get("unresolved_total"):
+                raise ValueError("目标目录尚未包含全部已有文件，目录变更未保存；不会搬移文件或盲目改写记录")
+
+        if preview:
+            await db.rollback()
+            return MessageResponse(success=True, message="目录预演通过；只更新已确认存在的文件关联，不搬移文件", data={"migrated_paths": path_changes})
 
         cookie_keys = {"X_COOKIE": "x_cookie"}
         for env_key, config_key in cookie_keys.items():
@@ -402,7 +448,17 @@ async def save_complete_settings(
             else:
                 db.add(SystemConfig(key=config_key, value=str(value).strip()))
 
-        await db.commit()
+        from app.core.config_transaction import commit_configuration
+        await commit_configuration(db, {**environment_updates, **runtime_environment})
+    except QueueDrainRequired:
+        await db.rollback()
+        if resuming_change.get():
+            raise
+        try:
+            await asyncio.to_thread(stage_queue_change, updates)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return MessageResponse(success=True, message="连接变更已保存待生效：旧队列排空后将自动切换并重启后台服务", data={"configuration_state": "draining"})
     except ValueError as e:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
@@ -460,10 +516,12 @@ async def save_complete_settings(
         "X_TASK_LOG_MAX_LINES",
         "X_TASK_LOG_TTL_SECONDS",
         "X_TASK_STATE_TTL_SECONDS",
+        "CELERY_CONNECTION_MODE", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
+        "MAX_CONCURRENT_DOWNLOADS", "APP_NAME",
     }
     restart_keys = sorted(
         key for key in updates
-        if key not in RUNTIME_CONFIG_ENV_KEYS
+        if key not in RUNTIME_CONFIG_ENV_KEYS.values()
         and key not in {
             "DOUYIN_COOKIE",
             "X_COOKIE",
@@ -473,7 +531,7 @@ async def save_complete_settings(
             *hot_reload_keys,
         }
     )
-    message = "配置已保存"
+    message = "配置已保存并生效"
     unresolved_paths = int(path_changes.get("unresolved_total", 0))
     if unresolved_paths:
         message += f"；有 {unresolved_paths} 行媒体路径未能重定位，请检查目录内容"
@@ -892,18 +950,10 @@ async def test_database_connection(cfg: DatabaseConfig):
         await asyncio.to_thread(validate_database_test_target, cfg.db_host, effective_port)
         current = await asyncio.to_thread(read_env_file)
         db_password = cfg.db_password or current.get("DB_PASSWORD", "")
-        if cfg.db_type == "postgresql":
-            user_part = cfg.db_user
-            if db_password:
-                user_part = f"{cfg.db_user}:{db_password}"
-            url = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
-        elif cfg.db_type == "mysql":
-            user_part = cfg.db_user
-            if db_password:
-                user_part = f"{cfg.db_user}:{db_password}"
-            url = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
-        else:
-            return {"success": False, "message": f"不支持的数据库类型: {cfg.db_type}"}
+        from app.core.env_config import _build_database_url
+        url, _ = _build_database_url({"DB_TYPE": cfg.db_type, "DB_HOST": cfg.db_host,
+                                    "DB_PORT": str(effective_port), "DB_USER": cfg.db_user,
+                                    "DB_PASSWORD": db_password, "DB_NAME": cfg.db_name})
 
         def _test_connection():
             engine = create_engine(
@@ -924,7 +974,7 @@ async def test_database_connection(cfg: DatabaseConfig):
 
 
 @router.post("/config/database")
-async def save_database_config(cfg: DatabaseConfig):
+async def save_database_config(cfg: DatabaseConfig, db: AsyncSession = Depends(get_async_db)):
     """保存数据库配置到 .env 文件"""
     try:
         current = await asyncio.to_thread(read_env_file)
@@ -936,17 +986,10 @@ async def save_database_config(cfg: DatabaseConfig):
             "DB_PASSWORD": cfg.db_password or current.get("DB_PASSWORD", ""),
             "DB_NAME": cfg.db_name,
         }
-        db_password = updates["DB_PASSWORD"]
-        if cfg.db_type == "postgresql":
-            user_part = f"{cfg.db_user}:{db_password}" if db_password else cfg.db_user
-            updates["DATABASE_URL"] = f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}"
-        elif cfg.db_type == "mysql":
-            user_part = f"{cfg.db_user}:{db_password}" if db_password else cfg.db_user
-            updates["DATABASE_URL"] = f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4"
-        else:
-            return MessageResponse(success=False, message=f"不支持的数据库类型: {cfg.db_type}")
-        await asyncio.to_thread(write_env_updates, updates)
-        return MessageResponse(success=True, message="数据库配置已保存，下一次请求将自动使用新连接")
+        tested = await test_database_connection(cfg)
+        if not tested["success"]:
+            raise ValueError(tested["message"])
+        return await save_complete_settings(CompleteConfigUpdate(values=updates), db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -993,7 +1036,10 @@ from app.core.process_manager import process_manager
 @router.get("/process/status")
 async def get_process_status():
     """获取 Worker 和 Beat 进程状态"""
-    return await asyncio.to_thread(process_manager.get_status)
+    result = await asyncio.to_thread(process_manager.get_status)
+    from app.core.queue_configuration import change_status
+    result["configuration"] = await asyncio.to_thread(change_status)
+    return result
 
 
 @router.post("/process/worker/start")
@@ -1052,21 +1098,33 @@ async def get_concurrency():
     return {"concurrency": await asyncio.to_thread(lambda: process_manager.worker_concurrency)}
 
 
+@router.get("/config/queue-change")
+async def get_queue_change():
+    from app.core.queue_configuration import change_status, pending_path
+    status = await asyncio.to_thread(change_status)
+    return {**status, "pending": pending_path().exists()}
+
+
+@router.post("/config/queue-change/cancel")
+async def cancel_queue_change():
+    from app.core.config_transaction import configuration_session, atomic_json
+    from app.core.queue_configuration import pending_path, state_path
+    async with configuration_session():
+        pending_path().unlink(missing_ok=True)
+        result = await asyncio.to_thread(process_manager.start_beat)
+        if not result.get("success"):
+            await asyncio.to_thread(atomic_json, state_path(), {"state": "failed", "message": "变更已撤回，但调度未恢复，请在运行维护查看进程状态"})
+            raise HTTPException(status_code=503, detail="变更已撤回，但调度启动失败")
+        await asyncio.to_thread(atomic_json, state_path(), {"state": "applied", "message": "待生效变更已撤回，继续使用当前配置"})
+    return MessageResponse(success=True, message="待生效变更已撤回")
+
+
 @router.post("/process/concurrency")
-async def set_concurrency(body: ConcurrencyUpdate):
-    """修改最大并发下载数（会重启 Worker 生效）"""
-    new_val = max(1, min(body.concurrency, 20))
-
-    # 更新 .env 持久化
-    await asyncio.to_thread(_update_env_key, "MAX_CONCURRENT_DOWNLOADS", str(new_val))
-
-    # 重启 Worker 使新并发数生效
-    result = await asyncio.to_thread(process_manager.restart_worker, new_val)
-    await asyncio.to_thread(
-        redis_client.append_activity_log,
-        "info", "system", f"🔄 并发数已调整为 {new_val}", result["message"],
-    )
-    return {"success": True, "concurrency": new_val, "message": result["message"]}
+async def set_concurrency(body: ConcurrencyUpdate, db: AsyncSession = Depends(get_async_db)):
+    if not 1 <= body.concurrency <= 20:
+        raise HTTPException(status_code=400, detail="并发数必须为 1 到 20")
+    result = await save_complete_settings(CompleteConfigUpdate(values={"MAX_CONCURRENT_DOWNLOADS": body.concurrency}), db)
+    return {"success": result.success, "concurrency": body.concurrency, "message": result.message}
 
 
 def _update_env_key(key: str, value: str):

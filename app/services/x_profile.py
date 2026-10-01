@@ -36,7 +36,8 @@ class ResolvedXInput:
 
 def resolve_x_input(raw_value: str) -> ResolvedXInput:
     """识别 X 用户主页或单条动态，并生成稳定规范地址。"""
-    value = str(raw_value or "").strip()
+    from app.services.platform_registry import normalize_share_input
+    value = normalize_share_input(raw_value)
     direct_match = _USERNAME_PATTERN.fullmatch(value)
     if direct_match:
         username = direct_match.group(1)

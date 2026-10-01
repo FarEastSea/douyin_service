@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import traceback
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.core import redis_client
 from app.core.config import settings
@@ -31,6 +31,7 @@ from app.services.x_task_service import (
     build_x_source_download_dir,
 )
 from app.tasks.celery_app import celery_app
+from app.services.download_lifecycle import FencedXTask, StaleDownloadAttempt, bind_download_attempt, lock_download_attempt
 
 logs_dir = 'logs'
 if not os.path.exists(logs_dir):
@@ -55,7 +56,7 @@ AUTHOR_ERROR_STATUS_MAP = {
 }
 
 
-@celery_app.task(bind=True, name="app.tasks.x_download_tasks.download_x_profile")
+@celery_app.task(bind=True, base=FencedXTask, name="app.tasks.x_download_tasks.download_x_profile")
 def download_x_profile(self, task_id: int):
     """
     下载 X/Twitter 用户媒体的 Celery 任务
@@ -68,6 +69,14 @@ def download_x_profile(self, task_id: int):
     managed_cookie = False
 
     try:
+        claimed = db.execute(update(XDownloadTask).where(
+            XDownloadTask.id == task_id, XDownloadTask.status == "pending",
+            XDownloadTask.celery_task_id == self.request.id,
+        ).values(status="downloading"))
+        db.commit()
+        if claimed.rowcount != 1:
+            return {"success": False, "skipped": True}
+        bind_download_attempt(db, task_id, self.request.id, XDownloadTask)
         task = db.execute(
             select(XDownloadTask).where(XDownloadTask.id == task_id)
         ).scalar_one_or_none()
@@ -79,6 +88,7 @@ def download_x_profile(self, task_id: int):
         mark_x_task_running(task, self.request.id)
         db.commit()
         redis_client.update_x_task_state(task_id, {
+            "attempt_id": self.request.id,
             "status": task.status,
             "phase": task.phase,
             "engine_name": task.engine_name,
@@ -93,12 +103,15 @@ def download_x_profile(self, task_id: int):
 
         cookie_path, managed_cookie = materialize_x_cookie_file(db, task_id=task_id)
         engine = build_x_download_engine(task.engine_name)
+        db.commit()
 
         log_lines = []
         downloaded_media_count = 0
 
         def on_line(line: str):
             nonlocal downloaded_media_count
+            if not redis_client.external_attempt_current("x", task_id, self.request.id):
+                raise StaleDownloadAttempt("X 执行已被取消或替换")
             log_lines.append(line)
             redis_client.append_x_task_log(task_id, line)
             if is_media_download_line(line):
@@ -111,6 +124,7 @@ def download_x_profile(self, task_id: int):
                 last_log_line=line,
             )
             redis_client.update_x_task_state(task_id, {
+                "attempt_id": self.request.id,
                 "status": task.status,
                 "phase": task.phase,
                 "engine_name": task.engine_name,
@@ -132,8 +146,11 @@ def download_x_profile(self, task_id: int):
                 cookie_file=cookie_path,
                 on_line=on_line,
                 task_id=task_id,
+                on_process=lambda pid: redis_client.set_external_attempt_pid("x", task_id, self.request.id, pid),
             )
 
+        lock_download_attempt(db, task_id, self.request.id, XDownloadTask)
+        db.refresh(task)
         task.download_dir = build_x_source_download_dir(task.username, task.profile_url)
         asset_scope = (
             XMediaAsset.x_author_id == task.x_author_id
@@ -231,11 +248,16 @@ def download_x_profile(self, task_id: int):
             "return_code": result.return_code,
         }
 
+    except StaleDownloadAttempt:
+        db.rollback()
+        return {"success": False, "superseded": True}
     except Exception as e:
+        db.rollback()
         error_trace = traceback.format_exc()
         logger.error(f"X 任务 {task_id} 异常:\n{error_trace}")
 
         try:
+            lock_download_attempt(db, task_id, self.request.id, XDownloadTask)
             task = db.execute(
                 select(XDownloadTask).where(XDownloadTask.id == task_id)
             ).scalar_one_or_none()
@@ -254,10 +276,11 @@ def download_x_profile(self, task_id: int):
 
         raise
     finally:
-        cleanup_x_cookie_file(cookie_path, managed_cookie)
-        redis_client.delete_x_task_state(task_id)
-        redis_client.delete_x_task_pid(task_id)
-        db.close()
+        try:
+            cleanup_x_cookie_file(cookie_path, managed_cookie)
+            redis_client.clear_external_attempt("x", task_id, self.request.id)
+        finally:
+            db.close()
 
 
 @celery_app.task(name="app.tasks.x_download_tasks.check_x_subscriptions")
@@ -288,7 +311,7 @@ def check_x_subscriptions():
             task = create_x_download_task(author)
             db.add(task)
             db.flush()
-
+            db.commit()  # 生产者在独立事务登记执行，必须先让任务可见。
             download_x_profile.delay(task.id)
             results.append({"author": author.username, "task_id": task.id})
             logger.info(f"X 订阅检查: 为 @{author.username} 创建下载任务 {task.id}")

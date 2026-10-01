@@ -50,7 +50,7 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
   jobs: {
     id: 'jobs', title: '后台任务', description: '配置 Celery 使用的消息队列与结果存储。',
     fieldSections: [
-      { title: '任务基础设施', description: '修改连接后，相关进程可能需要由部署系统重新启动。', envKeys: ['CELERY_BROKER_URL', 'CELERY_RESULT_BACKEND'] },
+      { title: '任务基础设施', description: '默认继承 Redis。忙碌时保存为待生效变更，暂停新投递，旧队列排空后自动切换；可在上方撤回待生效变更。', envKeys: ['CELERY_CONNECTION_MODE', 'CELERY_BROKER_URL', 'CELERY_RESULT_BACKEND'] },
     ],
   },
   downloads: {
@@ -103,7 +103,7 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
   },
   'account-xhs': {
     id: 'account-xhs', title: '小红书账号', description: '仅用于单条图文、视频和实况笔记，不开放作者主页批量采集。',
-    fieldSections: [{ title: '下载选项', description: 'Cookie 用于需要登录或更高质量的单条笔记。', envKeys: ['XHS_DOWNLOAD_ENGINE', 'XHS_COOKIE_FILE'] }],
+    fieldSections: [{ title: '下载选项', description: '隔离服务按需启用，不影响主服务启动；Cookie 用于单条笔记。', envKeys: ['XHS_SERVICE_ENABLED', 'XHS_DOWNLOAD_ENGINE', 'XHS_COOKIE_FILE'] }],
   },
   archive: { id: 'archive', title: '归档与导出', description: '定义新任务使用的目录、文件名、作品范围和元数据规则。' },
   other: { id: 'other', title: '其他配置', description: '后端新增但尚未归入固定分类的配置。' },

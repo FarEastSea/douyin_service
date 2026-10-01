@@ -157,7 +157,8 @@ def _request_endpoint_token(
                 "User-Agent": str(user_agent or ""),
             },
             proxies=proxies or None,
-            timeout=max(3.0, min(float(timeout or 10), 30.0)),
+            allow_redirects=False,
+            timeout=max(0.1, min(float(timeout or 10), 30.0)),
         )
     except requests.RequestException as exc:
         raise DouyinMsTokenError(
@@ -165,7 +166,7 @@ def _request_endpoint_token(
         ) from exc
 
     try:
-        if response.status_code >= 400:
+        if response.status_code < 200 or response.status_code >= 300:
             raise DouyinMsTokenError(
                 f"ByteDance msToken 端点返回 HTTP {response.status_code}",
                 status_code=response.status_code,

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.core import redis_client
 from app.core.config import settings
+from app.core.request_budget import remaining_timeout, budget_sleep
 
 
 logger = logging.getLogger(__name__)
@@ -125,12 +126,13 @@ def global_download_slot(task_id: int | str):
             slot.release()
 
 
-def wait_for_douyin_request_slot(min_interval_seconds: float) -> None:
+def wait_for_douyin_request_slot(min_interval_seconds: float, *, deadline: float | None = None) -> None:
     """让所有进程的抖音业务 API 请求保持统一最小间隔。"""
     interval_ms = max(0, int(float(min_interval_seconds) * 1000))
     if interval_ms <= 0:
         return
     while True:
+        remaining_timeout(deadline, 5)
         try:
             wait_ms = int(redis_client.redis_client.eval(
                 _PACE_REQUEST_SCRIPT, 1, DOUYIN_REQUEST_PACE_KEY, interval_ms
@@ -140,4 +142,4 @@ def wait_for_douyin_request_slot(min_interval_seconds: float) -> None:
             return
         if wait_ms <= 0:
             return
-        time.sleep(min(wait_ms / 1000, 5.0))
+        budget_sleep(min(wait_ms / 1000, 5.0), deadline)

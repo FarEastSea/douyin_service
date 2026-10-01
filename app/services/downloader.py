@@ -16,6 +16,7 @@ import re
 import os
 import time
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
@@ -27,6 +28,7 @@ from app.core import redis_client
 from app.core.network_security import get_douyin_response, validate_douyin_url
 from app.core.runtime_config import get_cached_runtime_config
 from app.core.traffic_control import wait_for_douyin_request_slot
+from app.core.request_budget import remaining_timeout, DouyinScanDeadlineExceeded
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -369,6 +371,7 @@ class DouyinDownloader:
             proxy_url or "direct",
         )
         self.ms_token_state = "not_requested"
+        self.deadline = None
         # 设置重试
         adapter = requests.adapters.HTTPAdapter(
             max_retries=self.download_retry_count
@@ -436,7 +439,7 @@ class DouyinDownloader:
                 user_agent=self.headers.get("user-agent", ""),
                 cookie=self.headers.get("cookie", ""),
                 proxies=dict(self.session.proxies),
-                timeout=min(float(self.download_timeout), 15.0),
+                timeout=remaining_timeout(self.deadline, min(float(self.download_timeout), 15.0)),
                 force_refresh=force_refresh,
             )
         except DouyinMsTokenError as exc:
@@ -504,7 +507,10 @@ class DouyinDownloader:
             self._check_risk_gate()
             # a_bogus 包含生成时间。每次尝试都必须先完成全局限速排队，再从
             # 未签名 URL 重新补身份参数和生成签名，不能复用上一次的时间敏感签名。
-            wait_for_douyin_request_slot(self.request_delay)
+            wait_for_douyin_request_slot(self.request_delay, deadline=self.deadline)
+            if self.deadline is not None:
+                for adapter in self.session.adapters.values():
+                    adapter.max_retries = requests.packages.urllib3.util.Retry(total=0)
             self._check_risk_gate()
             request_url = original_url
             if is_business_api:
@@ -514,7 +520,7 @@ class DouyinDownloader:
                         self._get_ms_token(force_refresh=force_ms_token_refresh),
                     )
                     force_ms_token_refresh = False
-                except DouyinRequestError:
+                except (DouyinRequestError, DouyinScanDeadlineExceeded):
                     raise
                 except Exception as token_error:
                     self.ms_token_state = "generation_failed"
@@ -541,8 +547,9 @@ class DouyinDownloader:
                 response, final_url = get_douyin_response(
                     self.session,
                     request_url,
-                    timeout=self.download_timeout,
+                    timeout=remaining_timeout(self.deadline, self.download_timeout),
                     headers=signature_headers,
+                    deadline=self.deadline,
                 )
             except DouyinRequestError:
                 raise
@@ -969,6 +976,9 @@ class DouyinDownloader:
         check_pause: Callable[[], bool] = None,
         min_file_size: int = 0,
         max_file_size: int = 0,
+        attempt_id: str = None,
+        resume_path: str = None,
+        defer_publish: bool = False,
     ) -> Dict[str, Any]:
         """
         下载文件，支持断点续传
@@ -983,20 +993,46 @@ class DouyinDownloader:
         Returns:
             下载结果字典
         """
-        temp_path = file_path + ".downloading"
+        temp_path = file_path + (f".{attempt_id}" if attempt_id else "") + ".downloading"
+        metadata_path = temp_path + ".json"
+        res = None
+        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+        if resume_path and resume_path != temp_path and os.path.isfile(resume_path):
+            # Only a previously paused attempt may provide this path; do not share writers.
+            if (Path(resume_path).resolve().parent == Path(temp_path).resolve().parent
+                    and resume_path.endswith(".downloading") and not Path(resume_path).is_symlink()):
+                shutil.copyfile(resume_path, temp_path)
+                if os.path.isfile(resume_path + ".json"):
+                    shutil.copyfile(resume_path + ".json", metadata_path)
+        resume_metadata = {}
+        try:
+            with open(metadata_path, encoding="utf-8") as handle:
+                resume_metadata = json.load(handle)
+        except (OSError, ValueError):
+            pass
         downloaded_bytes = 0
         
         # 检查是否有未完成的下载
         if os.path.exists(temp_path):
             downloaded_bytes = os.path.getsize(temp_path)
+        if not isinstance(resume_metadata, dict):
+            resume_metadata = {}
+        validator = resume_metadata.get("validator")
+        if str(validator or "").startswith("W/"):
+            validator = None
+        resource = f"{urlsplit(url).hostname}{urlsplit(url).path}"
+        if downloaded_bytes and (not validator or resume_metadata.get("resource") != resource):
+            downloaded_bytes = 0
         
         # 构建 Range 请求头
         headers = self.headers.copy()
+        headers['Accept-Encoding'] = 'identity'
         if downloaded_bytes > 0:
             headers['Range'] = f'bytes={downloaded_bytes}-'
+            headers['If-Range'] = validator
         
         try:
-            logger.info(f"开始下载文件: {file_path}, URL: {url[:100]}...")
+            logger.info(f"开始下载文件: {file_path}, 资源: {resource}")
 
             # 发起请求
             res = self.session.get(
@@ -1006,12 +1042,33 @@ class DouyinDownloader:
                 timeout=self.download_timeout
             )
 
+            if res.status_code in {206, 416}:
+                interval = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", res.headers.get('Content-Range', ''))
+                received_validator = res.headers.get('ETag') or res.headers.get('Last-Modified')
+                valid_range = bool(
+                    interval and int(interval[1]) == downloaded_bytes
+                    and int(interval[2]) >= int(interval[1])
+                    and int(interval[3]) > int(interval[2])
+                    and (not downloaded_bytes or (received_validator == validator
+                         and int(resume_metadata.get('total_bytes') or interval[3]) == int(interval[3])))
+                )
+                if not valid_range:
+                    res.close()
+                    downloaded_bytes = 0
+                    headers.pop('Range', None)
+                    headers.pop('If-Range', None)
+                    res = self.session.get(url, headers=headers, stream=True, timeout=self.download_timeout)
+                    if res.status_code != 200:
+                        raise ValueError("续传响应区间或资源身份不匹配，完整重下载也未成功")
+
             # 检查是否支持断点续传
             if res.status_code == 206:  # Partial Content
                 # 解析 Content-Range: bytes 0-999/1000
                 content_range = res.headers.get('Content-Range', '')
-                match = re.search(r'/(\d+)', content_range)
-                total_bytes = int(match.group(1)) if match else 0
+                match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', content_range)
+                if not match or int(match[1]) != downloaded_bytes:
+                    raise ValueError("续传响应缺少有效 Content-Range")
+                total_bytes = int(match[3])
                 logger.info(f"支持断点续传, 从 {downloaded_bytes} 字节继续下载, 总大小: {total_bytes}")
             elif res.status_code == 200:
                 # 不支持断点续传，从头开始
@@ -1022,7 +1079,7 @@ class DouyinDownloader:
                     os.remove(temp_path)
                 logger.info(f"开始全新下载, 文件大小: {total_bytes} 字节")
             else:
-                error_msg = f"下载失败，HTTP状态码: {res.status_code}, URL: {url[:100]}"
+                error_msg = f"下载失败，HTTP状态码: {res.status_code}, 资源: {resource}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
 
@@ -1047,7 +1104,7 @@ class DouyinDownloader:
                 }
             
             # 确保目录存在
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
             
             # 开始下载
             start_time = time.time()
@@ -1057,6 +1114,9 @@ class DouyinDownloader:
             exceeded_maximum = False
             
             mode = 'ab' if downloaded_bytes > 0 else 'wb'
+            with open(metadata_path, 'w', encoding='utf-8') as metadata_file:
+                json.dump({"resource": resource, "total_bytes": total_bytes,
+                           "validator": res.headers.get('ETag') or res.headers.get('Last-Modified')}, metadata_file)
             with open(temp_path, mode) as f:
                 for chunk in res.iter_content(chunk_size=settings.DOWNLOAD_CHUNK_SIZE):
                     current_time = time.time()
@@ -1072,6 +1132,7 @@ class DouyinDownloader:
                         if task_id:
                             redis_client.update_progress(task_id, {
                                 'status': 'paused',
+                                'attempt_id': attempt_id or '',
                                 'downloaded_bytes': downloaded_bytes,
                                 'total_bytes': total_bytes
                             })
@@ -1108,6 +1169,7 @@ class DouyinDownloader:
                             if task_id:
                                 redis_client.update_progress(task_id, {
                                     'status': 'downloading',
+                                    'attempt_id': attempt_id or '',
                                     'downloaded_bytes': downloaded_bytes,
                                     'total_bytes': total_bytes,
                                     'speed': speed,
@@ -1131,6 +1193,8 @@ class DouyinDownloader:
                 }
 
             actual_size = downloaded_bytes
+            if actual_size <= 0 or (total_bytes and actual_size != total_bytes):
+                raise ValueError(f"下载文件完整性校验失败：实际 {actual_size} 字节，预期 {total_bytes or '非空'}")
             if (
                 (min_file_size and actual_size < min_file_size)
                 or (max_file_size and actual_size > max_file_size)
@@ -1151,9 +1215,10 @@ class DouyinDownloader:
                 }
 
             # 下载完成，重命名临时文件
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            os.rename(temp_path, file_path)
+            if not defer_publish:
+                os.replace(temp_path, file_path)
+                if os.path.exists(metadata_path):
+                    os.remove(metadata_path)
 
             total_time = time.time() - start_time
             avg_speed = downloaded_bytes / total_time if total_time > 0 else 0
@@ -1165,12 +1230,13 @@ class DouyinDownloader:
                 'downloaded_bytes': downloaded_bytes,
                 'total_bytes': total_bytes or downloaded_bytes,
                 'file_path': file_path,
+                'temp_path': temp_path,
                 'duration': int(total_time)
             }
 
         except requests.exceptions.Timeout as e:
             error_msg = f"下载超时: {str(e)}"
-            logger.error(f"{error_msg}, URL: {url[:100]}")
+            logger.error(f"{error_msg}, 资源: {resource}")
             return {
                 'success': False,
                 'paused': False,
@@ -1180,7 +1246,7 @@ class DouyinDownloader:
             }
         except requests.exceptions.ConnectionError as e:
             error_msg = f"网络连接错误: {str(e)}"
-            logger.error(f"{error_msg}, URL: {url[:100]}")
+            logger.error(f"{error_msg}, 资源: {resource}")
             return {
                 'success': False,
                 'paused': False,
@@ -1190,7 +1256,7 @@ class DouyinDownloader:
             }
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"下载失败: {error_msg}, URL: {url[:100]}")
+            logger.error(f"下载失败: {error_msg}, 资源: {resource}")
             return {
                 'success': False,
                 'paused': False,
@@ -1198,7 +1264,10 @@ class DouyinDownloader:
                 'downloaded_bytes': downloaded_bytes,
                 'temp_path': temp_path if os.path.exists(temp_path) else None
             }
-    
+        finally:
+            if res is not None:
+                res.close()
+
     def refresh_work_urls(self, aweme_id: str) -> Dict[str, Any]:
         """
         通过作品ID重新获取最新的下载URL

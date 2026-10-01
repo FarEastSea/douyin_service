@@ -127,7 +127,17 @@ def _normalize_domain(value: str) -> str:
     return str(value or "").strip().lower().lstrip(".")
 
 
+def normalize_share_input(value: str) -> str:
+    links = re.findall(r"https?://[^\s<>\"'，。；）]+", value, re.I)
+    if links:
+        if len(set(links)) > 1:
+            raise ValueError("分享内容包含多个链接，请只保留一个下载来源")
+        return links[0].rstrip(".,;!?)、！")
+    return str(value or "").strip()
+
+
 def _extract_host_and_path(value: str) -> tuple[str, str]:
+    value = normalize_share_input(value)
     candidate = value if re.match(r"^[a-z][a-z0-9+.-]*://", value, re.I) else f"https://{value}"
     parsed = urlparse(candidate)
     return _normalize_domain(parsed.hostname or ""), parsed.path or "/"

@@ -155,8 +155,21 @@ async def recalc_author_counts(db: AsyncSession, author: Author) -> None:
     author.total_works = int(total.scalar() or 0)
 
 
+async def refresh_work_download_state(db: AsyncSession, work: Work) -> bool:
+    if work is None:
+        return False
+    await db.flush()
+    task_count = int(await db.scalar(select(func.count(DownloadTask.id)).where(DownloadTask.work_id == work.id)) or 0)
+    incomplete = int(await db.scalar(select(func.count(DownloadTask.id)).where(
+        DownloadTask.work_id == work.id, or_(DownloadTask.status != "completed", DownloadTask.status.is_(None)))) or 0)
+    work.is_downloaded = task_count > 0 and incomplete == 0
+    return work.is_downloaded
+
+
 def refresh_work_download_state_sync(db: Session, work: Work) -> bool:
     """在同步任务中按所有文件任务状态重算作品下载完成标记。"""
+    if work is None:
+        return False
     db.flush()
     task_count = int(db.execute(
         select(func.count(DownloadTask.id)).where(DownloadTask.work_id == work.id)

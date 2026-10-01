@@ -115,6 +115,8 @@ def get_profile_platform_spec(platform: str) -> ProfilePlatformSpec:
 
 
 def resolve_platform_input(platform: str, raw_input: str) -> ResolvedPlatformInput:
+    from app.services.platform_registry import normalize_share_input
+    raw_input = normalize_share_input(raw_input)
     spec = get_profile_platform_spec(platform)
     value = str(raw_input or "").strip()
     if not value:
@@ -416,6 +418,7 @@ class GalleryDlProfileDownloadEngine:
         log(f"[{spec.name}] 目标目录: {user_folder}")
         log(f"[{spec.name}] 已启用请求间隔、限流冷却和下载归档")
         before = set(list_media_files(user_folder))
+        process = None
         try:
             process = subprocess.Popen(
                 command,
@@ -446,6 +449,9 @@ class GalleryDlProfileDownloadEngine:
                 False, 0, -1, error_code="engine_exception",
                 error_message=f"{type(exc).__name__}: {exc}",
             )
+        finally:
+            from app.services.child_process import close_download_process
+            close_download_process(process)
 
 
 class YtDlpProfileDownloadEngine:
@@ -507,6 +513,7 @@ class YtDlpProfileDownloadEngine:
         if not has_ffmpeg:
             log(f"[{spec.name}] 未检测到 FFmpeg，将下载可直接播放的单文件格式，最高画质可能受限")
         before = set(list_media_files(user_folder))
+        process = None
         try:
             process = subprocess.Popen(
                 command,
@@ -537,6 +544,9 @@ class YtDlpProfileDownloadEngine:
                 False, 0, -1, error_code="engine_exception",
                 error_message=f"{type(exc).__name__}: {exc}",
             )
+        finally:
+            from app.services.child_process import close_download_process
+            close_download_process(process)
 
 
 def get_configured_profile_engine_name(spec: ProfilePlatformSpec) -> str:

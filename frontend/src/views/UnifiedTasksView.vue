@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X } from '@lucide/vue'
+import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X, Pause, Play } from '@lucide/vue'
 import { api, jsonBody } from '../api'
 import Pager from '../components/Pager.vue'
 import { openMedia } from '../media'
@@ -23,6 +23,10 @@ const statsTask = ref<UnifiedTask>(), statsData = ref<any>({ snapshots: [] }), s
 const statsDialog = ref<HTMLElement | null>(null)
 const statsMetric = ref<'view_count' | 'like_count' | 'comment_count' | 'share_count'>('view_count')
 let searchTimer: number | undefined
+let pollTimer: number | undefined
+let loadSequence = 0
+let pollInFlight = false
+type TaskAction = 'retry' | 'cancel' | 'pause' | 'resume' | 'refresh_retry'
 let statsReturnFocus: HTMLElement | null = null
 const platformNames: Record<string, string> = { douyin: '抖音', x: 'X', tiktok: 'TikTok', weibo: '微博', bilibili: 'B站', xhs: '小红书' }
 const statusNames: Record<string, string> = { pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', skipped: '已跳过', failed: '失败', cancelled: '已取消' }
@@ -52,27 +56,32 @@ const statsPoints = computed(() => {
 })
 const formatCount = (value: number) => Number(value || 0).toLocaleString('zh-CN')
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (silent && pollInFlight) return
+  if (silent) pollInFlight = true
+  const sequence = ++loadSequence
+  if (!silent) loading.value = true
   const params = new URLSearchParams({ page: String(page.value), page_size: '20' })
   if (platform.value) params.set('platform', platform.value)
   if (status.value) params.set('status', status.value)
   if (search.value.trim()) params.set('q', search.value.trim())
+  if (queryText(route.query.task_key)) params.set('task_key', queryText(route.query.task_key))
   try {
     const data = await api<UnifiedTaskPage>(`/operations/tasks?${params}`)
+    if (sequence !== loadSequence) return
     tasks.value = data.items
     pages.value = data.pages
     total.value = data.total
     statusSummary.value = data.status_summary || {}
     summaryLoaded.value = true
     loadError.value = ''
-    selectedKeys.value = []
+    selectedKeys.value = selectedKeys.value.filter(key => data.items.some(task => task.key === key))
   } catch (error: any) {
+    if (sequence !== loadSequence) return
     loadError.value = error.message || '加载统一任务失败'
-    tasks.value = []; total.value = 0; pages.value = 1; statusSummary.value = {}; summaryLoaded.value = false; selectedKeys.value = []
-    store.notify(loadError.value, 'error')
+    if (!silent) store.notify(loadError.value, 'error')
   }
-  finally { loading.value = false }
+  finally { if (silent) pollInFlight = false; if (sequence === loadSequence) loading.value = false }
 }
 function syncQuery() {
   const query: Record<string, string> = {}
@@ -91,8 +100,9 @@ function toggleTask(taskKey: string) {
 }
 function togglePage() { selectedKeys.value = allPageSelected.value ? [] : tasks.value.map(task => task.key) }
 function setStatus(next: string) { status.value = next === status.value ? '' : next; resetAndLoad() }
-async function runAction(taskKeys: string[], action: 'retry' | 'cancel') {
+async function runAction(taskKeys: string[], action: TaskAction) {
   if (!taskKeys.length || actionBusy.value) return
+  if (action === 'cancel' && !confirm(`确定取消 ${taskKeys.length} 个任务？已保存的文件不会删除。`)) return
   actionBusy.value = true
   try {
     const result = await api<UnifiedTaskActionResult>('/operations/tasks/actions', {
@@ -105,7 +115,7 @@ async function runAction(taskKeys: string[], action: 'retry' | 'cancel') {
   } catch (error: any) { store.notify(error.message || '任务操作失败', 'error') }
   finally { actionBusy.value = false }
 }
-async function action(task: UnifiedTask, actionName: 'retry' | 'cancel') {
+async function action(task: UnifiedTask, actionName: TaskAction) {
   if (rowBusy.value.includes(task.key)) return
   rowBusy.value = [...rowBusy.value, task.key]
   try { await runAction([task.key], actionName) }
@@ -149,12 +159,18 @@ async function copyFailure(task: UnifiedTask) {
     store.notify('失败信息已复制')
   } catch { store.notify('复制失败，请检查浏览器剪贴板权限', 'error') }
 }
-onMounted(() => { void load(); document.addEventListener('keydown', statsKeydown) })
-onBeforeUnmount(() => { window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
-watch(() => route.fullPath, () => {
+onMounted(() => {
+  void load()
+  pollTimer = window.setInterval(() => {
+    if (!document.hidden && !loading.value && !actionBusy.value) void load(true)
+  }, 5000)
+  document.addEventListener('keydown', statsKeydown)
+})
+onBeforeUnmount(() => { loadSequence++; window.clearInterval(pollTimer); window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
+watch(() => route.fullPath, (path, previousPath) => {
   const nextPlatform = queryText(route.query.platform), nextStatus = queryText(route.query.status)
   const nextSearch = queryText(route.query.q), nextPage = queryPage(route.query.page)
-  if (nextPlatform === platform.value && nextStatus === status.value && nextSearch === search.value.trim() && nextPage === page.value) return
+  if (nextPlatform === platform.value && nextStatus === status.value && nextSearch === search.value.trim() && nextPage === page.value && path === previousPath) return
   platform.value = nextPlatform; status.value = nextStatus; search.value = nextSearch; page.value = nextPage
   void load()
 })
@@ -164,9 +180,10 @@ watch(() => route.fullPath, () => {
   <section class="workspace-card">
     <header class="workspace-header">
       <div><h2>全部任务</h2><span>跨平台检索、批量处理与失败诊断；筛选会保留在链接中。</span></div>
-      <button class="btn ghost" :disabled="loading" @click="load"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
+      <button class="btn ghost" :disabled="loading" @click="load()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
     </header>
-    <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用：{{ loadError }}<button class="text-button" @click="load">重试</button></div>
+    <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用，保留上次结果：{{ loadError }}<button class="text-button" @click="load()">重试</button></div>
+    <div v-if="route.query.task_key" class="selection-bar" role="status"><span>当前定位任务 {{ route.query.task_key }}</span><button class="text-button" @click="resetAndLoad">返回任务列表</button></div>
     <div class="filter-row unified-filters">
       <select v-model="platform" aria-label="平台" @change="resetAndLoad"><option value="">全部平台</option><option v-for="item in store.platforms" :key="item.id" :value="item.id">{{ item.name }}</option></select>
       <select v-model="status" aria-label="状态" @change="resetAndLoad"><option value="">全部状态</option><option value="pending">等待中</option><option value="downloading">下载中</option><option value="paused">已暂停</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
@@ -191,7 +208,7 @@ watch(() => route.fullPath, () => {
           <td class="select-col" data-label="选择"><input type="checkbox" :aria-label="`选择任务 ${task.id}`" :checked="selectedKeys.includes(task.key)" @change="toggleTask(task.key)" /></td>
           <td data-label="平台与来源"><div class="media-cell"><span class="media-icon">{{ platformNames[task.platform] || task.platform }}</span><div><strong :title="task.source_label">{{ task.source_label }}</strong><span>{{ task.source_type === 'profile' ? '作者主页' : '单条作品' }} · #{{ task.id }}</span></div></div></td>
           <td data-label="元数据"><strong :title="task.author_name || ''">{{ task.author_name || '作者未知' }}</strong><span>{{ task.published_at ? new Date(task.published_at).toLocaleString() : (task.media_type || '元数据待采集') }}</span></td>
-          <td data-label="状态"><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small></td>
+          <td data-label="状态"><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small><div v-if="task.platform === 'douyin'" class="row-actions"><button v-if="['pending','downloading'].includes(task.status)" class="icon-btn" :aria-label="`暂停任务 ${task.id}`" :disabled="actionBusy" @click="action(task, 'pause')"><Pause :size="16" /></button><button v-if="task.status === 'paused'" class="icon-btn" :aria-label="`恢复任务 ${task.id}`" :disabled="actionBusy" @click="action(task, 'resume')"><Play :size="16" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="text-button" :disabled="actionBusy" @click="action(task, 'refresh_retry')">刷新链接重试</button></div></td>
           <td data-label="进度"><strong>{{ Number(task.progress_percent || 0).toFixed(1) }}%</strong><span>{{ task.file_count }} 个文件</span></td>
           <td class="result-cell" data-label="结果"><template v-if="task.error_message"><details class="task-error-detail"><summary>{{ task.error_message }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_code">错误代码：{{ task.error_code }}</small><button class="text-button" @click="copyFailure(task)">复制诊断</button></details></template><span v-else>{{ task.status === 'completed' ? '文件已保存' : '—' }}</span></td>
           <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" :aria-label="`查看任务 ${task.id} 互动趋势`" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :aria-label="`重试任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :aria-label="`取消任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>

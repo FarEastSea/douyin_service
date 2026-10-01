@@ -8,12 +8,17 @@ import { reportStatusLabel } from '../localization'
 const store = useAppStore(), reports = ref<any[]>([]), cycle = ref<any>({}), loading = ref(false), copying = ref(false), timer = ref<number>()
 const runBusy = ref(false), reconcileBusy = ref(false), loadError = ref(''), reportLoaded = ref(false)
 const latest = computed(() => reports.value[0])
+let loadSequence = 0
+let backgroundLoading = false
 function metric(value: unknown) { return reportLoaded.value && value != null ? Number(value).toLocaleString('zh-CN') : '—' }
 async function load(silent = false) {
+  if (silent && backgroundLoading) return
+  if (silent) backgroundLoading = true
+  const sequence = ++loadSequence
   if (!silent) loading.value = true
-  try { const data = await api<any>('/authors/reports/subscriptions?limit=20'); reports.value = data.items || []; cycle.value = data.cycle || {}; reportLoaded.value = true; loadError.value = '' }
-  catch (error: any) { loadError.value = error.message || '加载自动更新报告失败'; if (!silent) store.notify(loadError.value, 'error') }
-  finally { if (!silent) loading.value = false }
+  try { const data = await api<any>('/authors/reports/subscriptions?limit=20'); if (sequence !== loadSequence) return; reports.value = data.items || []; cycle.value = data.cycle || {}; reportLoaded.value = true; loadError.value = '' }
+  catch (error: any) { if (sequence !== loadSequence) return; loadError.value = error.message || '加载自动更新报告失败'; if (!silent) store.notify(loadError.value, 'error') }
+  finally { if (silent) backgroundLoading = false; if (sequence === loadSequence) loading.value = false }
 }
 async function run() {
   if (store.risk.active) return store.notify('抖音接口正在冷却', 'error')
@@ -46,7 +51,7 @@ function triggerLabel(trigger: string) {
   return trigger === 'manual' ? '手动触发' : '自动调度'
 }
 onMounted(() => { void load(); timer.value = window.setInterval(() => { if (!document.hidden) void load(true) }, 10_000) })
-onBeforeUnmount(() => clearInterval(timer.value))
+onBeforeUnmount(() => { loadSequence++; clearInterval(timer.value) })
 </script>
 
 <template>

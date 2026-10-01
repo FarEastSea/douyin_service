@@ -45,6 +45,8 @@ async def _apply_all_storage_targets(
         "errors": 0,
         "batches": 0,
         "skipped_reasons": {},
+        "journals": [],
+        "failure_details": [],
     }
     try:
         for offset in range(0, len(targets), 200):
@@ -60,6 +62,9 @@ async def _apply_all_storage_targets(
                 reason = str(item.get("reason") or "未满足安全处理条件")[:160]
                 totals["skipped_reasons"][reason] = totals["skipped_reasons"].get(reason, 0) + 1
             totals["errors"] += len(result["apply_errors"])
+            if result.get("quarantine_root"):
+                totals["journals"].append(result["quarantine_root"])
+            totals["failure_details"].extend(result["apply_errors"])
             totals["batches"] += 1
             state.update({
                 "phase": "applying",
@@ -275,6 +280,7 @@ def run_storage_repair_all_task(
         finished_at = datetime.now(timezone.utc).isoformat()
         repair_state = {
             "mode": "all",
+            "status": "partial" if totals["errors"] or verification_error else "completed",
             "applied_at": finished_at,
             **totals,
             "records_truncated": report["records_truncated"],
@@ -284,8 +290,8 @@ def run_storage_repair_all_task(
         }
         redis_client.set_storage_repair_state(repair_state)
         state.update({
-            "status": "completed",
-            "phase": "completed",
+            "status": repair_state["status"],
+            "phase": repair_state["status"],
             "updated_at": finished_at,
             "finished_at": finished_at,
             "progress": totals,

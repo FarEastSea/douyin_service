@@ -38,6 +38,7 @@ from app.services.platform_metadata import (
 )
 from app.services.x_downloader import is_media_download_line
 from app.tasks.celery_app import celery_app
+from app.services.download_lifecycle import FencedPlatformTask, StaleDownloadAttempt, bind_download_attempt, lock_download_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def _persist_xhs_profile_result(
     return child_task_ids
 
 
-@celery_app.task(bind=True, name="app.tasks.platform_download_tasks.download_platform_profile")
+@celery_app.task(bind=True, base=FencedPlatformTask, name="app.tasks.platform_download_tasks.download_platform_profile")
 def download_platform_profile(self, task_id: int):
     db = get_sync_db()
     cookie_path = None
@@ -164,6 +165,7 @@ def download_platform_profile(self, task_id: int):
             .where(
                 PlatformDownloadTask.id == task_id,
                 PlatformDownloadTask.status == "pending",
+                PlatformDownloadTask.celery_task_id == self.request.id,
             )
             .values(
                 status="downloading",
@@ -192,6 +194,7 @@ def download_platform_profile(self, task_id: int):
         ).scalar_one_or_none()
         if not task:
             return {"success": False, "error": "平台下载任务不存在"}
+        bind_download_attempt(db, task_id, self.request.id, PlatformDownloadTask)
 
         spec = get_profile_platform_spec(task.platform)
         platform_id = task.platform
@@ -210,6 +213,7 @@ def download_platform_profile(self, task_id: int):
         source_key = task.source_key
         engine_name = task.engine_name
         redis_client.update_platform_task_state(platform_id, task_id, {
+            "attempt_id": self.request.id,
             "status": "downloading", "phase": "preparing",
             "file_count": 0, "downloaded_media_count": 0, "progress_percent": 0,
         })
@@ -222,11 +226,14 @@ def download_platform_profile(self, task_id: int):
 
         def on_line(line: str) -> None:
             nonlocal downloaded
+            if not redis_client.external_attempt_current(platform_id, task_id, self.request.id):
+                raise StaleDownloadAttempt("平台执行已被取消或替换")
             log_lines.append(line)
             redis_client.append_platform_task_log(platform_id, task_id, line)
             if is_media_download_line(line):
                 downloaded += 1
             redis_client.update_platform_task_state(platform_id, task_id, {
+                "attempt_id": self.request.id,
                 "status": "downloading", "phase": "running",
                 "file_count": downloaded, "downloaded_media_count": downloaded,
                 "progress_percent": 0, "last_log_line": line[:500],
@@ -286,20 +293,14 @@ def download_platform_profile(self, task_id: int):
                 destination=download_destination,
                 cookie_file=cookie_path,
                 on_line=on_line,
-                on_process=lambda pid: redis_client.set_platform_task_pid(platform_id, task_id, pid),
+                on_process=lambda pid: redis_client.set_external_attempt_pid(platform_id, task_id, self.request.id, pid),
                 **engine_options,
             )
 
-        task = db.execute(
-            select(PlatformDownloadTask).where(PlatformDownloadTask.id == task_id)
-        ).scalar_one_or_none()
-        if not task:
-            return {"success": False, "deleted": True}
-        if task.status == "cancelled":
-            return {"success": False, "cancelled": True}
+        lock_download_attempt(db, task_id, self.request.id, PlatformDownloadTask)
+        db.refresh(task)
 
-        if not task.download_dir:
-            task.download_dir = str(Path(spec.download_root()) / profile_storage_key(task.source_key))
+        task.download_dir = str(Path(download_destination) / profile_storage_key(task.source_key))
         existing_assets = {
             item.file_path: item for item in db.execute(
             select(PlatformMediaAsset).where(
@@ -367,9 +368,7 @@ def download_platform_profile(self, task_id: int):
         for child_task_id in child_task_ids:
             child_task = db.get(PlatformDownloadTask, child_task_id)
             try:
-                queued = download_platform_profile.delay(child_task_id)
-                if child_task:
-                    child_task.celery_task_id = queued.id
+                download_platform_profile.delay(child_task_id)
                 dispatched_children += 1
             except Exception as exc:
                 if child_task:
@@ -396,10 +395,14 @@ def download_platform_profile(self, task_id: int):
             "discovered_works": len(discovered_works) if isinstance(discovered_works, list) else 0,
             "queued_downloads": dispatched_children,
         }
+    except StaleDownloadAttempt:
+        db.rollback()
+        return {"success": False, "superseded": True}
     except Exception as exc:
         db.rollback()
         logger.error("平台下载任务 %s 异常:\n%s", task_id, traceback.format_exc())
         try:
+            lock_download_attempt(db, task_id, self.request.id, PlatformDownloadTask)
             task = db.execute(
                 select(PlatformDownloadTask).where(PlatformDownloadTask.id == task_id)
             ).scalar_one_or_none()
@@ -420,8 +423,7 @@ def download_platform_profile(self, task_id: int):
         cleanup_platform_cookie_file(cookie_path, managed_cookie)
         if platform_id:
             try:
-                redis_client.delete_platform_task_state(platform_id, task_id)
-                redis_client.delete_platform_task_pid(platform_id, task_id)
+                redis_client.clear_external_attempt(platform_id, task_id, self.request.id)
             except Exception:
                 pass
         db.close()
@@ -474,7 +476,7 @@ def check_xhs_subscriptions():
                 queued = download_platform_profile.delay(task_id)
                 task = db.get(PlatformDownloadTask, task_id)
                 if task:
-                    task.celery_task_id = queued.id
+                    db.refresh(task)
                     dispatched.append(task_id)
             except Exception as exc:
                 task = db.get(PlatformDownloadTask, task_id)

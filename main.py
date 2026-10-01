@@ -23,6 +23,11 @@ from app.core.error_handling import register_exception_handlers
 from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware
 
 
+from app.core.config_transaction import recover_config_change, journal_path
+if journal_path().exists():
+    recover_config_change()
+from app.core.queue_configuration import recover_queue_change
+recover_queue_change()
 BOOTSTRAP_STATUS = validate_env()
 BOOTSTRAP_MODE = not BOOTSTRAP_STATUS["ready"]
 settings = None
@@ -89,6 +94,8 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     try:
         await init_db()
+        from app.services.download_publication import recover_media_publications
+        await asyncio.to_thread(recover_media_publications)
         migrated_account = await asyncio.to_thread(migrate_legacy_account_sync)
         recovered_signature_state = await asyncio.to_thread(
             recover_legacy_signature_isolation_sync
@@ -116,6 +123,16 @@ async def lifespan(app: FastAPI):
     # worker 退出，否则用户将失去再次进入维护模式的机会。
     try:
         download_dir = ensure_download_dir()
+        from pathlib import Path
+        from app.services.storage_maintenance import maintenance_lock, recover_storage_journals
+        from app.models.database import get_async_db
+        recovery_lock = maintenance_lock(Path(settings.DOWNLOAD_ROOT).resolve())
+        await asyncio.to_thread(recovery_lock.__enter__)
+        try:
+            async for recovery_db in get_async_db():
+                await recover_storage_journals(recovery_db, Path(settings.DOWNLOAD_ROOT).resolve())
+        finally:
+            await asyncio.to_thread(recovery_lock.__exit__, None, None, None)
         print(f"✅ 下载目录: {download_dir}")
     except Exception as e:
         BOOTSTRAP_STATUS["ready"] = False
@@ -143,12 +160,20 @@ async def lifespan(app: FastAPI):
     concurrency = settings.MAX_CONCURRENT_DOWNLOADS
     worker_result = process_manager.start_worker(concurrency)
     print(f"✅ {worker_result['message']}")
-    beat_result = process_manager.start_beat()
-    print(f"✅ {beat_result['message']}")
+    from app.core.queue_configuration import pending_path, resume_pending_changes
+    if not pending_path().exists():
+        beat_result = process_manager.start_beat()
+        print(f"✅ {beat_result['message']}")
+    config_supervisor = asyncio.create_task(resume_pending_changes())
     
     yield
     
     # 关闭时执行
+    config_supervisor.cancel()
+    try:
+        await config_supervisor
+    except asyncio.CancelledError:
+        pass
     print("👋 关闭媒体下载管理系统...")
     process_manager.shutdown_all()
     print("✅ Celery 进程已停止")

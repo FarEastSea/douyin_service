@@ -14,6 +14,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy.engine import URL
 
 from app.core import env_config
 from app.core.diagnostics import clear_runtime_errors, report_runtime_error
@@ -57,16 +58,12 @@ class Settings(BaseModel):
     @property
     def effective_database_url(self) -> str:
         """根据 DB_TYPE 构建实际的数据库 URL"""
-        if self.DB_TYPE == "mysql":
-            user_part = self.DB_USER
-            if self.DB_PASSWORD:
-                user_part = f"{self.DB_USER}:{self.DB_PASSWORD}"
-            return f"mysql+pymysql://{user_part}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"
-        # 默认 PostgreSQL
-        user_part = self.DB_USER
-        if self.DB_PASSWORD:
-            user_part = f"{self.DB_USER}:{self.DB_PASSWORD}"
-        return f"postgresql://{user_part}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        return URL.create(
+            "mysql+pymysql" if self.DB_TYPE == "mysql" else "postgresql",
+            username=self.DB_USER, password=self.DB_PASSWORD or None,
+            host=self.DB_HOST, port=self.DB_PORT, database=self.DB_NAME,
+            query={"charset": "utf8mb4"} if self.DB_TYPE == "mysql" else {},
+        ).render_as_string(hide_password=False)
 
     # Redis 配置 - Celery 消息队列和进度缓存
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -90,6 +87,16 @@ class Settings(BaseModel):
     # Celery 配置
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    CELERY_CONNECTION_MODE: str = "inherit"
+    XHS_SERVICE_ENABLED: bool = False
+
+    @property
+    def effective_celery_broker(self) -> str:
+        return self.CELERY_BROKER_URL if self.CELERY_CONNECTION_MODE == "independent" else self.redis_url_with_auth
+
+    @property
+    def effective_celery_backend(self) -> str:
+        return self.CELERY_RESULT_BACKEND if self.CELERY_CONNECTION_MODE == "independent" else self.redis_url_with_auth
     
     # 下载配置
     DOWNLOAD_CHUNK_SIZE: int = 1024 * 1024  # 1MB 分块下载

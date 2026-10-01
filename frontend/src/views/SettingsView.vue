@@ -72,6 +72,17 @@ const resourceState = ref<Record<ResourceKey, { loaded: boolean; error: string }
 const saving = ref(false)
 const pageLoading = ref(false)
 const saveError = ref('')
+const configurationFeedback = ref('')
+const queueChange = ref<any>({ state: 'applied', pending: false })
+let queueChangeTimer: number | undefined
+async function refreshQueueChange() {
+  try { queueChange.value = await api('/config/queue-change') } catch { /* 其他配置仍可使用 */ }
+}
+async function cancelQueueChange() {
+  if (!confirm('撤回待生效的后台连接变更，继续使用当前配置？')) return
+  try { await api('/config/queue-change/cancel', { method: 'POST' }); await refreshQueueChange() }
+  catch (error: any) { store.notify(error.message || '撤回失败', 'error') }
+}
 const expandedGroups = ref<string[]>([])
 const directoryOpen = ref(false)
 const mobileViewport = ref(false)
@@ -88,6 +99,9 @@ const platformReadiness = ref<any>({ items: [] })
 const storageAudit = ref<any>(null)
 const storageAuditState = ref<any>({ status: 'idle', progress: {} })
 const lastStorageRepair = ref<any>(null)
+const storageJournals = ref<any[]>([])
+const storageRestorePreview = ref<any>(null)
+const storageRestoreBusy = ref(false)
 const storageRepairAllState = ref<any>({ status: 'idle', progress: {} })
 const platformAuditBusy = ref(false)
 const storageAuditBusy = ref(false)
@@ -360,6 +374,8 @@ async function refreshStorageAudit(silent = false) {
     if (storageRepairAllState.value.status === 'completed' && ['queued', 'running'].includes(previousRepairAllStatus)) {
       store.notify('存储全部维护完成：已处理 ' + (storageRepairAllState.value.result?.applied || 0) + ' 项')
     }
+    if (['completed', 'partial'].includes(storageRepairAllState.value.status) && ['queued', 'running'].includes(previousRepairAllStatus)) void loadStorageJournals()
+    if (storageRepairAllState.value.status === 'partial' && previousRepairAllStatus !== 'partial') store.notify('存储维护部分完成，请查看失败项和复检结果', 'error')
     if (storageRepairAllState.value.status === 'failed' && previousRepairAllStatus !== 'failed' && !silent) {
       store.notify(storageRepairAllState.value.error || '存储全部维护失败', 'error')
     }
@@ -417,6 +433,21 @@ async function applyAllStorageRepairs() {
   }
 }
 
+async function loadStorageJournals() {
+  storageJournals.value = (await api<any>('/operations/storage-journals')).items || []
+}
+async function restoreStorage(journalId: string, apply = false) {
+  if (apply && (!storageRestorePreview.value || storageRestorePreview.value.journalId !== journalId ||
+    !confirm('确认恢复预演中允许的隔离文件？不会覆盖已有文件，也不会自动恢复任务完成状态。'))) return
+  storageRestoreBusy.value = true
+  try {
+    const result = await api<any>('/operations/storage-restore', { method: 'POST', ...jsonBody({ journal_id: journalId, dry_run: !apply }) })
+    storageRestorePreview.value = { ...result, journalId }
+    if (apply) { store.notify(result.status === 'partial' ? '恢复部分完成，请查看逐项失败原因' : '隔离文件恢复完成，请重新巡检并按需重试任务', result.status === 'partial' ? 'error' : 'success'); await loadStorageJournals(); await startStorageAudit() }
+  } catch (error: any) { store.notify(error.message || '隔离恢复失败，原文件不会被覆盖', 'error') }
+  finally { storageRestoreBusy.value = false }
+}
+
 async function loadActivePage() {
   pageLoading.value = true
   saveError.value = ''
@@ -434,7 +465,7 @@ async function loadActivePage() {
   } else if (activePage.value.id === 'platforms') {
     jobs.push(loadPlatformReadiness())
   } else if (activePage.value.id === 'storage') {
-    jobs.push(refreshStorageAudit(true))
+    jobs.push(refreshStorageAudit(true), loadStorageJournals())
   } else if (activePage.value.id === 'logs') {
     jobs.push(loadLogs())
   } else if (activePage.value.id === 'update') {
@@ -494,7 +525,14 @@ async function saveEnvBlock(keys: string[]) {
     const field = allFieldMap.value[key]
     values[key] = field?.secret ? secretValues.value[key].trim() : allValues.value[key]?.value
   }
+  if (dirtyKeys.some(key => key === 'DOWNLOAD_ROOT' || key.endsWith('_DOWNLOAD_SUBDIR'))) {
+    const preview = await api<any>('/config/all?preview=true', { method: 'POST', ...jsonBody({ values }) })
+    const counts = preview.data?.migrated_paths || {}
+    const count = Object.values(counts).filter(value => typeof value === 'number').reduce<number>((sum, value) => sum + Number(value), 0)
+    if (!confirm(`目录预演通过，将更新 ${count} 条文件关联。不搬移或删除文件，是否保存？`)) return false
+  }
   const result = await api<any>('/config/all', { method: 'POST', ...jsonBody({ values }) })
+  configurationFeedback.value = result.message || '配置已生效'
   if (result.data?.admin_token) saveToken(result.data.admin_token)
   for (const key of dirtyKeys) {
     const field = allFieldMap.value[key]
@@ -696,6 +734,8 @@ watch(activeGroupId, groupId => {
   }
 })
 onMounted(() => {
+  void refreshQueueChange()
+  queueChangeTimer = window.setInterval(() => { if (!document.hidden) void refreshQueueChange() }, 10_000)
   mobileQuery = window.matchMedia('(max-width: 900px)')
   updateViewport()
   mobileQuery.addEventListener('change', updateViewport)
@@ -703,6 +743,7 @@ onMounted(() => {
   window.addEventListener('beforeunload', beforeUnload)
 })
 onBeforeUnmount(() => {
+  window.clearInterval(queueChangeTimer)
   if (logTimer != null) window.clearInterval(logTimer)
   stopStorageAuditPolling()
   mobileQuery?.removeEventListener('change', updateViewport)
@@ -798,6 +839,8 @@ onBeforeUnmount(() => {
             <p>{{ activePage.description }}</p>
           </header>
           <p v-if="saveError" class="config-alert" role="alert">{{ saveError }}</p>
+          <p v-if="configurationFeedback && props.mode === 'settings'" class="maintenance-note" role="status">{{ configurationFeedback }}</p>
+          <div v-if="queueChange.pending || queueChange.state === 'failed'" class="config-alert" :data-tone="queueChange.state" role="status"><span>{{ queueChange.message }}</span><button v-if="queueChange.pending" class="btn ghost compact" @click="cancelQueueChange">撤回待生效变更</button></div>
 
           <template v-if="props.mode === 'settings'">
             <template v-if="resolvedSections.length && !(activePage.id === 'account-x' || activePlatform)">
@@ -998,6 +1041,13 @@ onBeforeUnmount(() => {
                   <button class="btn primary" type="button" :disabled="storageRepairBusy || storageRepairAllBusy || !storageIssueCount" @click="applyAllStorageRepairs">后台处理全部 {{ storageIssueCount }} 项</button>
                 </div>
                 <p v-if="lastStorageRepair" class="maintenance-note">上次处理：{{ displayDateTime(lastStorageRepair.applied_at) }} · 成功 {{ lastStorageRepair.applied }} 项 · 跳过 {{ lastStorageRepair.skipped || 0 }} 项</p>
+                <p v-if="lastStorageRepair?.status === 'partial'" class="config-alert" role="status">维护部分完成：{{ lastStorageRepair.errors || 0 }} 项处理失败。{{ lastStorageRepair.verification_error ? '复检失败：' + lastStorageRepair.verification_error : '请查看剩余原因和维护清单。' }}</p>
+                <details v-if="lastStorageRepair?.failure_details?.length || lastStorageRepair?.apply_errors?.length || lastStorageRepair?.skipped_reasons" class="diagnostic-box"><summary>处理失败与剩余原因</summary><pre>{{ JSON.stringify({ failures: lastStorageRepair.failure_details || lastStorageRepair.apply_errors, skipped: lastStorageRepair.skipped_reasons, remaining: lastStorageRepair.remaining_counts }, null, 2) }}</pre></details>
+                <section class="setting-section"><header><div><h4>可恢复维护清单</h4><p>逐批记录隔离位置与结果；恢复前必须预演，不覆盖已有文件。</p></div><button class="btn ghost compact" @click="loadStorageJournals">刷新清单</button></header>
+                  <article v-for="journal in storageJournals" :key="journal.id" class="setting-field-row"><div><strong>{{ journal.id }} · {{ journal.state }}</strong><p>{{ journal.root }}/.quarantine/storage-maintenance/{{ journal.id }}</p><details class="diagnostic-box"><summary>查看逐项结果</summary><pre>{{ JSON.stringify({ plan: journal.plan, moved: journal.moved, errors: journal.apply_errors, restored: journal.restore_result }, null, 2) }}</pre></details></div><button class="btn ghost compact" :disabled="storageRestoreBusy || !journal.moved?.length" @click="restoreStorage(journal.id)">预演恢复</button></article>
+                  <div v-if="storageRestorePreview" class="maintenance-note"><strong>允许恢复 {{ storageRestorePreview.items.filter((item: any) => item.eligible).length }} / {{ storageRestorePreview.items.length }} 项</strong><pre>{{ JSON.stringify(storageRestorePreview.items, null, 2) }}</pre><button class="btn ghost" :disabled="storageRestoreBusy || storageRestorePreview.dry_run === false || !storageRestorePreview.items.some((item: any) => item.eligible)" @click="restoreStorage(storageRestorePreview.journalId, true)">确认恢复</button></div>
+                  <p v-if="!storageJournals.length">暂无维护清单。</p>
+                </section>
                 <details v-if="storageAudit && (storageRepairTargets.length || storageAudit.orphan_files?.length)" class="diagnostic-box"><summary>查看问题样本</summary><pre>{{ JSON.stringify({ relinkable_records: storageAudit.relinkable_records, missing_records: storageAudit.missing_records, zero_byte_files: storageAudit.zero_byte_files, partial_files: storageAudit.partial_files, orphan_files: storageAudit.orphan_files }, null, 2) }}</pre></details>
                 <div v-if="storageRepairPlan" class="maintenance-note"><strong>预演结果：{{ storageRepairPlan.eligible }}/{{ storageRepairPlan.planned }} 项可处理。</strong> 文件只移动到可恢复隔离区，真正缺失的媒体任务会标记为失败以便重试。</div>
               </section>
@@ -1079,7 +1129,8 @@ onBeforeUnmount(() => {
 .config-page-intro { margin-bottom: 30px; }
 .config-page-intro h3 { margin: 0 0 7px; font-size: 24px; letter-spacing: -.025em; }
 .config-page-intro p { max-width: 720px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
-.config-alert { margin: -12px 0 22px; padding: 10px 12px; border-left: 3px solid var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); color: var(--red); font-size: 12px; line-height: 1.55; }
+.config-alert { margin: -12px 0 22px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--red) 35%, var(--line)); background: color-mix(in srgb, var(--red) 8%, transparent); color: var(--red); font-size: 12px; line-height: 1.55; }
+.config-alert[data-tone="draining"] { border-color: var(--line-strong); background: var(--surface-2); color: var(--text); }
 .setting-section { border-top: 1px solid var(--line-strong); }
 .setting-section + .setting-section { margin-top: 34px; }
 .setting-section > header { min-height: 78px; padding: 18px 0 15px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
@@ -1145,7 +1196,7 @@ onBeforeUnmount(() => {
 .log-filters button { min-height: 31px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font-size: 10px; cursor: pointer; }
 .log-filters button.active { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .log-console { max-height: 640px; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #0b0e11; color: #c5cbd0; }
-.log-console article { padding: 8px 9px; display: grid; grid-template-columns: 156px 110px minmax(0, 1fr); gap: 8px; border-left: 2px solid var(--blue); font-size: 10px; }
+.log-console article { padding: 8px 9px; display: grid; grid-template-columns: 156px 110px minmax(0, 1fr); gap: 8px; border-left: 1px solid var(--blue); font-size: 10px; }
 .log-console article + article { margin-top: 4px; }
 .log-console article[data-level="warning"] { border-color: var(--amber); }
 .log-console article[data-level="error"] { border-color: var(--red); }

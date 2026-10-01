@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from urllib.parse import urljoin, urlsplit
+from app.core.request_budget import remaining_timeout
 
 
 DOUYIN_ALLOWED_DOMAINS = ("douyin.com", "iesdouyin.com")
@@ -124,6 +125,7 @@ def get_douyin_response(
     timeout: int,
     max_redirects: int = 5,
     headers: dict[str, str] | None = None,
+    deadline: float | None = None,
 ):
     """逐跳校验重定向，禁止跳出受信任的抖音域名集合。"""
     current_url = validate_douyin_url(url)
@@ -131,7 +133,7 @@ def get_douyin_response(
         response = session.get(
             current_url,
             allow_redirects=False,
-            timeout=timeout,
+            timeout=remaining_timeout(deadline, timeout),
             headers=headers or None,
         )
         if response.status_code not in {301, 302, 303, 307, 308}:
@@ -141,6 +143,7 @@ def get_douyin_response(
         if not location:
             return response, current_url
         next_url = urljoin(current_url, location)
+        response.close()
         validate_douyin_url(next_url)
         current_url = next_url
 

@@ -43,7 +43,7 @@ const attention = computed(() => {
     detail: risk.value.requires_account_update ? '账号请求上下文需要检查；新抖音请求暂不可用。' : '正在保护性冷却，等待后再检查。',
     to: '/settings/account-douyin', tone: 'critical',
   })
-  if (failedCount.value) items.push({ title: `${failedCount.value.toLocaleString()} 个下载任务失败`, detail: '查看失败原因，按任务决定是否重试。', to: '/operations/tasks?status=failed', tone: 'critical' })
+  if (failedCount.value) items.push({ title: `${failedCount.value.toLocaleString()} 个历史失败任务`, detail: '这是累计记录，不代表当前服务异常；可按需查看原因和重试。', to: '/operations/tasks?status=failed', tone: 'warning' })
   if (report.value && ['failed', 'interrupted', 'partial_upstream', 'partial_authentication'].includes(report.value.status)) items.push({
     title: ['failed', 'interrupted'].includes(report.value.status) ? '最近一次订阅检查异常终止' : '订阅检查需要核对',
     detail: report.value.summary || '查看本轮失败证据和续检状态。', to: '/douyin/updates', tone: 'warning',

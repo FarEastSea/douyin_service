@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.env_config import write_env_updates
 from app.models.models import SystemConfig
 
 
@@ -38,20 +37,20 @@ RUNTIME_CONFIG_ENV_KEYS = {
 RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     "auto_check_enabled": {
         "type": "bool",
-        "default": settings.AUTO_CHECK_ENABLED,
+        "default_key": "AUTO_CHECK_ENABLED",
         "label": "自动检查订阅",
     },
     "subscription_check_interval": {
         "type": "int",
-        "default": settings.DEFAULT_CHECK_INTERVAL,
-        "min": settings.MIN_CHECK_INTERVAL,
+        "default_key": "DEFAULT_CHECK_INTERVAL",
+        "min_key": "MIN_CHECK_INTERVAL",
         "max": 7 * 24 * 3600,
         "label": "订阅检查间隔",
         "unit": "秒",
     },
     "douyin_request_delay": {
         "type": "float",
-        "default": settings.REQUEST_DELAY,
+        "default_key": "REQUEST_DELAY",
         "min": 1.0,
         "max": 120.0,
         "label": "抖音接口最小请求间隔",
@@ -59,7 +58,7 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     },
     "douyin_risk_cooldown_seconds": {
         "type": "int",
-        "default": settings.DOUYIN_RISK_COOLDOWN_SECONDS,
+        "default_key": "DOUYIN_RISK_COOLDOWN_SECONDS",
         "min": 60,
         "max": 3600,
         "label": "抖音风控冷却时长",
@@ -67,12 +66,12 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     },
     "douyin_risk_auto_retry": {
         "type": "bool",
-        "default": settings.DOUYIN_RISK_AUTO_RETRY,
+        "default_key": "DOUYIN_RISK_AUTO_RETRY",
         "label": "风控冷却后自动恢复一次",
     },
     "author_check_delay": {
         "type": "float",
-        "default": settings.AUTHOR_CHECK_DELAY,
+        "default_key": "AUTHOR_CHECK_DELAY",
         "min": 5.0,
         "max": 600.0,
         "label": "作者之间检查间隔",
@@ -80,7 +79,7 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     },
     "download_timeout": {
         "type": "int",
-        "default": settings.DOWNLOAD_TIMEOUT,
+        "default_key": "DOWNLOAD_TIMEOUT",
         "min": 5,
         "max": 300,
         "label": "下载请求超时",
@@ -88,14 +87,14 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     },
     "download_retry_count": {
         "type": "int",
-        "default": settings.DOWNLOAD_RETRY_COUNT,
+        "default_key": "DOWNLOAD_RETRY_COUNT",
         "min": 0,
         "max": 10,
         "label": "下载重试次数",
     },
     "download_retry_delay": {
         "type": "int",
-        "default": settings.DOWNLOAD_RETRY_DELAY,
+        "default_key": "DOWNLOAD_RETRY_DELAY",
         "min": 0,
         "max": 300,
         "label": "下载重试延迟",
@@ -103,7 +102,7 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     },
     "stuck_task_timeout": {
         "type": "int",
-        "default": settings.STUCK_TASK_TIMEOUT,
+        "default_key": "STUCK_TASK_TIMEOUT",
         "min": 300,
         "max": 24 * 3600,
         "label": "卡住任务超时",
@@ -111,28 +110,28 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
     },
     "subscription_known_streak": {
         "type": "int",
-        "default": settings.SUBSCRIPTION_KNOWN_STREAK,
+        "default_key": "SUBSCRIPTION_KNOWN_STREAK",
         "min": 3,
         "max": 100,
         "label": "增量扫描连续已知作品停止数",
     },
     "subscription_max_pages": {
         "type": "int",
-        "default": settings.SUBSCRIPTION_MAX_PAGES,
+        "default_key": "SUBSCRIPTION_MAX_PAGES",
         "min": 1,
         "max": 500,
         "label": "增量扫描最大页数",
     },
     "subscription_safe_lookback_pages": {
         "type": "int",
-        "default": settings.SUBSCRIPTION_SAFE_LOOKBACK_PAGES,
+        "default_key": "SUBSCRIPTION_SAFE_LOOKBACK_PAGES",
         "min": 1,
         "max": 10,
         "label": "增量扫描安全回看页数",
     },
     "subscription_full_reconcile_interval": {
         "type": "int",
-        "default": settings.SUBSCRIPTION_FULL_RECONCILE_INTERVAL,
+        "default_key": "SUBSCRIPTION_FULL_RECONCILE_INTERVAL",
         "min": 24 * 3600,
         "max": 30 * 24 * 3600,
         "label": "作者全量对账间隔",
@@ -141,8 +140,15 @@ RUNTIME_CONFIG_SCHEMA: Dict[str, Dict[str, Any]] = {
 }
 
 
+def get_runtime_schema() -> Dict[str, Dict[str, Any]]:
+    current = settings.snapshot()
+    return {key: {**spec, "default": getattr(current, spec["default_key"]),
+                  **({"min": getattr(current, spec["min_key"])} if "min_key" in spec else {})}
+            for key, spec in RUNTIME_CONFIG_SCHEMA.items()}
+
+
 def get_runtime_defaults() -> Dict[str, Any]:
-    return {key: spec["default"] for key, spec in RUNTIME_CONFIG_SCHEMA.items()}
+    return {key: spec["default"] for key, spec in get_runtime_schema().items()}
 
 
 def _serialize(value: Any, value_type: str) -> str:
@@ -152,7 +158,7 @@ def _serialize(value: Any, value_type: str) -> str:
 
 
 def _coerce_value(key: str, value: Any, *, strict: bool) -> Any:
-    spec = RUNTIME_CONFIG_SCHEMA[key]
+    spec = get_runtime_schema()[key]
     value_type = spec["type"]
 
     try:
@@ -203,14 +209,8 @@ def normalize_runtime_config(values: Optional[Dict[str, Any]] = None, *, strict:
 
 
 def get_cached_runtime_config() -> Dict[str, Any]:
-    try:
-        from app.core import redis_client
-
-        cached = redis_client.get_runtime_config()
-        if cached:
-            return normalize_runtime_config(cached)
-    except Exception:
-        pass
+    # 无数据库会话的调用读取网页写入的本地持久化版本；Redis 的旧快照
+    # 可能被并发旧查询重新覆盖，不能反过来覆盖已经生效的网页配置。
     return get_runtime_defaults()
 
 
@@ -250,7 +250,13 @@ def get_runtime_config_sync(db: Optional[Session] = None) -> Dict[str, Any]:
         return get_cached_runtime_config()
 
 
-async def save_runtime_config(db: AsyncSession, updates: Dict[str, Any]) -> Dict[str, Any]:
+async def save_runtime_config(db: AsyncSession, updates: Dict[str, Any], *, commit: bool = True) -> Dict[str, Any]:
+    from app.core.config_transaction import configuration_session
+    async with configuration_session():
+        return await _save_runtime_config(db, updates, commit=commit)
+
+
+async def _save_runtime_config(db: AsyncSession, updates: Dict[str, Any], *, commit: bool) -> Dict[str, Any]:
     allowed_updates = {
         key: _coerce_value(key, value, strict=True)
         for key, value in updates.items()
@@ -277,11 +283,14 @@ async def save_runtime_config(db: AsyncSession, updates: Dict[str, Any]) -> Dict
     # .env 供 Web/Celery 重启后继续使用同一组值。
     try:
         await db.flush()
-        write_env_updates({
+        environment_updates = {
             RUNTIME_CONFIG_ENV_KEYS[key]: _serialize(value, RUNTIME_CONFIG_SCHEMA[key]["type"])
             for key, value in allowed_updates.items()
-        })
-        await db.commit()
+        }
+        if not commit:
+            return environment_updates
+        from app.core.config_transaction import commit_configuration
+        await commit_configuration(db, environment_updates)
     except Exception:
         await db.rollback()
         raise

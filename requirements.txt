@@ -29,6 +29,8 @@ pydantic-settings==2.1.0
 
 # 工具
 python-dotenv==1.0.0
+# 下载取消时回收本次执行的子进程，避免残留 FFmpeg。
+psutil>=6.1,<8
 # 与宝塔统一环境中的 pyOpenSSL 26.x / service-identity 兼容。
 cryptography>=49,<50
 gallery-dl>=1.30,<2.0

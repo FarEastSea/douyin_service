@@ -60,7 +60,8 @@ def _redis_source_key(source_signature: Optional[tuple] = None) -> tuple:
 
 
 def _redis_connection_key() -> tuple:
-    return (*_redis_source_key(), _observed_config_version)
+    # 普通配置版本变化不能重建 Redis 连接。
+    return (_redis_source_key()[-1],)
 
 
 class _RedisManager:
@@ -91,7 +92,7 @@ class _RedisManager:
             candidate: Optional[redis.Redis] = None
             try:
                 pool = redis.ConnectionPool.from_url(
-                    key[-2],
+                    key[0],
                     decode_responses=True,
                     socket_connect_timeout=1,
                     socket_timeout=2,
@@ -119,6 +120,9 @@ class _RedisManager:
                     return candidate
                 raise
 
+            if key != _redis_connection_key():
+                pool.disconnect()
+                return self.get_client()
             old_pool = self._pool
             failed_pool = self._failed_pool
             self._client = candidate
@@ -256,6 +260,23 @@ def _x_task_state_ttl() -> int:
 
 # ============ 进度管理 ============
 
+def activate_download_attempt(task_id: int, token: str) -> None:
+    with redis_client.pipeline(transaction=True) as pipe:
+        pipe.set(f"douyin:attempt:{task_id}", token, ex=7 * 24 * 3600)
+        pipe.delete(f"{PROGRESS_KEY_PREFIX}{task_id}")
+        pipe.execute()
+
+
+def invalidate_download_attempt(task_id: int, token: str | None = None) -> None:
+    # 取消确认后的清理不能删除随后已提交的新执行。
+    redis_client.eval("""
+        if ARGV[1] ~= '' and redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+        redis.call('SET', KEYS[1], 'invalidated', 'EX', 604800)
+        redis.call('DEL', KEYS[2])
+        return 1
+    """, 2, f"douyin:attempt:{task_id}", f"{PROGRESS_KEY_PREFIX}{task_id}", token or "")
+
+
 def update_progress(task_id: int, data: Dict[str, Any]) -> None:
     """
     更新任务进度
@@ -266,6 +287,15 @@ def update_progress(task_id: int, data: Dict[str, Any]) -> None:
     """
     key = f"{PROGRESS_KEY_PREFIX}{task_id}"
     data["last_updated"] = str(_time.time())
+    if data.get("attempt_id"):
+        values = [part for k, v in data.items() for part in (k, str(v))]
+        redis_client.eval("""
+            if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+            redis.call('HSET', KEYS[2], unpack(ARGV, 2))
+            redis.call('EXPIRE', KEYS[2], 604800)
+            return 1
+        """, 2, f"douyin:attempt:{task_id}", key, data["attempt_id"], *values)
+        return
     redis_client.hset(key, mapping={
         k: str(v) if not isinstance(v, str) else v 
         for k, v in data.items()
@@ -299,10 +329,18 @@ def get_progress(task_id: int) -> Optional[Dict[str, Any]]:
     return result
 
 
-def delete_progress(task_id: int) -> None:
+def delete_progress(task_id: int, attempt_id: str | None = None) -> None:
     """删除任务进度"""
     key = f"{PROGRESS_KEY_PREFIX}{task_id}"
-    redis_client.delete(key)
+    if attempt_id:
+        redis_client.eval("""
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[2])
+            end
+            return 0
+        """, 2, f"douyin:attempt:{task_id}", key, attempt_id)
+    else:
+        redis_client.delete(key)
 
 
 def get_all_progress() -> Dict[int, Dict[str, Any]]:
@@ -652,6 +690,55 @@ def delete_x_task_log(task_id: int) -> None:
     redis_client.delete(f"{X_TASK_LOG_PREFIX}{task_id}")
 
 
+def activate_external_attempt(platform: str, task_id: int, token: str) -> None:
+    redis_client.set(f"execution:{platform}:{task_id}", token, ex=7 * 24 * 3600)
+
+
+def external_attempt_current(platform: str, task_id: int, token: str) -> bool:
+    return redis_client.get(f"execution:{platform}:{task_id}") == token
+
+
+def clear_external_attempt(platform: str, task_id: int, token: str) -> None:
+    state = f"{X_TASK_STATE_PREFIX}{task_id}" if platform == "x" else _platform_task_key(PLATFORM_TASK_STATE_PREFIX, platform, task_id)
+    pid = f"{X_TASK_PID_PREFIX}{task_id}" if platform == "x" else _platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id)
+    redis_client.eval("""
+        if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+        return redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+    """, 3, f"execution:{platform}:{task_id}", state, pid, token)
+
+
+def set_external_attempt_pid(platform: str, task_id: int, token: str, process_id: int) -> None:
+    key = f"{X_TASK_PID_PREFIX}{task_id}" if platform == "x" else _platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id)
+    accepted = redis_client.eval("""
+        if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+        redis.call('SET', KEYS[2], ARGV[2], 'EX', 86400)
+        return 1
+    """, 2, f"execution:{platform}:{task_id}", key, token, process_id)
+    if not accepted:
+        # 取消可能发生在进程创建和 PID 登记之间，不能遗留子进程。
+        import os, signal
+        try:
+            os.kill(process_id, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        from app.services.download_lifecycle import StaleDownloadAttempt
+        raise StaleDownloadAttempt("下载执行已结束，子进程未登记")
+
+
+def _write_external_state(platform: str, task_id: int, key: str, data: dict) -> None:
+    token = data.get("attempt_id")
+    if token:
+        values = [value for pair in data.items() for value in pair]
+        redis_client.eval("""
+            if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+            redis.call('HSET', KEYS[2], unpack(ARGV, 3))
+            return redis.call('EXPIRE', KEYS[2], ARGV[2])
+        """, 2, f"execution:{platform}:{task_id}", key, token, _x_task_state_ttl(), *values)
+    else:
+        redis_client.hset(key, mapping=data)
+        redis_client.expire(key, _x_task_state_ttl())
+
+
 def update_x_task_state(task_id: int, data: Dict[str, Any]) -> None:
     """更新 X 任务的实时状态缓存。"""
     key = f"{X_TASK_STATE_PREFIX}{task_id}"
@@ -669,8 +756,7 @@ def update_x_task_state(task_id: int, data: Dict[str, Any]) -> None:
     if not serialized:
         return
 
-    redis_client.hset(key, mapping=serialized)
-    redis_client.expire(key, _x_task_state_ttl())
+    _write_external_state("x", task_id, key, serialized)
 
 
 def _deserialize_x_task_state(raw_state: Dict[str, str]) -> Optional[Dict[str, Any]]:
@@ -832,8 +918,7 @@ def update_platform_task_state(platform: str, task_id: int, data: Dict[str, Any]
             continue
         serialized[field_name] = value.isoformat() if isinstance(value, datetime) else str(value)
     if serialized:
-        redis_client.hset(key, mapping=serialized)
-        redis_client.expire(key, _x_task_state_ttl())
+        _write_external_state(platform, task_id, key, serialized)
 
 
 def get_platform_task_state(platform: str, task_id: int) -> Optional[Dict[str, Any]]:

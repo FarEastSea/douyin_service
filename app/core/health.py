@@ -53,6 +53,9 @@ async def _read_process_status() -> dict[str, Any]:
 
 
 async def _check_xhs_collector() -> None:
+    from app.core.config import settings
+    if not settings.XHS_SERVICE_ENABLED:
+        return
     from urllib.request import urlopen
 
     from app.services.xhs_download import XHS_INTERNAL_API_URL
@@ -127,6 +130,7 @@ async def build_readiness(*, degraded_mode: bool) -> dict[str, Any]:
         )
         components["database"] = database
         components["redis"] = redis
+        xhs_collector["required"] = False
         components["xhs_collector"] = xhs_collector
 
         process_value = process.get("value") if process.get("ok") else {}
@@ -155,7 +159,8 @@ async def build_readiness(*, degraded_mode: bool) -> dict[str, Any]:
             "message": "Celery Beat 可用" if beat_running else "Celery Beat 未运行",
         }
 
-    ready = all(component.get("ok") is True for component in components.values())
+    ready = all(component.get("ok") is True for component in components.values()
+                if component.get("required", True))
     return {
         "status": "ready" if ready else "not_ready",
         "ready": ready,

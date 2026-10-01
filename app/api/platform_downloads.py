@@ -72,17 +72,10 @@ def _require_platform(platform: str):
 async def _dispatch_download(task: PlatformDownloadTask, db: AsyncSession) -> None:
     """投递失败时落库为明确失败，避免留下无人认领的 pending 任务。"""
     try:
-        queued = await asyncio.to_thread(download_platform_profile.delay, task.id)
+        await asyncio.to_thread(download_platform_profile.delay, task.id)
     except Exception as exc:
-        task.status = "failed"
-        task.phase = "failed"
-        task.error_code = "queue_unavailable"
-        task.error_message = "任务队列暂不可用，下载任务未投递"
-        task.completed_at = datetime.now()
-        await db.commit()
-        raise HTTPException(status_code=503, detail=task.error_message) from exc
-    task.celery_task_id = queued.id
-    await db.commit()
+        raise HTTPException(status_code=503, detail="任务队列暂不可用，下载任务未投递") from exc
+    await db.refresh(task)
 
 
 def _require_xhs(platform: str) -> None:

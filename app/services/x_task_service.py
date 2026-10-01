@@ -234,7 +234,8 @@ def serialize_x_task(
         item.author_display_name = author.display_name or f"@{author.username}"
         item.author_account_status = author.account_status or DEFAULT_X_AUTHOR_STATUS
 
-    if runtime_state:
+    if (runtime_state and task.status == "downloading"
+            and runtime_state.get("attempt_id") == task.celery_task_id):
         for field_name in (
             "status",
             "phase",

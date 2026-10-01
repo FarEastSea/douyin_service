@@ -10,12 +10,14 @@ Celery 应用配置
 from celery import Celery
 from celery.schedules import crontab
 from app.core.config import settings
+from app.core.queue_configuration import DynamicQueueTask
 
 # 创建 Celery 应用
 celery_app = Celery(
     "douyin_downloader",
-    broker=settings.redis_url_with_auth,
-    backend=settings.redis_url_with_auth,
+    task_cls=DynamicQueueTask,
+    broker=settings.effective_celery_broker,
+    backend=settings.effective_celery_backend,
     include=[
         "app.tasks.download_tasks",
         "app.tasks.x_download_tasks",

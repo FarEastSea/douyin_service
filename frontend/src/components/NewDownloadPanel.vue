@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowRight, CircleCheck, Link2, Search, X } from '@lucide/vue'
 import { api, jsonBody } from '../api'
@@ -19,6 +19,9 @@ const identified = ref(false)
 const detecting = ref(false)
 const submitting = ref(false)
 const error = ref('')
+let identifySequence = 0
+const confirmedInput = ref('')
+watch(input, () => { identifySequence++; identified.value = false; detecting.value = false; confirmedInput.value = ''; inputKind.value = 'unknown'; error.value = '' })
 const options = computed(() => store.platforms.length ? store.platforms : [
   { id: 'douyin', name: '抖音' }, { id: 'x', name: 'X' }, { id: 'tiktok', name: 'TikTok' },
   { id: 'weibo', name: '微博' }, { id: 'bilibili', name: 'B站' }, { id: 'xhs', name: '小红书' },
@@ -30,12 +33,15 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') { close(); return }
   trapFocus(event, panelElement.value)
 }
-function selectPlatform() { identified.value = false; inputKind.value = 'unknown'; error.value = '' }
+function selectPlatform() { identifySequence++; detecting.value = false; identified.value = false; confirmedInput.value = ''; inputKind.value = 'unknown'; error.value = '' }
 async function identify() {
+  if (submitting.value) return
   if (!input.value.trim()) { error.value = '先粘贴作品链接、作者主页或平台支持的用户标识。'; return }
   detecting.value = true; error.value = ''
+  const sequence = ++identifySequence, source = input.value.trim()
   try {
-    const found = await api<{ platform_id: string; input_kind: 'author' | 'work' | 'unknown' }>('/platforms/detect', { method: 'POST', ...jsonBody({ value: input.value.trim() }) })
+    const found = await api<{ platform_id: string; input_kind: 'author' | 'work' | 'unknown' }>('/platforms/detect', { method: 'POST', ...jsonBody({ value: source }) })
+    if (sequence !== identifySequence || source !== input.value.trim()) return
     platformId.value = found.platform_id
     inputKind.value = found.input_kind
     if (found.platform_id === 'xhs' && found.input_kind === 'author') {
@@ -44,11 +50,13 @@ async function identify() {
       return
     }
     identified.value = true
+    confirmedInput.value = source
   } catch {
+    if (sequence !== identifySequence) return
     identified.value = false
     error.value = '未能从链接识别平台。若输入的是用户名或短文本，请手动选择平台。'
     await nextTick()
-  } finally { detecting.value = false }
+  } finally { if (sequence === identifySequence) detecting.value = false }
 }
 function confirmPlatform() {
   if (!input.value.trim()) { error.value = '先填写下载来源。'; return }
@@ -56,26 +64,42 @@ function confirmPlatform() {
   if (platformId.value === 'xhs' && /\/(?:user\/profile)\/[a-z0-9]+\/?(?:\?.*)?$/i.test(input.value.trim())) {
     error.value = '小红书目前仅支持单条笔记；作者主页批量采集已搁置。'; return
   }
-  identified.value = true; error.value = ''
+  identified.value = true; confirmedInput.value = input.value.trim(); error.value = ''
 }
 async function submit() {
   if (!identified.value || !platformId.value || submitting.value) return
+  if (confirmedInput.value !== input.value.trim()) { identified.value = false; error.value = '来源已改变，请重新识别并确认。'; return }
   if (platformId.value === 'xhs' && inputKind.value === 'author') { error.value = '小红书目前仅支持单条笔记。'; return }
   submitting.value = true; error.value = ''
-  const source = input.value.trim()
+  const source = input.value.trim(), platform = platformId.value
   try {
-    if (platformId.value === 'douyin') {
-      const result = await api<{ url_type?: string; author_already_exists?: boolean; author_id?: number; author_position?: number }>('/tasks/download', { method: 'POST', ...jsonBody({ share_url: source, start_index: 1, wait_time: 1 }) })
-      if (result.url_type === 'author' && result.author_already_exists && result.author_id) {
+    if (platform === 'douyin') {
+      const result = await api<{ url_type?: string; author_already_exists?: boolean; author_id?: number; author_position?: number; job_id?: string; task_ids?: number[] }>('/tasks/download', { method: 'POST', ...jsonBody({ share_url: source, start_index: 1, wait_time: 1 }) })
+      if (result.url_type === 'author' && result.author_id) {
         emit('close')
-        store.notify('作者已存在，已定位到对应记录', 'info')
+        store.notify(`${result.author_already_exists ? '作者已存在；' : ''}已提交作者扫描（作业 ${result.job_id || '待确认'}），扫描后才会创建下载任务。`, 'info')
         await router.push({ path: '/douyin/authors', query: { focus: String(result.author_id), position: String(result.author_position || 0) } })
         return
       }
+      if (result.task_ids?.length) {
+        store.notify(`已创建下载任务：${result.task_ids.map(id => '#' + id).join('、')}`)
+        emit('close')
+        await router.push({ path: '/operations/tasks', query: { platform: 'douyin', task_key: `douyin:${result.task_ids[0]}` } })
+        return
+      }
     }
-    else if (platformId.value === 'x') await api('/x/download', { method: 'POST', ...jsonBody({ profile_url: source }) })
-    else await api(`/platform-downloads/${platformId.value}/download`, { method: 'POST', ...jsonBody({ source }) })
-    const destination = `/operations/tasks?platform=${encodeURIComponent(platformId.value)}`
+    else {
+      const result = platform === 'x'
+        ? await api<any>('/x/download', { method: 'POST', ...jsonBody({ profile_url: source }) })
+        : await api<any>(`/platform-downloads/${platform}/download`, { method: 'POST', ...jsonBody({ source }) })
+      if (result.id) {
+        store.notify(`下载任务 #${result.id} 已提交`)
+        emit('close')
+        await router.push({ path: '/operations/tasks', query: { platform, task_key: `${platform}:${result.id}` } })
+        return
+      }
+    }
+    const destination = `/operations/tasks?platform=${encodeURIComponent(platform)}`
     store.notify('下载任务已提交，可以在全部任务中查看进度。')
     emit('close')
     await router.push(destination)
@@ -83,7 +107,7 @@ async function submit() {
   finally { submitting.value = false }
 }
 onMounted(() => { document.body.classList.add('modal-open'); document.addEventListener('keydown', onKeydown); void nextTick(() => focusFirst(panelElement.value, inputElement.value)) })
-onBeforeUnmount(() => { document.body.classList.remove('modal-open'); document.removeEventListener('keydown', onKeydown) })
+onBeforeUnmount(() => { identifySequence++; document.body.classList.remove('modal-open'); document.removeEventListener('keydown', onKeydown) })
 </script>
 
 <template>

@@ -48,6 +48,7 @@ from app.services.archive_rules import (
 from app.services.work_manager import recalc_author_counts
 from app.services.work_metadata import apply_work_payload
 from app.services.unified_task_operations import TaskOperationError, operate_task
+from app.services.download_lifecycle import prepare_download_retry
 from app.services.douyin_account import get_request_context
 from app.services.douyin_errors import (
     DouyinCooldownError,
@@ -319,7 +320,7 @@ async def _handle_author_download(
         )))
         author_position = pos_result.scalar() or 0
 
-    await asyncio.to_thread(download_author_works.delay, author.id, start_index=1)
+    queued = await asyncio.to_thread(download_author_works.delay, author.id, start_index=1)
 
     return BatchDownloadResponse(
         url_type="author",
@@ -328,6 +329,7 @@ async def _handle_author_download(
         total_works=author.total_works or 0,
         created_tasks=0,
         task_ids=[],
+        job_id=queued.id,
         author_already_exists=author_exists,
         author_position=author_position
     )
@@ -627,10 +629,13 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
 @router.get("/{task_id}/progress", response_model=TaskProgressResponse)
 async def get_task_progress(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """获取任务实时进度"""
-    # 先从 Redis 获取实时进度
+    task = (await db.execute(select(DownloadTask).where(DownloadTask.id == task_id))).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
     progress = await asyncio.to_thread(redis_client.get_progress, task_id)
     
-    if progress:
+    if (progress and task.status == "downloading"
+            and progress.get("attempt_id", progress.get("celery_task_id")) == task.celery_task_id):
         eta = None
         if progress.get("speed", 0) > 0:
             remaining = progress.get("total_bytes", 0) - progress.get("downloaded_bytes", 0)
@@ -673,44 +678,20 @@ async def get_task_progress(task_id: int, db: AsyncSession = Depends(get_async_d
 @router.post("/{task_id}/pause", response_model=MessageResponse)
 async def pause_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """暂停下载任务"""
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    if task.status not in ("downloading", "pending"):
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无法暂停")
-    
-    # 设置暂停信号
-    await asyncio.to_thread(redis_client.pause_task, task_id)
-    
+    try:
+        await operate_task(db, f"douyin:{task_id}", "pause")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="暂停信号已发送")
 
 
 @router.post("/{task_id}/resume", response_model=MessageResponse)
 async def resume_task_api(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """恢复暂停的任务"""
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    if task.status != "paused":
-        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无法恢复")
-    
-    # 更新状态
-    task.status = "pending"
-    await db.commit()
-    
-    # 触发恢复任务
-    await asyncio.to_thread(resume_task.delay, task_id)
-    
+    try:
+        await operate_task(db, f"douyin:{task_id}", "resume")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="任务已恢复")
 
 
@@ -748,20 +729,12 @@ async def force_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db
     if task.status == "completed":
         raise HTTPException(status_code=400, detail="任务已完成，无法重试")
 
-    # 清除暂停信号
-    await asyncio.to_thread(
-        _update_task_runtime, [task_id], resume=True, clear_progress=True
-    )
-
-    # 重置状态和进度
-    task.status = "pending"
-    task.error_message = None
-    task.downloaded_bytes = 0
-    task.download_speed = 0
-    await db.commit()
-
-    # 触发新的下载任务
-    await asyncio.to_thread(download_single_file.delay, task_id)
+    if task.status in {"pending", "downloading"}:
+        raise HTTPException(status_code=409, detail="任务仍在执行或排队，请先取消，再重试；不能启动第二份下载")
+    try:
+        await operate_task(db, f"douyin:{task_id}", "resume" if task.status == "paused" else "retry")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     return MessageResponse(success=True, message="任务已强制重新提交")
 
@@ -803,27 +776,7 @@ async def force_retry_all_downloading(db: AsyncSession = Depends(get_async_db)):
     if not stuck_tasks:
         return MessageResponse(success=True, message="没有下载中的任务", data={"count": 0})
 
-    count = 0
-    task_ids = [task.id for task in stuck_tasks]
-    await asyncio.to_thread(
-        _update_task_runtime, task_ids, resume=True, clear_progress=True
-    )
-    for task in stuck_tasks:
-        task.status = "pending"
-        task.error_message = None
-        task.downloaded_bytes = 0
-        task.download_speed = 0
-        count += 1
-
-    await db.commit()
-
-    await asyncio.to_thread(_dispatch_download_tasks, task_ids)
-
-    return MessageResponse(
-        success=True,
-        message=f"已强制重新提交 {count} 个下载中任务",
-        data={"count": count}
-    )
+    raise HTTPException(status_code=409, detail="不能重置正在执行的任务。请先批量取消，确认取消后再重试；卡住恢复由后台检测处理")
 
 
 @router.post("/retry-all-failed", response_model=MessageResponse)
@@ -839,6 +792,7 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
     # 查询所有失败的任务
     result = await db.execute(
         select(DownloadTask).where(DownloadTask.status.in_(["failed", "cancelled"]))
+        .with_for_update().execution_options(populate_existing=True)
     )
     failed_tasks = result.scalars().all()
 
@@ -848,8 +802,7 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
     # 重置所有失败任务的状态
     count = 0
     for task in failed_tasks:
-        task.status = "pending"
-        task.error_message = None
+        prepare_download_retry(task)
         count += 1
 
     await db.commit()
@@ -967,16 +920,10 @@ async def refresh_retry_task(task_id: int, db: AsyncSession = Depends(get_async_
     if task.status not in ("failed", "cancelled"):
         raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，无需重试")
 
-    # 只重置并入队，外部网络访问全部在 Celery Worker 内完成，避免 Nginx 504。
-    task.status = "pending"
-    task.error_message = None
-    task.completed_at = None
-    task.downloaded_bytes = 0
-    task.download_speed = 0
-    task.temp_file_path = None
-    await asyncio.to_thread(redis_client.delete_progress, task_id)
-    await db.commit()
-    await asyncio.to_thread(_dispatch_download_tasks, [task_id], force_refresh=True)
+    try:
+        await operate_task(db, f"douyin:{task_id}", "refresh_retry")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return MessageResponse(success=True, message="已提交后台刷新链接并重试")
 
 

@@ -147,7 +147,11 @@ start_xhs_engine() {
     return 1
 }
 
-start_xhs_engine
+if "$VENV_DIR/bin/python" -c 'from app.core.config import settings; raise SystemExit(not settings.XHS_SERVICE_ENABLED)'; then
+    start_xhs_engine || echo "Optional Xiaohongshu service unavailable; main service will still start." >&2
+else
+    echo "Xiaohongshu isolated service is disabled."
+fi
 
 if [ "$SERVICE_ALREADY_RUNNING" -eq 1 ]; then
     echo "Service is already running (PID=${EXISTING_PID})."

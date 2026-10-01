@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.models.models import DownloadTask
+from app.services.download_lifecycle import prepare_download_retry
 
 
 TaskAction = Literal["created", "reused", "existing"]
@@ -18,8 +19,7 @@ TaskAction = Literal["created", "reused", "existing"]
 
 def _reuse_if_terminal(task: DownloadTask) -> TaskAction:
     if task.status in {"failed", "cancelled"}:
-        task.status = "pending"
-        task.error_message = None
+        prepare_download_retry(task)
         return "reused"
     return "existing"
 
@@ -28,7 +28,7 @@ def _sync_existing(db: Session, work_id: int, file_index: int) -> DownloadTask |
     return db.execute(select(DownloadTask).where(
         DownloadTask.work_id == work_id,
         DownloadTask.file_index == file_index,
-    )).scalar_one_or_none()
+    ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
 
 
 async def _async_existing(
@@ -39,7 +39,7 @@ async def _async_existing(
     result = await db.execute(select(DownloadTask).where(
         DownloadTask.work_id == work_id,
         DownloadTask.file_index == file_index,
-    ))
+    ).with_for_update().execution_options(populate_existing=True))
     return result.scalar_one_or_none()
 
 

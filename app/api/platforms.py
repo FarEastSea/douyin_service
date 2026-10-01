@@ -31,8 +31,10 @@ async def get_platform(platform_id: str):
 @router.post("/detect")
 async def detect_platform(request: PlatformDetectRequest):
     """仅根据域名识别平台，不发起任何外部请求。"""
-    detected = platform_registry.detect(request.value)
+    try:
+        detected = platform_registry.detect(request.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not detected:
         raise HTTPException(status_code=422, detail="无法识别或暂不支持该媒体平台")
     return detected.to_dict()
-

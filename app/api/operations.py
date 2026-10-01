@@ -42,6 +42,7 @@ from app.services.platform_registry import platform_registry
 from app.services.storage_maintenance import (
     apply_storage_repair_plan,
     build_storage_repair_plan,
+    storage_journals, restore_quarantined,
 )
 from app.tasks.operations_tasks import run_storage_audit_task, run_storage_repair_all_task
 from app.services.unified_task_operations import TaskOperationError, operate_task
@@ -567,6 +568,7 @@ async def unified_tasks(
     platform: str | None = Query(None, max_length=32),
     status: str | None = Query(None, max_length=32),
     q: str | None = Query(None, max_length=255),
+    task_key: str | None = Query(None, max_length=80),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db),
@@ -574,6 +576,16 @@ async def unified_tasks(
     """跨三套任务表统一检索、汇总，并通过数据库联合分页限制内存占用。"""
     wanted = str(platform or "").strip().lower()
     search = str(q or "").strip()
+    located_id = None
+    if task_key:
+        from app.services.unified_task_operations import parse_task_key
+        try:
+            located_platform, located_id = parse_task_key(task_key)
+        except TaskOperationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        if wanted and wanted != located_platform:
+            raise HTTPException(status_code=400, detail="任务标识与平台筛选不一致")
+        wanted = located_platform
     if status and status not in VALID_TASK_STATUSES:
         raise HTTPException(status_code=400, detail="不支持的任务状态")
     known_platforms = {item.id for item in platform_registry.list()}
@@ -585,6 +597,8 @@ async def unified_tasks(
 
     if wanted in {"", "douyin"}:
         base_conditions = []
+        if located_id:
+            base_conditions.append(DownloadTask.id == located_id)
         if search:
             base_conditions.append(or_(
                 Work.title.contains(search, autoescape=True),
@@ -610,6 +624,8 @@ async def unified_tasks(
 
     if wanted in {"", "x"}:
         base_conditions = []
+        if located_id:
+            base_conditions.append(XDownloadTask.id == located_id)
         if search:
             base_conditions.append(or_(
                 XDownloadTask.username.contains(search, autoescape=True),
@@ -639,6 +655,8 @@ async def unified_tasks(
     generic_ids = platform_ids if not wanted else ({wanted} if wanted in platform_ids else set())
     if generic_ids:
         base_conditions = [PlatformDownloadTask.platform.in_(generic_ids)]
+        if located_id:
+            base_conditions.append(PlatformDownloadTask.id == located_id)
         if search:
             base_conditions.append(or_(
                 PlatformDownloadTask.source_key.contains(search, autoescape=True),
@@ -727,7 +745,8 @@ async def unified_task_actions(
             succeeded.append(task_key)
         except TaskOperationError as exc:
             failed.append({"task_key": task_key, "message": str(exc), "status_code": exc.status_code})
-    action_label = "重试" if request.action == "retry" else "取消"
+    action_label = {"retry": "重试", "cancel": "取消", "pause": "暂停",
+                    "resume": "恢复", "refresh_retry": "刷新重试"}[request.action]
     message = f"已{action_label} {len(succeeded)} 个任务"
     if failed:
         message += f"，{len(failed)} 个未处理"
@@ -839,15 +858,11 @@ async def start_storage_audit(
     }
     await asyncio.to_thread(redis_client.set_storage_audit_state, state)
     try:
-        task = await asyncio.to_thread(
+        await asyncio.to_thread(
             run_storage_audit_task.apply_async,
             args=(job_id, max_records, max_files),
+            task_id=job_id,
         )
-        latest = await asyncio.to_thread(redis_client.get_storage_audit_state)
-        if latest.get("job_id") == job_id:
-            latest["celery_task_id"] = task.id
-            await asyncio.to_thread(redis_client.set_storage_audit_state, latest)
-            state = latest
         await asyncio.to_thread(
             redis_client.append_activity_log,
             "info", "storage-audit", "存储巡检已进入后台队列",
@@ -902,12 +917,11 @@ async def storage_repair_all(
     }
     await asyncio.to_thread(redis_client.set_storage_repair_all_state, state)
     try:
-        task = await asyncio.to_thread(
+        await asyncio.to_thread(
             run_storage_repair_all_task.apply_async,
             args=(job_id, max_records, max_files),
+            task_id=job_id,
         )
-        state["celery_task_id"] = task.id
-        await asyncio.to_thread(redis_client.set_storage_repair_all_state, state)
         await asyncio.to_thread(
             redis_client.append_activity_log,
             "warning", "storage-maintenance", "存储全部维护已进入后台队列",
@@ -926,6 +940,26 @@ async def storage_repair_all(
         })
         await asyncio.to_thread(redis_client.set_storage_repair_all_state, state)
         raise HTTPException(status_code=503, detail=state["error"]) from exc
+
+
+@router.get("/storage-journals")
+async def list_storage_journals():
+    root = Path(settings.DOWNLOAD_ROOT).expanduser().resolve()
+    return {"items": await asyncio.to_thread(storage_journals, root)}
+
+
+class StorageRestoreRequest(BaseModel):
+    journal_id: str = Field(..., min_length=1, max_length=40)
+    dry_run: bool = True
+
+
+@router.post("/storage-restore")
+async def storage_restore(request: StorageRestoreRequest, db: AsyncSession = Depends(get_async_db)):
+    root = Path(settings.DOWNLOAD_ROOT).expanduser().resolve()
+    try:
+        return await restore_quarantined(db, root, request.journal_id, dry_run=request.dry_run)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/storage-repair")
@@ -960,6 +994,10 @@ async def storage_repair(
         "moved": len(result["moved"]),
         "marked_tasks": len(result["marked_tasks"]),
         "errors": len(result["apply_errors"]),
+        "status": "partial" if result["apply_errors"] else "completed",
+        "failure_details": result["apply_errors"],
+        "quarantine_root": result.get("quarantine_root"),
+        "items": result.get("items", []),
     }
     try:
         await asyncio.to_thread(redis_client.set_storage_repair_state, repair_state)
@@ -978,5 +1016,5 @@ async def storage_repair(
         "dry_run": False,
         **result,
         "repair_state": repair_state,
-        "message": "处理完成；旧路径已回填，文件未删除，隔离项可按清单恢复",
+        "message": "部分完成，请查看失败项" if result["apply_errors"] else "处理完成；文件未删除，隔离项可按清单恢复",
     }

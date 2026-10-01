@@ -17,7 +17,7 @@ from typing import List
 import asyncio
 
 from app.models.database import get_async_db
-from app.models.models import Work, WorkStatsSnapshot
+from app.models.models import Work, WorkStatsSnapshot, DownloadTask
 from app.models.schemas import MessageResponse, WorkStatsSnapshotResponse
 from app.services import work_manager
 from app.services.download_task_factory import ensure_download_task_async
@@ -43,6 +43,7 @@ class BatchDeleteWorksRequest(BaseModel):
 
 def _clear_task_progress(task_ids: List[int]) -> None:
     for task_id in task_ids:
+        redis_client.resume_task(task_id)
         redis_client.delete_progress(task_id)
 
 
@@ -220,12 +221,7 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
         )
         if action in {"created", "reused"}:
             dispatch_ids.append(task.id)
-        elif task.status != "completed":
-            task.status = "pending"
-            task.error_message = None
-            task.archive_rule_snapshot = archive_snapshot
-            clear_progress_ids.append(task.id)
-            dispatch_ids.append(task.id)
+        # Already running/pending/paused tasks retain their owner and are not reset.
 
     if dispatch_ids:
         work.is_downloaded = False
@@ -249,18 +245,17 @@ async def retry_work_failed(work_id: int, db: AsyncSession = Depends(get_async_d
     """重试该作品下所有失败/取消的任务。"""
     work = await _load_work_with_tasks(db, work_id)
 
-    failed_tasks = [
-        t for t in (work.download_tasks or [])
-        if t.status in ("failed", "cancelled")
-    ]
+    failed_tasks = (await db.scalars(select(DownloadTask).where(
+        DownloadTask.work_id == work.id, DownloadTask.status.in_(["failed", "cancelled"]),
+    ).with_for_update().execution_options(populate_existing=True))).all()
     if not failed_tasks:
         return MessageResponse(success=True, message="该作品没有失败任务", data={"count": 0})
 
     failed_task_ids = [task.id for task in failed_tasks]
     await asyncio.to_thread(_clear_task_progress, failed_task_ids)
     for task in failed_tasks:
-        task.status = "pending"
-        task.error_message = None
+        from app.services.download_lifecycle import prepare_download_retry
+        prepare_download_retry(task)
 
     await db.commit()
 

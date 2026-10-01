@@ -30,6 +30,9 @@ class DouyinMediaEngine(Protocol):
         check_pause: Callable[[], bool] | None = None,
         min_file_size: int = 0,
         max_file_size: int = 0,
+        attempt_id: str | None = None,
+        resume_path: str | None = None,
+        defer_publish: bool = False,
     ) -> dict[str, Any]: ...
 
 
@@ -76,6 +79,9 @@ class RequestsDouyinMediaEngine:
         check_pause: Callable[[], bool] | None = None,
         min_file_size: int = 0,
         max_file_size: int = 0,
+        attempt_id: str | None = None,
+        resume_path: str | None = None,
+        defer_publish: bool = False,
     ) -> dict[str, Any]:
         return self._downloader.download_file_with_resume(
             url=url,
@@ -85,6 +91,9 @@ class RequestsDouyinMediaEngine:
             check_pause=check_pause,
             min_file_size=min_file_size,
             max_file_size=max_file_size,
+            attempt_id=attempt_id,
+            resume_path=resume_path,
+            defer_publish=defer_publish,
         )
 
 

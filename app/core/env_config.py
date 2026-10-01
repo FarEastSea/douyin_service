@@ -70,6 +70,7 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="REDIS_URL", label="Redis 连接地址", group="Redis", default="redis://localhost:6379/0", required=True),
     EnvField(key="REDIS_PASSWORD", label="Redis 密码", group="Redis", default="", secret=True),
     EnvField(key="CELERY_BROKER_URL", label="Celery 消息队列地址", group="后台任务", default="redis://localhost:6379/0"),
+    EnvField(key="CELERY_CONNECTION_MODE", label="队列连接模式", group="后台任务", default="inherit", help="inherit 继承当前 Redis；independent 显式使用独立队列与结果地址。切换前自动停止投递并核验旧队列"),
     EnvField(key="CELERY_RESULT_BACKEND", label="Celery 结果存储地址", group="后台任务", default="redis://localhost:6379/0"),
     EnvField(key="MAX_CONCURRENT_DOWNLOADS", label="最大同时下载数", group="下载", default="3"),
     EnvField(key="DOWNLOAD_CHUNK_SIZE", label="下载分块大小（字节）", group="下载", default="1048576"),
@@ -128,6 +129,7 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(key="BILIBILI_COOKIE", label="B站 Cookie", group="B站", default="", secret=True),
     EnvField(key="BILIBILI_COOKIE_FILE", label="B站 Cookie 文件", group="B站", default=""),
     EnvField(key="XHS_DOWNLOAD_ENGINE", label="小红书下载引擎", group="小红书", default="xhs-api"),
+    EnvField(key="XHS_SERVICE_ENABLED", label="启用小红书隔离服务", group="小红书", default="false", help="按需启用单条笔记服务；未启用不阻断主项目启动或部署"),
     EnvField(key="XHS_COOKIE", label="小红书 Cookie", group="小红书", default="", secret=True),
     EnvField(key="XHS_COOKIE_FILE", label="小红书 Cookie 文件", group="小红书", default=""),
 ]
@@ -135,13 +137,14 @@ ENV_FIELDS: List[EnvField] = [
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
 
 
-def get_env_file_signature() -> Tuple[int, int]:
+def get_env_file_signature() -> tuple[int, int, int]:
     """返回可快速比较的配置文件签名。"""
     try:
         stat = ENV_PATH.stat()
-        return stat.st_mtime_ns, stat.st_size
+        pending = ENV_PATH.parent / '.runtime' / 'config-change.json'
+        return stat.st_mtime_ns, stat.st_size, pending.stat().st_mtime_ns if pending.exists() else 0
     except OSError:
-        return 0, 0
+        return 0, 0, 0
 
 
 def get_local_config_generation() -> int:
@@ -192,6 +195,8 @@ def parse_cors_origins(value: Any) -> List[str]:
 
 
 def _validate_env_value(key: str, value: str) -> None:
+    if key == "CELERY_CONNECTION_MODE" and value not in {"inherit", "independent"}:
+        raise ValueError("队列连接模式仅支持 inherit 或 independent")
     field = FIELD_MAP[key]
     forbidden = []
     if "\r" in value or "\n" in value:
@@ -219,22 +224,24 @@ def _build_database_url(values: Dict[str, str]) -> Tuple[str, Dict[str, int]]:
     db_user = (values.get("DB_USER") or "").strip()
     db_password = values.get("DB_PASSWORD") or ""
     db_name = (values.get("DB_NAME") or "").strip()
-    user_part = f"{db_user}:{db_password}" if db_password else db_user
+    from sqlalchemy.engine import URL
 
     if db_type == "mysql":
         return (
-            f"mysql+pymysql://{user_part}@{db_host}:{int(db_port)}/{db_name}?charset=utf8mb4",
+            URL.create("mysql+pymysql", username=db_user, password=db_password, host=db_host,
+                       port=int(db_port), database=db_name, query={"charset": "utf8mb4"}).render_as_string(hide_password=False),
             {"connect_timeout": 3},
         )
     if db_type == "postgresql":
         return (
-            f"postgresql://{user_part}@{db_host}:{int(db_port)}/{db_name}",
+            URL.create("postgresql", username=db_user, password=db_password, host=db_host,
+                       port=int(db_port), database=db_name).render_as_string(hide_password=False),
             {"connect_timeout": 3},
         )
     raise ValueError(f"不支持的数据库类型：{db_type}")
 
 
-def _check_database(values: Dict[str, str]) -> Optional[Dict[str, str]]:
+def _check_database(values: Dict[str, str], *, require_schema: bool = False) -> Optional[Dict[str, str]]:
     try:
         from sqlalchemy import create_engine, text
 
@@ -243,6 +250,17 @@ def _check_database(values: Dict[str, str]) -> Optional[Dict[str, str]]:
         try:
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
+                if require_schema:
+                    from sqlalchemy import inspect
+                    from app.models.database import Base
+                    from app.models import models as _registered_models
+                    inspector = inspect(conn)
+                    for table in Base.metadata.sorted_tables:
+                        if not inspector.has_table(table.name):
+                            raise ValueError("目标数据库尚未包含当前应用表结构")
+                        columns = {column['name'] for column in inspector.get_columns(table.name)}
+                        if not set(table.columns.keys()) <= columns:
+                            raise ValueError("目标数据库结构版本不匹配")
         finally:
             engine.dispose()
         return None
@@ -260,8 +278,10 @@ def _check_redis(values: Dict[str, str]) -> Optional[Dict[str, str]]:
     if not redis_url:
         return None
     redis_password = (values.get("REDIS_PASSWORD") or "").strip()
-    if redis_password and redis_url.startswith("redis://") and "@" not in redis_url.split("redis://", 1)[1].split("/", 1)[0]:
-        redis_url = redis_url.replace("redis://", f"redis://:{redis_password}@", 1)
+    from urllib.parse import quote
+    for scheme in ("redis://", "rediss://"):
+        if redis_password and redis_url.startswith(scheme) and "@" not in redis_url[len(scheme):].split("/", 1)[0]:
+            redis_url = f"{scheme}:{quote(redis_password, safe='')}@{redis_url[len(scheme):]}"
     try:
         import redis as redis_lib
 
@@ -316,7 +336,12 @@ def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]
     }
 
 
-def read_env_file() -> Dict[str, str]:
+def read_env_file(*, raw: bool = False) -> Dict[str, str]:
+    if not raw:
+        from app.core.config_transaction import pending_values
+        pending = pending_values()
+        if pending is not None:
+            return pending
     values: Dict[str, str] = {}
     if not ENV_PATH.exists():
         return values
@@ -391,8 +416,16 @@ def validate_env(values: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     }
 
 
-def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
-    current = read_env_file()
+def write_env_updates(updates: Dict[str, Any], *, coordinated: bool = False) -> Dict[str, str]:
+    if not coordinated:
+        from app.core.config_transaction import configuration_lock, journal_path
+        with configuration_lock():
+            if journal_path().exists():
+                raise RuntimeError("配置变更尚未恢复，暂不允许继续写入")
+            result = write_env_updates(updates, coordinated=True)
+            notify_config_changed()
+            return result
+    current = read_env_file(raw=True)
     version_client = None
     try:
         from app.core import redis_client as redis_runtime
@@ -461,7 +494,7 @@ def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
 
-    persisted = read_env_file()
+    persisted = read_env_file(raw=True)
     mismatched = {
         key: value
         for key, value in clean_updates.items()
@@ -470,11 +503,15 @@ def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
     if mismatched:
         raise OSError(f".env 写入校验失败: {', '.join(sorted(mismatched))}")
 
+    return {key: persisted[key] for key in clean_updates}
+
+
+def notify_config_changed() -> None:
     _increment_local_config_generation()
     try:
         from app.core import redis_client as redis_runtime
 
-        redis_runtime.bump_config_version(client=version_client)
+        redis_runtime.bump_config_version()
     except Exception:
         # .env 是权威来源；Redis 版本只负责跨进程加速失效，失败不能回滚
         # 已经完成且校验通过的持久化写入。
@@ -487,4 +524,3 @@ def write_env_updates(updates: Dict[str, Any]) -> Dict[str, str]:
     except Exception:
         # 配置降级错误会由 WebSettings 自身登记；持久化结果仍然有效。
         pass
-    return {key: persisted[key] for key in clean_updates}

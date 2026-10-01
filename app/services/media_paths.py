@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import (
@@ -27,7 +27,7 @@ def _rebase_path_result(
     new_root: str,
 ) -> tuple[Optional[str], bool]:
     """返回迁移后路径，以及该非空路径是否未能重定位。"""
-    if not value or not old_root or not new_root:
+    if not value or not old_root or not new_root or old_root == new_root:
         return value, False
     try:
         source = _resolved_path(value)
@@ -38,22 +38,22 @@ def _rebase_path_result(
 
     try:
         relative = source.relative_to(old)
-        return str(target_root / relative), False
+        candidate = target_root / relative
+        if candidate.is_symlink() or not candidate.exists():
+            return value, True
+        if source.is_file() and (not candidate.is_file() or source.stat().st_size != candidate.stat().st_size):
+            return value, True
+        return str(candidate), False
     except ValueError:
         # 已位于新目录时只规范化路径，不重复拼接。
         try:
             source.relative_to(target_root)
-            return str(source), False
+            return (str(source), False) if source.exists() else (value, True)
         except ValueError:
             pass
 
         # 兼容网页目录已先行变更、旧根目录信息已经丢失的记录。
-        candidate = target_root / source.parent.name / source.name
-        if candidate.exists():
-            return str(candidate.resolve(strict=False)), False
-        direct_candidate = target_root / source.name
-        if direct_candidate.exists():
-            return str(direct_candidate.resolve(strict=False)), False
+        # 不猜测仅名称相同的文件就是原媒体；修复必须保持明确的相对路径。
         return value, True
 
 
@@ -75,6 +75,20 @@ async def migrate_download_paths(
     changed = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0}
     unresolved = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0}
     batch_size = 1000
+    if any(old != new for old, new in [(old_download_dir, new_download_dir),
+                                      (old_x_download_dir, new_x_download_dir),
+                                      *platform_download_dirs.values()]):
+        # 与任务的插入、领取和终态写入互斥，避免检查结束后新任务抢入。
+        # PostgreSQL 是生产部署数据库；锁随事务提交/回滚自动释放。
+        if db.get_bind().dialect.name == "postgresql":
+            names = ", ".join(model.__tablename__ for model in
+                              (DownloadTask, XDownloadTask, PlatformDownloadTask))
+            await db.execute(text(f"LOCK TABLE {names} IN SHARE ROW EXCLUSIVE MODE"))
+        for model in (DownloadTask, XDownloadTask, PlatformDownloadTask):
+            active = await db.scalar(select(model.id).where(
+                model.status.in_(("pending", "downloading", "paused"))).limit(1))
+            if active:
+                raise ValueError("存在排队、下载或暂停任务，不能切换下载目录；请先完成或取消这些任务")
 
     last_id = 0
     while True:

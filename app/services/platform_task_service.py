@@ -107,7 +107,8 @@ def serialize_platform_task(
 ) -> PlatformDownloadTaskResponse:
     item = PlatformDownloadTaskResponse.model_validate(task)
     item.preview_count = len(getattr(task, "media_assets", ()) or ())
-    if runtime_state:
+    if (runtime_state and task.status == "downloading"
+            and runtime_state.get("attempt_id") == task.celery_task_id):
         for field_name in (
             "status", "phase", "engine_name", "file_count",
             "downloaded_media_count", "progress_percent", "last_log_line",

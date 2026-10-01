@@ -15,6 +15,7 @@ from app.services.avatar_cache import ensure_author_avatar_cached
 from app.services.work_cover_cache import ensure_work_cover_cached
 from app.services.douyin_cookie import require_douyin_uifid
 from app.services.downloader import DouyinDownloader
+from app.core.request_budget import DouyinScanDeadlineExceeded, budget_sleep
 
 
 class DouyinTraversalLimitError(RuntimeError):
@@ -23,10 +24,6 @@ class DouyinTraversalLimitError(RuntimeError):
     def __init__(self, message: str, metrics: "DouyinScanMetrics | None" = None):
         super().__init__(message)
         self.metrics = metrics
-
-
-class DouyinScanDeadlineExceeded(RuntimeError):
-    """本轮订阅检查时间预算耗尽；作者应留待续检。"""
 
 
 class ResolvedDouyinInput(TypedDict):
@@ -186,6 +183,7 @@ class DouyinWebAdapter:
     def scan_all_works(
         self, sec_uid: str, known_aweme_ids: Iterable[str] = (), *, deadline: float | None = None
     ) -> DouyinScanResult:
+        self._downloader.deadline = deadline
         known_ids = {str(value) for value in known_aweme_ids if value is not None}
         cursor: int | str = 0
         collected: list[dict[str, Any]] = []
@@ -237,7 +235,7 @@ class DouyinWebAdapter:
                     "抖音作品分页游标未前进，已停止全量扫描", metrics
                 )
             cursor = next_cursor
-            time.sleep(self._downloader.request_delay)
+            budget_sleep(self._downloader.request_delay, deadline)
 
     def scan_incremental_works(
         self,
@@ -250,6 +248,7 @@ class DouyinWebAdapter:
         deadline: float | None = None,
     ) -> DouyinScanResult:
         """从最新页向后扫描，跨过置顶项，在连续已知作品处安全停止。"""
+        self._downloader.deadline = deadline
         known_ids = {str(value) for value in known_aweme_ids if value is not None}
         if not known_ids:
             raise ValueError("增量扫描需要至少一个已知作品 ID")
@@ -317,7 +316,7 @@ class DouyinWebAdapter:
                     "抖音作品分页游标未前进，已停止本次增量扫描", metrics
                 )
             cursor = next_cursor
-            time.sleep(self._downloader.request_delay)
+            budget_sleep(self._downloader.request_delay, deadline)
 
         metrics = {
             "mode": "incremental",

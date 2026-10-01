@@ -111,6 +111,8 @@ class ProcessManager:
                 except subprocess.TimeoutExpired:
                     pass
 
+            if self._worker_proc.poll() is None:
+                return {"success": False, "message": f"Worker 未能停止 (PID={pid})"}
             self._worker_proc = None
             return {"success": True, "message": f"Worker 已停止 (PID={pid})"}
 
@@ -175,6 +177,8 @@ class ProcessManager:
                 except subprocess.TimeoutExpired:
                     pass
 
+            if self._beat_proc.poll() is None:
+                return {"success": False, "message": f"Beat 未能停止 (PID={pid})"}
             self._beat_proc = None
             return {"success": True, "message": f"Beat 已停止 (PID={pid})"}
 
