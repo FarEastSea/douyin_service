@@ -458,6 +458,14 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                         for name, item in readiness.get("components", {}).items()
                         if item.get("ok") is not True
                     ]
+                    if readiness.get("components", {}).get("configuration", {}).get("ok") is not True:
+                        try:
+                            bootstrap = json.loads(get("/api/bootstrap/status", True))
+                            # Only diagnostic codes: configuration values may contain secrets.
+                            keys = [str(item.get("key", "unknown")) for item in bootstrap.get("errors", [])]
+                            failures.append("startup error codes: " + ", ".join(keys or ["unavailable"]))
+                        except Exception:
+                            failures.append("startup diagnostics unavailable; inspect application startup log")
                     raise RuntimeError(
                         "readiness failed: " + "; ".join(failures or ["HTTP 503"])
                     ) from exc

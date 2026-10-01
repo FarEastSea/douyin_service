@@ -159,7 +159,7 @@ if [ "$SERVICE_ALREADY_RUNNING" -eq 1 ]; then
 fi
 
 echo "Starting media download service on port ${APP_PORT}..."
-nohup "$GUNICORN_BIN" main:app \
+nohup env PYTHONUNBUFFERED=1 "$GUNICORN_BIN" main:app \
     --bind "0.0.0.0:${APP_PORT}" \
     --workers 1 \
     --threads 1 \

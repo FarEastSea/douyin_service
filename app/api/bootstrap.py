@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
 from app.core.diagnostics import get_runtime_errors
-from app.core.env_config import check_download_directory, read_env_file, validate_env, write_env_updates
+from app.core.env_config import _build_database_url, check_download_directory, read_env_file, validate_env, write_env_updates
 from app.core.network_security import validate_database_test_target
 
 
@@ -76,14 +76,14 @@ class DatabaseConfig(BaseModel):
 
 
 def _database_url_from_config(cfg: DatabaseConfig):
-    db_type = (cfg.db_type or "postgresql").lower()
-    db_password = cfg.db_password or read_env_file().get("DB_PASSWORD", "")
-    user_part = f"{cfg.db_user}:{db_password}" if db_password else cfg.db_user
-    if db_type == "postgresql":
-        return f"postgresql://{user_part}@{cfg.db_host}:{cfg.db_port or 5432}/{cfg.db_name}", {"connect_timeout": 3}
-    if db_type == "mysql":
-        return f"mysql+pymysql://{user_part}@{cfg.db_host}:{cfg.db_port or 3306}/{cfg.db_name}?charset=utf8mb4", {"connect_timeout": 3}
-    raise ValueError(f"不支持的数据库类型：{cfg.db_type}")
+    return _build_database_url({
+        "DB_TYPE": cfg.db_type,
+        "DB_HOST": cfg.db_host,
+        "DB_PORT": str(cfg.db_port) if cfg.db_port else "",
+        "DB_USER": cfg.db_user,
+        "DB_PASSWORD": cfg.db_password or read_env_file().get("DB_PASSWORD", ""),
+        "DB_NAME": cfg.db_name,
+    })
 
 
 @router.get("/config/database")

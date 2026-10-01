@@ -452,7 +452,11 @@ async def _apply_storage_repair_plan(
 
 async def recover_storage_journals(db: AsyncSession, root: Path) -> None:
     """没有提交标记的中断批次回退文件；已有提交标记只完成日志状态。"""
-    for entry in storage_journals(root, limit=None):
+    entries = storage_journals(root, limit=None)
+    unreadable = [entry for entry in entries if entry.get("read_error")]
+    if unreadable:
+        raise ValueError(f"{len(unreadable)} 份存储维护清单不可读，已停止维护以保护恢复记录；请在可恢复维护清单查看错误并检查共享存储读取权限")
+    for entry in entries:
         if entry.get("state") != "prepared":
             continue
         committed = await db.scalar(select(SystemConfig.value).where(
@@ -490,7 +494,16 @@ def storage_journals(root: Path, *, limit: int | None = 100) -> list[dict]:
     for path in sorted(directory.glob("*/manifest.json"), reverse=True)[:limit]:
         if path.is_symlink() or path.parent.is_symlink():
             continue
-        entry = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(entry, dict):
+                raise ValueError("维护清单必须是对象")
+        except (OSError, ValueError) as exc:
+            entries.append({"id": path.parent.name, "state": "unreadable",
+                            "read_error": type(exc).__name__,
+                            "message": "历史维护清单不可读取，未恢复或改动任何文件；请检查共享存储权限或清单完整性",
+                            "path": str(path), "moved": []})
+            continue
         entries.append({"id": path.parent.name, **entry})
     return entries
 

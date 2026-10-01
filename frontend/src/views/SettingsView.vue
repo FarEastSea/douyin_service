@@ -1044,7 +1044,15 @@ onBeforeUnmount(() => {
                 <p v-if="lastStorageRepair?.status === 'partial'" class="config-alert" role="status">维护部分完成：{{ lastStorageRepair.errors || 0 }} 项处理失败。{{ lastStorageRepair.verification_error ? '复检失败：' + lastStorageRepair.verification_error : '请查看剩余原因和维护清单。' }}</p>
                 <details v-if="lastStorageRepair?.failure_details?.length || lastStorageRepair?.apply_errors?.length || lastStorageRepair?.skipped_reasons" class="diagnostic-box"><summary>处理失败与剩余原因</summary><pre>{{ JSON.stringify({ failures: lastStorageRepair.failure_details || lastStorageRepair.apply_errors, skipped: lastStorageRepair.skipped_reasons, remaining: lastStorageRepair.remaining_counts }, null, 2) }}</pre></details>
                 <section class="setting-section"><header><div><h4>可恢复维护清单</h4><p>逐批记录隔离位置与结果；恢复前必须预演，不覆盖已有文件。</p></div><button class="btn ghost compact" @click="loadStorageJournals">刷新清单</button></header>
-                  <article v-for="journal in storageJournals" :key="journal.id" class="setting-field-row"><div><strong>{{ journal.id }} · {{ journal.state }}</strong><p>{{ journal.root }}/.quarantine/storage-maintenance/{{ journal.id }}</p><details class="diagnostic-box"><summary>查看逐项结果</summary><pre>{{ JSON.stringify({ plan: journal.plan, moved: journal.moved, errors: journal.apply_errors, restored: journal.restore_result }, null, 2) }}</pre></details></div><button class="btn ghost compact" :disabled="storageRestoreBusy || !journal.moved?.length" @click="restoreStorage(journal.id)">预演恢复</button></article>
+                  <article v-for="journal in storageJournals" :key="journal.id" class="setting-field-row">
+                    <div>
+                      <strong>{{ journal.id }} · {{ journal.read_error ? '清单不可读取' : journal.state }}</strong>
+                      <p>{{ journal.path || `${journal.root}/.quarantine/storage-maintenance/${journal.id}` }}</p>
+                      <p v-if="journal.read_error" role="alert">{{ journal.message }}（{{ journal.read_error }}）</p>
+                      <details class="diagnostic-box"><summary>查看逐项结果</summary><pre>{{ JSON.stringify({ read_error: journal.read_error, message: journal.message, plan: journal.plan, moved: journal.moved, errors: journal.apply_errors, restored: journal.restore_result }, null, 2) }}</pre></details>
+                    </div>
+                    <button class="btn ghost compact" :disabled="storageRestoreBusy || !journal.moved?.length" @click="restoreStorage(journal.id)">预演恢复</button>
+                  </article>
                   <div v-if="storageRestorePreview" class="maintenance-note"><strong>允许恢复 {{ storageRestorePreview.items.filter((item: any) => item.eligible).length }} / {{ storageRestorePreview.items.length }} 项</strong><pre>{{ JSON.stringify(storageRestorePreview.items, null, 2) }}</pre><button class="btn ghost" :disabled="storageRestoreBusy || storageRestorePreview.dry_run === false || !storageRestorePreview.items.some((item: any) => item.eligible)" @click="restoreStorage(storageRestorePreview.journalId, true)">确认恢复</button></div>
                   <p v-if="!storageJournals.length">暂无维护清单。</p>
                 </section>

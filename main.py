@@ -123,16 +123,8 @@ async def lifespan(app: FastAPI):
     # worker 退出，否则用户将失去再次进入维护模式的机会。
     try:
         download_dir = ensure_download_dir()
-        from pathlib import Path
-        from app.services.storage_maintenance import maintenance_lock, recover_storage_journals
-        from app.models.database import get_async_db
-        recovery_lock = maintenance_lock(Path(settings.DOWNLOAD_ROOT).resolve())
-        await asyncio.to_thread(recovery_lock.__enter__)
-        try:
-            async for recovery_db in get_async_db():
-                await recover_storage_journals(recovery_db, Path(settings.DOWNLOAD_ROOT).resolve())
-        finally:
-            await asyncio.to_thread(recovery_lock.__exit__, None, None, None)
+        # 存储维护在自己的操作锁内先恢复日志，再开始新操作。
+        # 共享盘上的历史清单不可读，不能让下载和 Web 服务无法启动。
         print(f"✅ 下载目录: {download_dir}")
     except Exception as e:
         BOOTSTRAP_STATUS["ready"] = False
