@@ -410,7 +410,9 @@ stop_managed_xhs_engine() {
 
 start_runtime() {
     echo "Starting root application with the BT Panel Python environment..."
-    APP_PORT="$PORT" VENV_DIR="$RUNTIME_VENV" RUNTIME_DIR="$SERVICE_ROOT" bash "$SERVICE_ROOT/start.sh"
+    # The deployment owns this lock, not Gunicorn/XHS or their descendants.
+    # Keep it in this shell through smoke checks, but never pass it to daemons.
+    APP_PORT="$PORT" VENV_DIR="$RUNTIME_VENV" RUNTIME_DIR="$SERVICE_ROOT" bash "$SERVICE_ROOT/start.sh" 200>&-
 }
 
 smoke_check() {
