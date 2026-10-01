@@ -780,7 +780,7 @@ async def unified_task_actions(
     request: UnifiedTaskActionRequest,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """对显式选中的跨平台任务执行批量重试或取消，并逐项返回结果。"""
+    """对显式选中的跨平台任务执行操作，并逐项返回结果。"""
     task_keys = list(dict.fromkeys(request.task_keys))
     succeeded: list[str] = []
     failed: list[dict[str, Any]] = []
@@ -791,7 +791,7 @@ async def unified_task_actions(
         except TaskOperationError as exc:
             failed.append({"task_key": task_key, "message": str(exc), "status_code": exc.status_code})
     action_label = {"retry": "重试", "cancel": "取消", "pause": "暂停",
-                    "resume": "恢复", "refresh_retry": "刷新重试"}[request.action]
+                    "resume": "恢复", "refresh_retry": "刷新重试", "delete": "删除"}[request.action]
     message = f"已{action_label} {len(succeeded)} 个任务"
     if failed:
         message += f"，{len(failed)} 个未处理"

@@ -7,11 +7,14 @@ from datetime import datetime
 import os
 import signal
 
-from sqlalchemy import select
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis_client
-from app.models.models import DownloadTask, PlatformDownloadTask, XDownloadTask
+from app.models.models import (
+    Author, Work, DownloadHistory, DownloadTask, PlatformDownloadTask,
+    PlatformMediaAsset, XDownloadTask, XMediaAsset,
+)
 from app.services.platform_registry import platform_registry
 from app.services.platform_task_service import prepare_platform_task_for_retry
 from app.services.x_task_service import cancel_x_task, prepare_x_task_for_retry
@@ -164,12 +167,59 @@ async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None
     )
 
 
-async def operate_task(db: AsyncSession, task_key: str, action: str) -> None:
-    platform, task_id = parse_task_key(task_key)
-    if action not in {"retry", "cancel", "pause", "resume", "refresh_retry"}:
-        raise TaskOperationError(f"不支持的任务操作：{action}")
+async def _delete_failed_task(db: AsyncSession, platform: str, task_id: int) -> None:
+    """删除失败/取消记录，保留磁盘文件；不允许和正在执行的重试竞争。"""
+    model = DownloadTask if platform == "douyin" else XDownloadTask if platform == "x" else PlatformDownloadTask
+    conditions = (PlatformDownloadTask.platform == platform,) if model is PlatformDownloadTask else ()
+    task = await _load_for_update(db, model, task_id, *conditions)
+    if task.status not in RETRYABLE_STATUSES:
+        raise TaskOperationError("只可删除失败或已取消任务；任务已重新排队时，请先取消", 409)
+    if platform != "douyin":
+        asset_model = XMediaAsset if platform == "x" else PlatformMediaAsset
+        if await db.scalar(select(func.count(asset_model.id)).where(asset_model.task_id == task_id)):
+            raise TaskOperationError("此任务已保存部分媒体，删除会移除其预览记录；请保留任务并在平台专项页管理媒体", 409)
+    old_token = task.celery_task_id
+    if old_token:
+        if platform == "douyin":
+            await asyncio.to_thread(redis_client.invalidate_download_attempt, task_id, old_token)
+        else:
+            await asyncio.to_thread(redis_client.clear_external_attempt, platform, task_id, old_token)
+    if platform == "douyin":
+        from app.services.work_manager import refresh_work_download_state, recalc_author_counts
+        work = await _load_for_update(db, Work, task.work_id)
+        # 沿用作品的文件排除规则，订阅扫描不能又创建用户刚删除的失败任务。
+        work.excluded_file_indices = sorted(set(work.excluded_file_indices) | {task.file_index})
+        # 兼容尚未启用级联外键的历史安装。只删记录，不触碰磁盘文件。
+        await db.execute(delete(DownloadHistory).where(DownloadHistory.task_id == task_id))
+        await db.delete(task)
+        await refresh_work_download_state(db, work)
+        await recalc_author_counts(db, await db.get(Author, work.author_id))
+    else:
+        await db.delete(task)
+    await db.commit()
+    # 缓存清理失败不改变数据库操作已经成功的事实。
     try:
         if platform == "douyin":
+            await asyncio.to_thread(redis_client.delete_progress, task_id)
+        elif platform == "x":
+            await asyncio.to_thread(redis_client.delete_x_task_state, task_id)
+            await asyncio.to_thread(redis_client.delete_x_task_pid, task_id)
+        else:
+            await asyncio.to_thread(redis_client.delete_platform_task_state, platform, task_id)
+            await asyncio.to_thread(redis_client.delete_platform_task_pid, platform, task_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("任务 %s:%s 已删除，但缓存清理失败", platform, task_id, exc_info=True)
+
+
+async def operate_task(db: AsyncSession, task_key: str, action: str) -> None:
+    platform, task_id = parse_task_key(task_key)
+    if action not in {"retry", "cancel", "pause", "resume", "refresh_retry", "delete"}:
+        raise TaskOperationError(f"不支持的任务操作：{action}")
+    try:
+        if action == "delete":
+            await _delete_failed_task(db, platform, task_id)
+        elif platform == "douyin":
             if action == "cancel":
                 await _cancel_douyin(db, task_id)
             elif action == "pause":

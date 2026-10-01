@@ -1261,6 +1261,9 @@ def download_author_works(self, author_id: int, start_index: int = 1,
             
             # 创建或重用下载任务
             if work.work_type == "video":
+                # 视频也有文件索引 0；失败任务被用户删除后不能自动重新创建。
+                if 0 in work.excluded_file_indices:
+                    continue
                 task, action = ensure_download_task_sync(
                     db, work.id, 0, archive_rule_snapshot=archive_snapshot,
                 )

@@ -258,7 +258,7 @@ class MessageResponse(BaseModel):
 class UnifiedTaskActionRequest(BaseModel):
     """统一任务批量操作请求；任务键必须显式携带平台与 ID。"""
 
-    action: Literal["retry", "cancel", "pause", "resume", "refresh_retry"]
+    action: Literal["retry", "cancel", "pause", "resume", "refresh_retry", "delete"]
     task_keys: List[Annotated[str, Field(min_length=3, max_length=64)]] = Field(
         ..., min_length=1, max_length=100,
     )

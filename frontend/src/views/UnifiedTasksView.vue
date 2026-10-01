@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X, Pause, Play } from '@lucide/vue'
+import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X, Pause, Play, Trash2 } from '@lucide/vue'
 import { api, jsonBody } from '../api'
 import Pager from '../components/Pager.vue'
 import { openMedia } from '../media'
@@ -35,7 +35,7 @@ let searchTimer: number | undefined
 let pollTimer: number | undefined
 let loadSequence = 0
 let pollInFlight = false
-type TaskAction = 'retry' | 'cancel' | 'pause' | 'resume' | 'refresh_retry'
+type TaskAction = 'retry' | 'cancel' | 'pause' | 'resume' | 'refresh_retry' | 'delete'
 let statsReturnFocus: HTMLElement | null = null
 const platformNames: Record<string, string> = { douyin: '抖音', x: 'X', tiktok: 'TikTok', weibo: '微博', bilibili: 'B站', xhs: '小红书' }
 const statusNames: Record<string, string> = { pending: '等待中', downloading: '下载中', paused: '已暂停', completed: '已完成', skipped: '已跳过', failed: '失败', cancelled: '已取消' }
@@ -45,6 +45,7 @@ const visibleSummaries = computed(() => statusOrder.filter(item => statusSummary
 const allPageSelected = computed(() => tasks.value.length > 0 && tasks.value.every(task => selectedKeys.value.includes(task.key)))
 const selectedTasks = computed(() => tasks.value.filter(task => selectedKeys.value.includes(task.key)))
 const retryableSelected = computed(() => selectedTasks.value.filter(task => ['failed', 'cancelled'].includes(task.status)))
+const deletableSelected = computed(() => selectedTasks.value.filter(task => ['failed', 'cancelled'].includes(task.status)))
 const cancellableSelected = computed(() => selectedTasks.value.filter(task => ['pending', 'downloading', 'paused'].includes(task.status)))
 const summaryTotal = computed(() => Object.values(statusSummary.value).reduce((sum, count) => sum + count, 0))
 const statsMetrics = [['view_count', '播放'], ['like_count', '点赞'], ['comment_count', '评论'], ['share_count', '分享']] as const
@@ -78,6 +79,12 @@ async function load(silent = false) {
   try {
     const data = await api<UnifiedTaskPage>(`/operations/tasks?${params}`)
     if (sequence !== loadSequence) return
+    if (page.value > Math.max(1, data.pages)) {
+      page.value = Math.max(1, data.pages)
+      syncQuery()
+      void load()
+      return
+    }
     tasks.value = data.items
     pages.value = data.pages
     total.value = data.total
@@ -129,7 +136,7 @@ async function retryAllFailed() {
   try {
     const preview = await api<{ total: number }>(`/operations/tasks/retry-all-failed/preview?platform=${encodeURIComponent(targetPlatform)}`)
     if (!preview.total) { store.notify(`${scope}没有失败任务`, 'info'); return }
-    if (!confirm(`重试${scope}的全部 ${preview.total.toLocaleString()} 个失败任务？\n跨所有分页，不受搜索和当前选择限制，不包含已取消任务。\n后台逐项重新排队，下载仍遵循并发限制；提交时数量可能变化。`)) return
+    if (!confirm(`重试${scope}的全部 ${preview.total.toLocaleString()} 个失败任务？\n跨所有分页，不受搜索和当前选择限制，不包含已取消任务。\n采用普通重试；抖音直链返回 403、404、410 时自动尝试刷新，不强制刷新所有链接。\n后台逐项重新排队，下载仍遵循并发限制；提交时数量可能变化。`)) return
     const result = await api<{ message: string; data: RetryJob }>('/operations/tasks/retry-all-failed', {
       method: 'POST', ...jsonBody({ platform: targetPlatform }),
     })
@@ -144,6 +151,7 @@ async function retryAllFailed() {
 async function runAction(taskKeys: string[], action: TaskAction) {
   if (!taskKeys.length || actionBusy.value) return
   if (action === 'cancel' && !confirm(`确定取消 ${taskKeys.length} 个任务？已保存的文件不会删除。`)) return
+  if (action === 'delete' && !confirm(`删除 ${taskKeys.length} 个失败或已取消任务？\n删除任务及关联下载历史，不删除磁盘文件、作者或作品。\n抖音对应文件会停止自动重新排队，可在作品管理中主动重新下载。\n其他平台已保存部分媒体的任务会保留并说明原因。此操作不可撤销。`)) return
   actionBusy.value = true
   try {
     const result = await api<UnifiedTaskActionResult>('/operations/tasks/actions', {
@@ -224,7 +232,7 @@ watch(() => route.fullPath, (path, previousPath) => {
     <header class="workspace-header">
       <div><h2>全部任务</h2><span>跨平台检索、批量处理与失败诊断；筛选会保留在链接中。</span></div>
       <div class="header-actions">
-        <button class="btn ghost" :disabled="retryAllBusy || retryJobActive || actionBusy" @click="retryAllFailed"><RotateCcw :size="16" />{{ retryAllBusy ? '正在核对…' : retryJobActive ? '后台重试中…' : '重试全部失败' }}</button>
+        <button class="btn ghost" title="普通重试；抖音直链返回 403、404、410 时自动尝试刷新。需强制刷新请使用任务行的刷新链接重试。" :disabled="retryAllBusy || retryJobActive || actionBusy" @click="retryAllFailed"><RotateCcw :size="16" />{{ retryAllBusy ? '正在核对…' : retryJobActive ? '后台重试中…' : '重试全部失败' }}</button>
         <button class="btn ghost" :disabled="loading" @click="load(); loadRetryJob()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
       </div>
     </header>
@@ -252,6 +260,7 @@ watch(() => route.fullPath, (path, previousPath) => {
       <div>
         <button class="btn ghost compact" :disabled="actionBusy || !retryableSelected.length" @click="runAction(retryableSelected.map(task => task.key), 'retry')"><RotateCcw :size="15" />{{ actionBusy ? '处理中…' : `重试 ${retryableSelected.length}` }}</button>
         <button class="btn ghost compact" :disabled="actionBusy || !cancellableSelected.length" @click="runAction(cancellableSelected.map(task => task.key), 'cancel')"><Square :size="15" />{{ actionBusy ? '处理中…' : `取消 ${cancellableSelected.length}` }}</button>
+        <button class="btn ghost compact danger" :disabled="actionBusy || !deletableSelected.length" @click="runAction(deletableSelected.map(task => task.key), 'delete')"><Trash2 :size="15" />{{ actionBusy ? '处理中…' : `删除 ${deletableSelected.length}` }}</button>
       </div>
     </div>
     <details v-if="actionFailures.length" class="action-report"><summary>{{ actionFailures.length }} 个任务未处理，查看原因</summary><ul><li v-for="item in actionFailures" :key="item.task_key"><b>{{ item.task_key }}</b><span>{{ item.message }}</span></li></ul></details>
@@ -265,7 +274,7 @@ watch(() => route.fullPath, (path, previousPath) => {
           <td data-label="状态"><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small><div v-if="task.platform === 'douyin'" class="row-actions"><button v-if="['pending','downloading'].includes(task.status)" class="icon-btn" :aria-label="`暂停任务 ${task.id}`" :disabled="actionBusy" @click="action(task, 'pause')"><Pause :size="16" /></button><button v-if="task.status === 'paused'" class="icon-btn" :aria-label="`恢复任务 ${task.id}`" :disabled="actionBusy" @click="action(task, 'resume')"><Play :size="16" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="text-button" :disabled="actionBusy" @click="action(task, 'refresh_retry')">刷新链接重试</button></div></td>
           <td data-label="进度"><strong>{{ Number(task.progress_percent || 0).toFixed(1) }}%</strong><span>{{ task.file_count }} 个文件</span></td>
           <td class="result-cell" data-label="结果"><template v-if="task.error_message"><details class="task-error-detail"><summary>{{ task.error_message }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_code">错误代码：{{ task.error_code }}</small><button class="text-button" @click="copyFailure(task)">复制诊断</button></details></template><span v-else>{{ task.status === 'completed' ? '文件已保存' : '—' }}</span></td>
-          <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" :aria-label="`查看任务 ${task.id} 互动趋势`" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :aria-label="`重试任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :aria-label="`取消任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
+          <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" :aria-label="`查看任务 ${task.id} 互动趋势`" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :aria-label="`重试任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn danger" title="删除任务（保留磁盘文件）" :aria-label="`删除任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'delete')"><Trash2 :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :aria-label="`取消任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
         </tr></tbody>
       </table>
       <div v-if="!loading && !tasks.length && !loadError" class="empty-state"><strong>暂无符合条件的任务</strong><span>可调整平台、状态或搜索条件后重试</span></div>
@@ -288,7 +297,7 @@ watch(() => route.fullPath, (path, previousPath) => {
 .status-strip button:hover,.status-strip button.active { border-color:var(--accent); color:var(--text); background:var(--accent-soft); }
 .status-strip b { color:var(--text); font-variant-numeric:tabular-nums; }
 .selection-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:10px 0; padding:10px 12px; border:1px solid var(--accent); border-radius:9px; background:var(--accent-soft); }
-.selection-bar>div { display:flex; gap:8px; }
+.selection-bar>div { display:flex; flex-wrap:wrap; gap:8px; }
 .action-report { margin:10px 0; padding:10px 12px; border:1px solid color-mix(in srgb,var(--red) 38%,var(--line)); border-radius:9px; color:var(--muted); }
 .action-report summary { color:var(--red); cursor:pointer; }
 .action-report ul { display:grid; gap:6px; margin:10px 0 0; padding:0; list-style:none; }
