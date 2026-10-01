@@ -18,6 +18,15 @@ const platform = ref(queryText(route.query.platform)), status = ref(queryText(ro
 const loadError = ref(''), summaryLoaded = ref(false)
 const statusSummary = ref<Record<string, number>>({}), selectedKeys = ref<string[]>([])
 const actionBusy = ref(false), rowBusy = ref<string[]>([])
+interface RetryJob {
+  job_id?: string; platform?: string; status: string; total?: number; processed?: number
+  succeeded?: number; skipped?: number; failed?: number; error?: string
+  failures?: Array<{ task_key: string; message: string }>
+}
+const retryJob = ref<RetryJob>({ status: 'idle' }), retryAllBusy = ref(false), retryJobError = ref('')
+const retryJobActive = computed(() => ['queued', 'running'].includes(retryJob.value.status))
+const retryJobNames: Record<string, string> = { queued: '等待后台执行', running: '正在提交重试', completed: '重试提交完成', partial: '部分提交完成', interrupted: '作业中断' }
+let retryJobSequence = 0, retryPollInFlight = false
 const actionFailures = ref<Array<{ task_key: string; message: string; status_code: number }>>([])
 const statsTask = ref<UnifiedTask>(), statsData = ref<any>({ snapshots: [] }), statsBusy = ref(false)
 const statsDialog = ref<HTMLElement | null>(null)
@@ -100,6 +109,38 @@ function toggleTask(taskKey: string) {
 }
 function togglePage() { selectedKeys.value = allPageSelected.value ? [] : tasks.value.map(task => task.key) }
 function setStatus(next: string) { status.value = next === status.value ? '' : next; resetAndLoad() }
+async function loadRetryJob() {
+  if (retryPollInFlight || retryAllBusy.value) return
+  retryPollInFlight = true
+  const sequence = ++retryJobSequence
+  try {
+    const data = await api<RetryJob>('/operations/tasks/retry-all-failed')
+    if (sequence === retryJobSequence) { retryJob.value = data; retryJobError.value = '' }
+  } catch (error: any) {
+    if (sequence === retryJobSequence) retryJobError.value = error.message || '全部重试进度暂不可用，请刷新核对；不要重复提交。'
+  } finally { retryPollInFlight = false }
+}
+async function retryAllFailed() {
+  if (retryAllBusy.value || retryJobActive.value || actionBusy.value) return
+  retryAllBusy.value = true
+  ++retryJobSequence
+  const targetPlatform = platform.value
+  const scope = targetPlatform ? (platformNames[targetPlatform] || targetPlatform) : '全部平台'
+  try {
+    const preview = await api<{ total: number }>(`/operations/tasks/retry-all-failed/preview?platform=${encodeURIComponent(targetPlatform)}`)
+    if (!preview.total) { store.notify(`${scope}没有失败任务`, 'info'); return }
+    if (!confirm(`重试${scope}的全部 ${preview.total.toLocaleString()} 个失败任务？\n跨所有分页，不受搜索和当前选择限制，不包含已取消任务。\n后台逐项重新排队，下载仍遵循并发限制；提交时数量可能变化。`)) return
+    const result = await api<{ message: string; data: RetryJob }>('/operations/tasks/retry-all-failed', {
+      method: 'POST', ...jsonBody({ platform: targetPlatform }),
+    })
+    retryJob.value = result.data
+    retryJobError.value = ''
+    store.notify(result.message, 'info')
+    await load()
+  } catch (error: any) {
+    store.notify(error.message || '全部重试提交失败，请核对后台作业状态', 'error')
+  } finally { retryAllBusy.value = false; void loadRetryJob() }
+}
 async function runAction(taskKeys: string[], action: TaskAction) {
   if (!taskKeys.length || actionBusy.value) return
   if (action === 'cancel' && !confirm(`确定取消 ${taskKeys.length} 个任务？已保存的文件不会删除。`)) return
@@ -161,12 +202,14 @@ async function copyFailure(task: UnifiedTask) {
 }
 onMounted(() => {
   void load()
+  void loadRetryJob()
   pollTimer = window.setInterval(() => {
     if (!document.hidden && !loading.value && !actionBusy.value) void load(true)
+    if (!document.hidden) void loadRetryJob()
   }, 5000)
   document.addEventListener('keydown', statsKeydown)
 })
-onBeforeUnmount(() => { loadSequence++; window.clearInterval(pollTimer); window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
+onBeforeUnmount(() => { loadSequence++; retryJobSequence++; window.clearInterval(pollTimer); window.clearTimeout(searchTimer); document.removeEventListener('keydown', statsKeydown); document.body.classList.remove('modal-open') })
 watch(() => route.fullPath, (path, previousPath) => {
   const nextPlatform = queryText(route.query.platform), nextStatus = queryText(route.query.status)
   const nextSearch = queryText(route.query.q), nextPage = queryPage(route.query.page)
@@ -180,8 +223,19 @@ watch(() => route.fullPath, (path, previousPath) => {
   <section class="workspace-card">
     <header class="workspace-header">
       <div><h2>全部任务</h2><span>跨平台检索、批量处理与失败诊断；筛选会保留在链接中。</span></div>
-      <button class="btn ghost" :disabled="loading" @click="load()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
+      <div class="header-actions">
+        <button class="btn ghost" :disabled="retryAllBusy || retryJobActive || actionBusy" @click="retryAllFailed"><RotateCcw :size="16" />{{ retryAllBusy ? '正在核对…' : retryJobActive ? '后台重试中…' : '重试全部失败' }}</button>
+        <button class="btn ghost" :disabled="loading" @click="load(); loadRetryJob()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
+      </div>
     </header>
+    <div v-if="retryJobError" class="load-error-banner" role="alert">重试作业状态暂不可用：{{ retryJobError }}<button class="text-button" @click="loadRetryJob">核对进度</button></div>
+    <div v-if="retryJob.status !== 'idle'" class="retry-job-report" role="status" aria-live="polite">
+      <strong>{{ retryJobNames[retryJob.status] || retryJob.status }} · {{ retryJob.platform ? platformNames[retryJob.platform] : '全部平台' }}</strong>
+      <span>已处理 {{ retryJob.processed || 0 }}/{{ retryJob.total || 0 }} · 已提交 {{ retryJob.succeeded || 0 }} · 跳过 {{ retryJob.skipped || 0 }} · 未提交 {{ retryJob.failed || 0 }} · 未处理 {{ Math.max(0, (retryJob.total || 0) - (retryJob.processed || 0)) }}</span>
+      <small>这是重试投递结果，不代表下载已完成。仅处理提交时的失败任务；状态已变化的任务会跳过。</small>
+      <p v-if="retryJob.error">{{ retryJob.error }}</p>
+      <details v-if="retryJob.failures?.length"><summary>查看未提交与待核对原因（最多 200 条）</summary><ul><li v-for="item in retryJob.failures" :key="item.task_key"><b>{{ item.task_key }}</b> {{ item.message }}</li></ul></details>
+    </div>
     <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用，保留上次结果：{{ loadError }}<button class="text-button" @click="load()">重试</button></div>
     <div v-if="route.query.task_key" class="selection-bar" role="status"><span>当前定位任务 {{ route.query.task_key }}</span><button class="text-button" @click="resetAndLoad">返回任务列表</button></div>
     <div class="filter-row unified-filters">
@@ -222,6 +276,11 @@ watch(() => route.fullPath, (path, previousPath) => {
 </template>
 
 <style scoped>
+.retry-job-report { display:grid; gap:6px; padding:16px 24px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+.retry-job-report span,.retry-job-report small { color:var(--muted); }
+.retry-job-report p { margin:0; color:var(--red); }
+.retry-job-report summary { cursor:pointer; }
+.retry-job-report li { padding-block:4px; }
 .unified-filters { grid-template-columns:160px 160px minmax(240px,1fr); }
 .unified-filters select { min-height:40px; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); color:var(--text); }
 .status-strip { display:flex; gap:6px; margin:12px 0; overflow-x:auto; scrollbar-width:thin; }

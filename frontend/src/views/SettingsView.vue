@@ -1046,7 +1046,7 @@ onBeforeUnmount(() => {
                 <section class="setting-section"><header><div><h4>可恢复维护清单</h4><p>逐批记录隔离位置与结果；恢复前必须预演，不覆盖已有文件。</p></div><button class="btn ghost compact" @click="loadStorageJournals">刷新清单</button></header>
                   <article v-for="journal in storageJournals" :key="journal.id" class="setting-field-row">
                     <div>
-                      <strong>{{ journal.id }} · {{ journal.read_error ? '清单不可读取' : journal.state }}</strong>
+                      <strong>{{ journal.id }} · {{ journal.read_error ? '清单不可读取' : journal.state || '历史维护记录（旧版）' }}</strong>
                       <p>{{ journal.path || `${journal.root}/.quarantine/storage-maintenance/${journal.id}` }}</p>
                       <p v-if="journal.read_error" role="alert">{{ journal.message }}（{{ journal.read_error }}）</p>
                       <details class="diagnostic-box"><summary>查看逐项结果</summary><pre>{{ JSON.stringify({ read_error: journal.read_error, message: journal.message, plan: journal.plan, moved: journal.moved, errors: journal.apply_errors, restored: journal.restore_result }, null, 2) }}</pre></details>
