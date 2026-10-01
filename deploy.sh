@@ -300,44 +300,79 @@ PY
     )
 }
 
-matches_service_process() {
-    local pid="$1"
-    local cmdline=""
-    local process_cwd=""
-    cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
-    process_cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || true)"
-
-    if [ "$process_cwd" = "$SERVICE_ROOT" ] && \
-       { [[ "$cmdline" == *"gunicorn"* && "$cmdline" == *"main:app"* ]] || \
-         [[ "$cmdline" == *"uvicorn"* && "$cmdline" == *"main:app"* ]] || \
-         [[ "$cmdline" == *"main.py"* ]]; }; then
-        return 0
-    fi
-    # 兼容上一版 Jenkins 从 .current 启动的 Gunicorn，仅用于迁移时停止旧实例。
-    if [[ "$cmdline" == *"gunicorn"* && "$cmdline" == *"main:app"* && "$cmdline" == *"$SERVICE_ROOT/.current"* ]]; then
-        return 0
+is_service_command() {
+    local executable="${1##*/}"
+    shift
+    local argument=""
+    local server=0 app=0
+    # A shell/pgrep/diagnostic command may mention the server, but is not it.
+    case "$executable" in python*|gunicorn|uvicorn) ;; *) return 1 ;; esac
+    for argument in "$@"; do
+        case "$argument" in
+            gunicorn|uvicorn|*/gunicorn|*/uvicorn) server=1 ;;
+            main:app) app=1 ;;
+        esac
+    done
+    if [ "$server" -eq 1 ] && [ "$app" -eq 1 ]; then return 0; fi
+    # Gunicorn can replace argv with its process title when setproctitle is installed.
+    case "${1:-}" in 'gunicorn: master [main:app]'|'gunicorn: worker [main:app]') return 0 ;; esac
+    # Accept a Python script entrypoint, never arbitrary `python -c` source text.
+    if [[ "$executable" == python* ]]; then
+        shift
+        for argument in "$@"; do
+            case "$argument" in
+                -c|-m) return 1 ;;
+                -*) continue ;;
+                *) [ "${argument##*/}" = main.py ]; return $? ;;
+            esac
+        done
     fi
     return 1
 }
 
+matches_service_process() {
+    local pid="$1" executable="" process_cwd="" legacy_cwd=""
+    local -a arguments=()
+    [ -r "/proc/${pid}/cmdline" ] || return 1
+    executable="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)"
+    process_cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || true)"
+    mapfile -d '' -t arguments < "/proc/${pid}/cmdline" 2>/dev/null || return 1
+    [ "${#arguments[@]}" -gt 0 ] || return 1
+    is_service_command "$executable" "${arguments[@]}" || return 1
+    [ "$process_cwd" = "$SERVICE_ROOT" ] && return 0
+    # Only the exact previous .current checkout is a migration target.
+    legacy_cwd="$(readlink -f "$SERVICE_ROOT/.current" 2>/dev/null || true)"
+    [ -n "$legacy_cwd" ] && [ "$process_cwd" = "$legacy_cwd" ]
+}
+
 stop_running_instances() {
     local pid=""
+    local parent=""
     local found=0
+    local -A candidates=()
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
+        if matches_service_process "$pid"; then candidates["$pid"]=1; fi
+    done < <(pgrep -f "gunicorn.*main:app|uvicorn.*main:app|main.py" 2>/dev/null || true)
+    # Signal the master once. Sending TERM separately to workers races Gunicorn's
+    # own socket/worker shutdown and may trigger unnecessary replacement workers.
+    for pid in "${!candidates[@]}"; do
+        parent="$(awk '/^PPid:/ {print $2}' "/proc/${pid}/status" 2>/dev/null || true)"
+        if [ -n "$parent" ] && [ -n "${candidates[$parent]:-}" ]; then continue; fi
         if matches_service_process "$pid"; then
             echo "Stopping existing application process (PID=${pid})..."
             kill -TERM "$pid" 2>/dev/null || true
             found=1
         fi
-    done < <(pgrep -f "gunicorn.*main:app|uvicorn.*main:app|main.py" 2>/dev/null || true)
+    done
 
     if [ "$found" -eq 0 ]; then
         rm -f "$SERVICE_ROOT/logs/gunicorn.pid"
         echo "No running application process found; BT Panel watchdog may already be restarting it."
         return 0
     fi
-    for _ in $(seq 1 20); do
+    # Gunicorn's default graceful shutdown deadline is 30 seconds.
+    for _ in $(seq 1 70); do
         local alive=0
         while IFS= read -r pid; do
             [ -n "$pid" ] || continue
@@ -352,7 +387,7 @@ stop_running_instances() {
         fi
         sleep 0.5
     done
-    echo "Deploy failed: the previous application process did not stop in time." >&2
+    echo "Deploy failed: a verified application process is still running (PID=${pid}); check Gunicorn shutdown or an external watchdog." >&2
     return 1
 }
 
