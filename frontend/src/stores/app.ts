@@ -42,7 +42,8 @@ export const useAppStore = defineStore('app', {
     },
     notify(message: string, tone: 'success' | 'error' | 'info' = 'success') {
       this.toast = { message, tone }
-      window.setTimeout(() => { if (this.toast?.message === message) this.toast = null }, 3600)
+      const notification = this.toast
+      if (tone !== 'error') window.setTimeout(() => { if (this.toast === notification) this.toast = null }, 6000)
     },
     applyTheme() {
       const effective = this.theme === 'auto'

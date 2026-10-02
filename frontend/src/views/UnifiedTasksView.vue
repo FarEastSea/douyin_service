@@ -4,6 +4,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { Eye, RefreshCw, RotateCcw, Search, Square, TrendingUp, X, Pause, Play, Trash2 } from '@lucide/vue'
 import { api, jsonBody } from '../api'
 import Pager from '../components/Pager.vue'
+import MoreActions from '../components/MoreActions.vue'
+import FilterToolbar from '../components/FilterToolbar.vue'
+import JobReport from '../components/JobReport.vue'
+import IssueDetail from '../components/IssueDetail.vue'
 import { openMedia } from '../media'
 import { focusFirst, restoreFocus, trapFocus } from '../focus'
 import { useAppStore } from '../stores/app'
@@ -263,42 +267,40 @@ watch(() => route.fullPath, (path, previousPath) => {
 </script>
 
 <template>
-  <section class="workspace-card">
+  <section class="workspace-card unified-workspace">
     <header class="workspace-header">
       <div><h2>全部任务</h2><span>跨平台检索、批量处理与失败诊断；筛选会保留在链接中。</span></div>
       <div class="header-actions">
+        <MoreActions label="跨全部分页操作">
         <button class="btn ghost" title="普通重试；抖音直链返回 403、404、410 时自动尝试刷新。需强制刷新请使用任务行的刷新链接重试。" :disabled="retryAllBusy || retryJobActive || deleteAllBusy || deleteJobActive || actionBusy" @click="retryAllFailed"><RotateCcw :size="16" />{{ retryAllBusy ? '正在核对…' : retryJobActive ? '后台重试中…' : '重试全部失败' }}</button>
         <button class="btn danger" :disabled="deleteAllBusy || deleteJobActive || retryAllBusy || retryJobActive || actionBusy" @click="deleteAllFailed"><Trash2 :size="16" />{{ deleteAllBusy ? '正在核对…' : deleteJobActive ? '后台删除中…' : '删除全部失败任务' }}</button>
+        </MoreActions>
         <button class="btn ghost" :disabled="loading" @click="load(); loadRetryJob(); loadDeleteJob()"><RefreshCw :size="16" />{{ loading ? '刷新中…' : '刷新' }}</button>
       </div>
     </header>
-    <div v-if="retryJobError" class="load-error-banner" role="alert">重试作业状态暂不可用：{{ retryJobError }}<button class="text-button" @click="loadRetryJob">核对进度</button></div>
-    <div v-if="retryJob.status !== 'idle'" class="retry-job-report" role="status" aria-live="polite">
-      <strong>{{ retryJobNames[retryJob.status] || retryJob.status }} · {{ retryJob.platform ? platformNames[retryJob.platform] : '全部平台' }}</strong>
+    <div v-if="retryJobError" class="load-error-banner" role="alert"><IssueDetail :message="retryJobError" /><button class="text-button" @click="loadRetryJob">核对进度</button></div>
+    <JobReport v-if="retryJob.status !== 'idle'" :title="(retryJobNames[retryJob.status] || retryJob.status) + ' · ' + (retryJob.platform ? platformNames[retryJob.platform] : '全部平台')" :status="retryJob.status" :processed="retryJob.processed" :total="retryJob.total" :failed="retryJob.failed">
+
       <span>已处理 {{ retryJob.processed || 0 }}/{{ retryJob.total || 0 }} · 已提交 {{ retryJob.succeeded || 0 }} · 跳过 {{ retryJob.skipped || 0 }} · 未提交 {{ retryJob.failed || 0 }} · 未处理 {{ Math.max(0, (retryJob.total || 0) - (retryJob.processed || 0)) }}</span>
       <small>这是重试投递结果，不代表下载已完成。仅处理提交时的失败任务；状态已变化的任务会跳过。</small>
-      <p v-if="retryJob.error">{{ retryJob.error }}</p>
+      <IssueDetail v-if="retryJob.error" :message="retryJob.error" />
       <details v-if="retryJob.failures?.length"><summary>查看未提交与待核对原因（最多 200 条）</summary><ul><li v-for="item in retryJob.failures" :key="item.task_key"><b>{{ item.task_key }}</b> {{ item.message }}</li></ul></details>
-    </div>
-    <div v-if="deleteJobError" class="load-error-banner" role="alert">删除作业状态暂不可用：{{ deleteJobError }}<button class="text-button" @click="loadDeleteJob">核对进度</button></div>
-    <div v-if="deleteJob.status !== 'idle'" class="retry-job-report" role="status" aria-live="polite">
-      <strong>{{ deleteJobNames[deleteJob.status] || deleteJob.status }} · {{ deleteJob.platform ? platformNames[deleteJob.platform] : '全部平台' }}</strong>
+    </JobReport>
+    <div v-if="deleteJobError" class="load-error-banner" role="alert"><IssueDetail :message="deleteJobError" /><button class="text-button" @click="loadDeleteJob">核对进度</button></div>
+    <JobReport v-if="deleteJob.status !== 'idle'" :title="(deleteJobNames[deleteJob.status] || deleteJob.status) + ' · ' + (deleteJob.platform ? platformNames[deleteJob.platform] : '全部平台')" :status="deleteJob.status" :processed="deleteJob.processed" :total="deleteJob.total" :failed="deleteJob.failed">
+
       <span>已处理 {{ deleteJob.processed || 0 }}/{{ deleteJob.total || 0 }} · 已删除 {{ deleteJob.succeeded || 0 }} · 跳过 {{ deleteJob.skipped || 0 }} · 删除失败 {{ deleteJob.failed || 0 }} · 未处理 {{ Math.max(0, (deleteJob.total || 0) - (deleteJob.processed || 0)) }}</span>
       <small>只处理提交时的失败任务，不删除磁盘文件。状态已变化的任务会跳过；订阅仍可补建缺失任务。</small>
-      <p v-if="deleteJob.error">{{ deleteJob.error }}</p>
+      <IssueDetail v-if="deleteJob.error" :message="deleteJob.error" />
       <details v-if="deleteJob.failures?.length"><summary>查看删除失败与待核对原因（最多 200 条）</summary><ul><li v-for="item in deleteJob.failures" :key="item.task_key"><b>{{ item.task_key }}</b> {{ item.message }}</li></ul></details>
-    </div>
-    <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用，保留上次结果：{{ loadError }}<button class="text-button" @click="load()">重试</button></div>
+    </JobReport>
+    <div v-if="loadError" class="load-error-banner" role="alert"><IssueDetail :message="loadError" impact="当前数据读取失败；下方如有列表，为上次读取的结果。" /><button class="text-button" @click="load()">重试</button></div>
     <div v-if="route.query.task_key" class="selection-bar" role="status"><span>当前定位任务 {{ route.query.task_key }}</span><button class="text-button" @click="resetAndLoad">返回任务列表</button></div>
-    <div class="filter-row unified-filters">
+    <FilterToolbar :active="[platform && platformNames[platform], status && statusNames[status]].filter(Boolean).join(' · ')" @clear="platform = ''; status = ''; resetAndLoad()">
+      <template #search><label class="search"><Search :size="16" /><input v-model="search" aria-label="搜索任务" placeholder="搜索作者、标题、作品 ID" @input="queueSearch" /></label></template>
       <select v-model="platform" aria-label="平台" @change="resetAndLoad"><option value="">全部平台</option><option v-for="item in store.platforms" :key="item.id" :value="item.id">{{ item.name }}</option></select>
-      <select v-model="status" aria-label="状态" @change="resetAndLoad"><option value="">全部状态</option><option value="pending">等待中</option><option value="downloading">下载中</option><option value="paused">已暂停</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
-      <label class="search"><Search :size="16" /><input v-model="search" aria-label="搜索任务" placeholder="搜索作者、标题、作品 ID、文件名或来源链接" @input="queueSearch" /></label>
-    </div>
-    <div class="status-strip" aria-label="当前筛选结果状态汇总">
-      <button :class="{ active: !status }" :aria-pressed="!status" @click="setStatus('')"><span>全部</span><b>{{ summaryLoaded ? summaryTotal.toLocaleString() : '—' }}</b></button>
-      <button v-for="item in visibleSummaries" :key="item" :class="{ active: status === item }" :aria-pressed="status === item" @click="setStatus(item)"><span>{{ statusNames[item] || item }}</span><b>{{ Number(statusSummary[item] || 0).toLocaleString() }}</b></button>
-    </div>
+      <select v-model="status" aria-label="状态" @change="resetAndLoad"><option value="">全部状态{{ summaryLoaded ? ' · ' + summaryTotal.toLocaleString() : '' }}</option><option v-for="item in statusOrder" :key="item" :value="item">{{ statusNames[item] }} · {{ statusSummary[item] ?? '—' }}</option></select>
+    </FilterToolbar>
     <div v-if="selectedKeys.length" class="selection-bar" role="status">
       <span>已选择 <b>{{ selectedKeys.length }}</b> 个当前页任务</span>
       <div>
@@ -309,70 +311,18 @@ watch(() => route.fullPath, (path, previousPath) => {
     </div>
     <details v-if="actionFailures.length" class="action-report"><summary>{{ actionFailures.length }} 个任务未处理，查看原因</summary><ul><li v-for="item in actionFailures" :key="item.task_key"><b>{{ item.task_key }}</b><span>{{ item.message }}</span></li></ul></details>
     <div class="table-shell" :class="{ loading }">
-      <table class="data-table">
-        <thead><tr><th class="select-col"><input type="checkbox" aria-label="选择当前页全部任务" :checked="allPageSelected" @change="togglePage" /></th><th>平台与来源</th><th>元数据</th><th>状态</th><th>进度</th><th>结果</th><th class="actions-col">操作</th></tr></thead>
+      <table class="data-table unified-table">
+        <thead><tr><th class="select-col"><label class="selection-hit"><input type="checkbox" aria-label="选择当前页全部任务" :checked="allPageSelected" @change="togglePage" /></label></th><th>任务与来源</th><th>状态与结果</th><th class="actions-col">操作</th></tr></thead>
         <tbody><tr v-for="task in tasks" :key="task.key" :class="{ selected: selectedKeys.includes(task.key) }">
-          <td class="select-col" data-label="选择"><input type="checkbox" :aria-label="`选择任务 ${task.id}`" :checked="selectedKeys.includes(task.key)" @change="toggleTask(task.key)" /></td>
-          <td data-label="平台与来源"><div class="media-cell"><span class="media-icon">{{ platformNames[task.platform] || task.platform }}</span><div><strong :title="task.source_label">{{ task.source_label }}</strong><span>{{ task.source_type === 'profile' ? '作者主页' : '单条作品' }} · #{{ task.id }}</span></div></div></td>
-          <td data-label="元数据"><strong :title="task.author_name || ''">{{ task.author_name || '作者未知' }}</strong><span>{{ task.published_at ? new Date(task.published_at).toLocaleString() : (task.media_type || '元数据待采集') }}</span></td>
-          <td data-label="状态"><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><small>{{ phaseNames[task.phase || ''] || task.phase || '—' }}</small><div v-if="task.platform === 'douyin'" class="row-actions"><button v-if="['pending','downloading'].includes(task.status)" class="icon-btn" :aria-label="`暂停任务 ${task.id}`" :disabled="actionBusy" @click="action(task, 'pause')"><Pause :size="16" /></button><button v-if="task.status === 'paused'" class="icon-btn" :aria-label="`恢复任务 ${task.id}`" :disabled="actionBusy" @click="action(task, 'resume')"><Play :size="16" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="text-button" :disabled="actionBusy" @click="action(task, 'refresh_retry')">刷新链接重试</button></div></td>
-          <td data-label="进度"><strong>{{ Number(task.progress_percent || 0).toFixed(1) }}%</strong><span>{{ task.file_count }} 个文件</span></td>
-          <td class="result-cell" data-label="结果"><template v-if="task.error_message"><details class="task-error-detail"><summary>{{ task.error_message }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_code">错误代码：{{ task.error_code }}</small><button class="text-button" @click="copyFailure(task)">复制诊断</button></details></template><span v-else>{{ task.status === 'completed' ? '文件已保存' : '—' }}</span></td>
-          <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" :aria-label="`查看任务 ${task.id} 互动趋势`" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :aria-label="`重试任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn danger" title="删除任务（保留磁盘文件）" :aria-label="`删除任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'delete')"><Trash2 :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :aria-label="`取消任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></div></td>
+          <td class="select-col" data-label="选择"><label class="selection-hit"><input type="checkbox" :aria-label="`选择任务 ${task.id}`" :checked="selectedKeys.includes(task.key)" @change="toggleTask(task.key)" /></label></td>
+          <td class="task-source"><div class="media-cell"><div><strong :title="task.source_label">{{ task.source_label || '任务 #' + task.id }}</strong><span>{{ platformNames[task.platform] || task.platform }} · {{ task.author_name || (task.source_type === 'profile' ? '作者主页' : '单条作品') }} · #{{ task.id }}</span><small v-if="task.published_at">{{ new Date(task.published_at).toLocaleDateString() }}</small></div></div></td>
+          <td class="task-state"><span class="status" :data-tone="task.status">{{ statusNames[task.status] || task.status }}</span><span v-if="task.status === 'completed'">{{ task.file_count }} 个文件</span><span v-else-if="task.status === 'downloading'">{{ Number(task.progress_percent || 0).toFixed(1) }}%</span><small v-else-if="task.phase && phaseNames[task.phase] !== statusNames[task.status]">{{ phaseNames[task.phase] || task.phase }}</small><IssueDetail v-if="task.error_message" :message="task.error_message" :code="task.error_code || ''"><button class="text-button" @click="copyFailure(task)">复制任务上下文</button></IssueDetail></td>
+          <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" :disabled="rowBusy.includes(task.key)" @click="preview(task)"><Eye :size="17" /></button><MoreActions v-if="task.has_stats || ['pending','downloading','paused','failed','cancelled'].includes(task.status)" :label="'任务操作：' + task.id"><button v-if="task.platform === 'douyin' && ['pending','downloading'].includes(task.status)" class="icon-btn" :aria-label="'暂停任务 ' + task.id" :disabled="actionBusy" @click="action(task, 'pause')"><Pause :size="17" /></button><button v-if="task.platform === 'douyin' && task.status === 'paused'" class="icon-btn" :aria-label="'恢复任务 ' + task.id" :disabled="actionBusy" @click="action(task, 'resume')"><Play :size="17" /></button><button v-if="task.platform === 'douyin' && ['failed','cancelled'].includes(task.status)" class="icon-btn" :aria-label="'刷新链接重试任务 ' + task.id" title="刷新链接重试" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'refresh_retry')"><RefreshCw :size="17" /></button><button v-if="task.has_stats" class="icon-btn" title="互动趋势" :aria-label="`查看任务 ${task.id} 互动趋势`" @click="showStats(task)"><TrendingUp :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" title="重试" :aria-label="`重试任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn danger" title="删除任务（保留磁盘文件）" :aria-label="`删除任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'delete')"><Trash2 :size="17" /></button><button v-if="['pending','downloading','paused'].includes(task.status)" class="icon-btn" title="取消" :aria-label="`取消任务 ${task.id}`" :disabled="actionBusy || rowBusy.includes(task.key)" @click="action(task, 'cancel')"><Square :size="17" /></button></MoreActions></div></td>
         </tr></tbody>
       </table>
       <div v-if="!loading && !tasks.length && !loadError" class="empty-state"><strong>暂无符合条件的任务</strong><span>可调整平台、状态或搜索条件后重试</span></div>
     </div>
     <Pager v-if="!loadError" :page="page" :pages="pages" :total="total" @change="changePage" />
-    <Teleport to="body"><div v-if="statsTask" class="trend-overlay" @click.self="closeStats"><section ref="statsDialog" class="trend-dialog" role="dialog" aria-modal="true" aria-labelledby="task-trend-title" tabindex="-1"><header><div><p class="eyebrow">CROSS-PLATFORM ANALYTICS</p><h3 id="task-trend-title">{{ statsData.label || statsTask.source_label }}</h3><span>{{ platformNames[statsTask.platform] }} · {{ statsSeries.length }} 个统计快照</span></div><button class="icon-btn" aria-label="关闭互动趋势" @click="closeStats"><X /></button></header><nav aria-label="趋势指标"><button v-for="metric in statsMetrics" :key="metric[0]" :class="{ active: statsMetric === metric[0] }" :aria-pressed="statsMetric === metric[0]" @click="statsMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="statsBusy" class="empty-state">正在读取趋势…</div><template v-else-if="statsSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(statsSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(statsSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="statsSummary.unusual"><strong>+{{ formatCount(statsSummary.latestDelta) }}</strong><span>最近增量{{ statsSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="跨平台互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="statsPoints" /></svg><div class="trend-table"><article v-for="(snapshot, index) in [...statsSeries].reverse().slice(0, 30)" :key="snapshot.id || index"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[statsMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>该平台尚未返回互动统计</strong><span>后续下载取得统计字段时会自动开始记录</span></div></section></div></Teleport>
+    <Teleport to="body"><div v-if="statsTask" class="trend-overlay" @click.self="closeStats"><section ref="statsDialog" class="trend-dialog" role="dialog" aria-modal="true" aria-labelledby="task-trend-title" tabindex="-1"><header><div><h3 id="task-trend-title">{{ statsData.label || statsTask.source_label }}</h3><span>{{ platformNames[statsTask.platform] }} · {{ statsSeries.length }} 个统计快照</span></div><button class="icon-btn" aria-label="关闭互动趋势" @click="closeStats"><X /></button></header><nav aria-label="趋势指标"><button v-for="metric in statsMetrics" :key="metric[0]" :class="{ active: statsMetric === metric[0] }" :aria-pressed="statsMetric === metric[0]" @click="statsMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="statsBusy" class="empty-state">正在读取趋势…</div><template v-else-if="statsSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(statsSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(statsSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="statsSummary.unusual"><strong>+{{ formatCount(statsSummary.latestDelta) }}</strong><span>最近增量{{ statsSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="跨平台互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="statsPoints" /></svg><div class="trend-table"><article v-for="(snapshot, index) in [...statsSeries].reverse().slice(0, 30)" :key="snapshot.id || index"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[statsMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>该平台尚未返回互动统计</strong><span>后续下载取得统计字段时会自动开始记录</span></div></section></div></Teleport>
   </section>
 </template>
-
-<style scoped>
-.retry-job-report { display:grid; gap:6px; padding:16px 24px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
-.retry-job-report span,.retry-job-report small { color:var(--muted); }
-.retry-job-report p { margin:0; color:var(--red); }
-.retry-job-report summary { cursor:pointer; }
-.retry-job-report li { padding-block:4px; }
-.unified-filters { grid-template-columns:160px 160px minmax(240px,1fr); }
-.unified-filters select { min-height:40px; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); color:var(--text); }
-.status-strip { display:flex; gap:6px; margin:12px 0; overflow-x:auto; scrollbar-width:thin; }
-.status-strip button { display:flex; align-items:center; gap:8px; min-height:34px; padding:0 11px; border:1px solid var(--line); border-radius:8px; background:transparent; color:var(--muted); white-space:nowrap; cursor:pointer; }
-.status-strip button:hover,.status-strip button.active { border-color:var(--accent); color:var(--text); background:var(--accent-soft); }
-.status-strip b { color:var(--text); font-variant-numeric:tabular-nums; }
-.selection-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:10px 0; padding:10px 12px; border:1px solid var(--accent); border-radius:9px; background:var(--accent-soft); }
-.selection-bar>div { display:flex; flex-wrap:wrap; gap:8px; }
-.action-report { margin:10px 0; padding:10px 12px; border:1px solid color-mix(in srgb,var(--red) 38%,var(--line)); border-radius:9px; color:var(--muted); }
-.action-report summary { color:var(--red); cursor:pointer; }
-.action-report ul { display:grid; gap:6px; margin:10px 0 0; padding:0; list-style:none; }
-.action-report li { display:flex; gap:10px; min-width:0; }
-.action-report li b { flex:none; color:var(--text); }
-.action-report li span { overflow-wrap:anywhere; }
-.select-col { width:42px; text-align:center; }
-.select-col input { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
-.data-table tr.selected td { background:var(--accent-soft); }
-.media-icon { min-width:48px; padding:7px; border-radius:8px; font-size:10px; text-align:center; }
-.media-cell>div,.result-cell { min-width:0; }
-.media-cell strong,.result-cell>span,.data-table td>strong { display:block; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.result-cell small { display:block; margin-top:4px; color:var(--faint); overflow-wrap:anywhere; }
-.status[data-tone="paused"],.status[data-tone="cancelled"] { background:rgba(231,169,67,.12); color:var(--amber)!important; }
-.trend-overlay { position:fixed; inset:0; z-index:1000; display:grid; place-items:center; padding:24px; background:rgba(5,8,14,.7); backdrop-filter:blur(8px); }
-.trend-dialog { width:min(760px,100%); max-height:88vh; overflow:auto; padding:24px; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 24px 80px rgba(0,0,0,.32); }
-.trend-dialog>header { display:flex; justify-content:space-between; gap:16px; }
-.trend-dialog>header h3 { margin:4px 0; }
-.trend-dialog>header span,.trend-table span { color:var(--muted); }
-.trend-dialog>nav { display:flex; gap:6px; margin:18px 0; }
-.trend-dialog>nav button { padding:7px 11px; border:1px solid var(--line); border-radius:8px; background:transparent; color:var(--muted); cursor:pointer; }
-.trend-dialog>nav button.active { border-color:var(--accent); background:var(--accent-soft); color:var(--text); }
-.trend-kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
-.trend-kpis article { padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
-.trend-kpis strong,.trend-kpis span { display:block; }
-.trend-kpis span { margin-top:4px; color:var(--muted); font-size:12px; }
-.trend-kpis article[data-alert="true"] { border-color:var(--amber); }
-.trend-chart { width:100%; height:210px; margin:18px 0; overflow:visible; }
-.trend-chart line { stroke:var(--line); stroke-width:.5; }
-.trend-chart polyline { fill:none; stroke:var(--accent); stroke-width:2.2; vector-effect:non-scaling-stroke; }
-.trend-table { display:grid; gap:5px; }
-.trend-table article { display:grid; grid-template-columns:1fr auto 90px; gap:12px; padding:8px 10px; border-bottom:1px solid var(--line); }
-@media (max-width:760px) { .unified-filters { grid-template-columns:1fr; } .selection-bar { align-items:flex-start; flex-direction:column; } }
-</style>

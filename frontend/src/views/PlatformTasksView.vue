@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Ban, Eye, FileText, RefreshCw, RotateCcw, Search, Trash2 } from '@lucide/vue'
 import { api, jsonBody } from '../api'
 import Pager from '../components/Pager.vue'
+import FilterToolbar from '../components/FilterToolbar.vue'
+import IssueDetail from '../components/IssueDetail.vue'
 import { openMedia } from '../media'
 import { useAppStore } from '../stores/app'
 import type { MediaItem, PageData, PlatformTask } from '../types'
@@ -126,14 +128,14 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (searchTimer != null) cle
 <template>
   <section class="workspace-card">
     <header class="workspace-header"><div><h2>{{ platformName }} 下载任务</h2><span>{{ workspaceDescription }}</span></div><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></header>
-    <div v-if="loadError" class="load-error-banner" role="alert">任务状态暂不可用：{{ loadError }}{{ tasks.length ? '；下方为上次读取的结果。' : '' }}<button class="text-button" @click="load">重试</button></div>
+    <div v-if="loadError" class="load-error-banner" role="alert"><IssueDetail :message="loadError" impact="当前数据读取失败；下方如有列表，为上次读取的结果。" /><button class="text-button" @click="load">重试</button></div>
     <form class="command-bar" @submit.prevent="create"><span class="media-icon">{{ definition?.icon_text || platformIcons[platform] || 'M' }}</span><input v-model="input" :aria-label="`${platformName}下载来源`" :placeholder="inputHint" /><button class="btn primary">开始下载</button></form>
-    <div class="filter-row"><nav class="segmented" aria-label="筛选任务状态"><button v-for="item in [['','全部'],['downloading','下载中'],['completed','已完成'],['failed','失败']]" :key="item[0]" :class="{ active: status === item[0] }" :aria-pressed="status === item[0]" @click="status = item[0]; page = 1">{{ item[1] }}</button></nav><label class="search compact-search"><Search :size="15" /><input v-model="search" aria-label="搜索全部任务" placeholder="搜索全部任务" /></label></div>
-    <div class="table-shell"><table class="data-table"><thead><tr><th>来源与任务</th><th>阶段</th><th>文件</th><th>最近状态</th><th class="actions-col">操作</th></tr></thead><tbody><tr v-for="task in tasks" :key="task.id">
+    <FilterToolbar :active="status ? '任务状态已筛选' : ''" @clear="status = ''; page = 1"><template #search><label class="search compact-search"><Search :size="15" /><input v-model="search" aria-label="搜索全部任务" placeholder="搜索全部任务" /></label></template><nav class="segmented" aria-label="筛选任务状态"><button v-for="item in [['','全部'],['downloading','下载中'],['completed','已完成'],['failed','失败']]" :key="item[0]" :class="{ active: status === item[0] }" :aria-pressed="status === item[0]" @click="status = item[0]; page = 1">{{ item[1] }}</button></nav></FilterToolbar>
+    <div class="table-shell"><table class="data-table special-task-table"><thead><tr><th>来源与任务</th><th>阶段</th><th>文件</th><th>最近状态</th><th class="actions-col">操作</th></tr></thead><tbody><tr v-for="task in tasks" :key="task.id">
       <td data-label="来源与任务"><div class="media-cell"><span class="media-icon">{{ definition?.icon_text || platformIcons[platform] || 'M' }}</span><div><strong>{{ task.source_type === 'work' ? '单条作品' : `@${task.source_key}` }}</strong><span>任务 #{{ task.id }} · {{ platformName }}</span></div></div></td>
-      <td data-label="阶段"><span class="status" :data-tone="task.status">{{ statusLabels[task.status] || task.status }}</span><small>{{ phaseLabels[task.phase || ''] || task.phase || '排队中' }}</small></td>
+      <td data-label="阶段"><span class="status" :data-tone="task.status">{{ statusLabels[task.status] || task.status }}</span><small v-if="task.status !== 'completed' && task.phase && phaseLabels[task.phase] !== statusLabels[task.status]">{{ phaseLabels[task.phase] || task.phase }}</small></td>
       <td data-label="文件"><strong>{{ task.file_count || 0 }}</strong><span>个媒体文件</span></td>
-      <td data-label="最近状态"><details v-if="task.error_message" class="task-error-detail"><summary>{{ task.error_message }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_code">错误代码：{{ task.error_code }}</small><button class="text-button" @click="copyLog(task)">复制任务日志</button></details><span v-else>{{ task.last_log_line || (task.status === 'completed' ? '文件已保存' : '等待更新') }}</span></td>
+      <td data-label="最近状态"><IssueDetail v-if="task.error_message" :message="task.error_message" :code="task.error_code || ''" /><details v-else-if="task.last_log_line && task.status !== 'completed'" class="issue-detail"><summary>最近执行日志</summary><pre class="diagnostic-preview">{{ task.last_log_line }}</pre></details></td>
       <td data-label="操作"><div class="row-actions"><button v-if="task.preview_count" class="icon-btn" :aria-label="`预览任务 ${task.id}`" title="预览" @click="preview(task)"><Eye :size="17" /></button><button class="icon-btn" :aria-label="`复制任务 ${task.id} 日志`" title="复制日志" @click="copyLog(task)"><FileText :size="17" /></button><button v-if="['pending','downloading'].includes(task.status)" class="icon-btn" :aria-label="`取消任务 ${task.id}`" title="取消" @click="action(task, 'cancel')"><Ban :size="17" /></button><button v-if="['failed','cancelled'].includes(task.status)" class="icon-btn" :aria-label="`重试任务 ${task.id}`" title="重试" @click="action(task, 'retry')"><RotateCcw :size="17" /></button><button class="icon-btn danger" :aria-label="`删除任务 ${task.id}`" title="删除记录" @click="remove(task)"><Trash2 :size="17" /></button></div></td>
     </tr></tbody></table><div v-if="!tasks.length && !loadError" class="empty-state"><strong>暂无 {{ platformName }} 下载任务</strong></div></div>
     <Pager v-if="!loadError || tasks.length" :page="page" :pages="pages" :total="total" @change="page = $event" />

@@ -7,6 +7,9 @@ import { openMedia } from '../media'
 import { useAppStore } from '../stores/app'
 import type { PageData, Task } from '../types'
 import Pager from '../components/Pager.vue'
+import MoreActions from '../components/MoreActions.vue'
+import FilterToolbar from '../components/FilterToolbar.vue'
+import IssueDetail from '../components/IssueDetail.vue'
 
 const store = useAppStore()
 const router = useRouter()
@@ -128,36 +131,36 @@ onBeforeUnmount(() => { clearInterval(timer.value); if (queryTimer.value != null
     <header class="workspace-header">
       <div><h2>抖音任务</h2><span>专项队列、进度和失败诊断；跨平台任务请使用“全部任务”。</span></div>
       <div class="header-actions">
-        <button v-if="total && (status === 'failed' || failedCount)" class="btn ghost" @click="copyErrors"><Clipboard :size="16" />复制所有失败原因</button>
+        <button v-if="total && (status === 'failed' || failedCount)" class="btn ghost" aria-label="复制所有失败原因" @click="copyErrors"><Clipboard :size="16" /><span class="button-label">复制所有失败原因</span></button>
         <button class="btn ghost" @click="load()"><RefreshCw :size="16" />刷新</button>
-        <details class="menu"><summary class="btn ghost"><MoreHorizontal :size="18" />批量操作</summary><div class="menu-popover">
+        <MoreActions label="抖音队列批量操作">
           <button :disabled="bulkBusy" @click="bulk('pause-all', '确定暂停全部等待中和下载中的任务？')"><Pause :size="15" />全部暂停</button>
           <button :disabled="bulkBusy" @click="bulk('redispatch-pending')"><Play :size="15" />分发待处理</button>
           <button :disabled="bulkBusy" @click="bulk('retry-all-failed')"><RotateCcw :size="15" />重试失败</button>
           <button :disabled="bulkBusy" @click="bulk('refresh-retry-all-failed')"><RefreshCw :size="15" />{{ bulkBusy ? '正在提交…' : '刷新链接后重试' }}</button>
-        </div></details>
+        </MoreActions>
       </div>
     </header>
-    <div v-if="loadError" class="load-error-banner" role="alert">抖音任务暂不可用：{{ loadError }}{{ tasks.length ? '；下方为上次读取的结果。' : '' }}<button class="text-button" @click="load()">重试</button></div>
+    <div v-if="loadError" class="load-error-banner" role="alert"><IssueDetail :message="loadError" impact="当前数据读取失败；下方如有列表，为上次读取的结果。" /><button class="text-button" @click="load()">重试</button></div>
 
     <form class="command-bar" @submit.prevent="createTask">
       <Download :size="18" /><input v-model="shareUrl" aria-label="抖音作者主页或单个作品分享链接" placeholder="粘贴作者主页或单个作品分享链接…" autocomplete="off" /><button class="btn primary" :disabled="store.risk.active || createBusy">{{ createBusy ? '正在提交…' : '开始下载' }}</button>
     </form>
 
-    <div class="filter-row">
+    <FilterToolbar :active="status ? '任务状态已筛选' : ''" @clear="status = ''; page = 1"><template #search><label class="search compact-search"><Search :size="15" /><input v-model="query" aria-label="搜索抖音任务" placeholder="搜索全部任务、作品或作者" /></label></template>
       <nav class="segmented"><button v-for="item in statuses" :key="item[0]" :class="{ active: status === item[0] }" @click="setStatus(item[0])">{{ item[1] }} <small>{{ loadError && !tasks.length ? '—' : statusCount(item[0]) }}</small></button></nav>
-      <label class="search compact-search"><Search :size="15" /><input v-model="query" aria-label="搜索抖音任务" placeholder="搜索全部任务、作品或作者" /></label>
-    </div>
+
+    </FilterToolbar>
 
     <div class="table-shell" :class="{ loading }">
-      <table class="data-table task-table">
+      <table class="data-table task-table special-task-table">
         <thead><tr><th>任务</th><th>状态与进度</th><th>传输</th><th>时间</th><th class="actions-col">操作</th></tr></thead>
         <tbody>
           <tr v-for="task in tasks" :key="task.id">
-            <td data-label="任务"><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><details v-if="task.error_message" class="task-error-detail"><summary>{{ task.status === 'skipped' ? '查看跳过原因' : '查看失败原因' }}</summary><p>{{ task.error_message }}</p><small v-if="task.error_action">建议：{{ task.error_action }}</small><button class="text-button" @click="copyTaskError(task)">复制诊断</button></details></div></div></td>
-            <td data-label="状态与进度"><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b>{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div></td>
-            <td data-label="传输"><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span>{{ transferLabel(task) }}</span></td>
-            <td data-label="时间"><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>
+            <td data-label="任务"><div class="media-cell"><span class="media-icon">{{ task.work_type === 'images' ? 'IMG' : 'VID' }}</span><div><strong :title="task.file_name || task.work_title">{{ task.file_name || task.work_title || `任务 #${task.id}` }}</strong><span>{{ task.author_nickname || '未知作者' }} · #{{ task.id }}</span><IssueDetail v-if="task.error_message" :message="task.error_message" :code="task.error_code || ''" /></div></div></td>
+            <td data-label="状态与进度"><div class="status-line"><span class="status" :data-tone="task.status">{{ statusLabel(task.status) }}</span><b v-if="task.status === 'downloading'">{{ Number(task.progress_percent || 0).toFixed(1) }}%</b></div><div v-if="task.status === 'downloading'" class="progress"><i :style="{ width: `${Math.min(100, task.progress_percent || 0)}%` }" /></div></td>
+            <td data-label="传输"><strong>{{ bytes(task.downloaded_bytes) }} / {{ bytes(task.total_bytes) }}</strong><span v-if="task.status === 'downloading'">{{ transferLabel(task) }}</span></td>
+            <td class="task-timestamp" data-label="时间"><span>{{ new Date(task.created_at).toLocaleDateString() }}</span><small>{{ new Date(task.created_at).toLocaleTimeString() }}</small></td>
             <td data-label="操作"><div class="row-actions">
               <button v-if="task.preview_url" class="icon-btn" title="预览" :aria-label="`预览任务 ${task.id}`" @click="preview(task)"><Eye :size="17" /></button>
                <button v-if="task.status === 'downloading' || task.status === 'pending'" class="icon-btn" title="暂停" :aria-label="`暂停任务 ${task.id}`" :disabled="busyTaskIds.has(task.id)" @click="action(task, 'pause')"><Pause :size="17" /></button>

@@ -8,6 +8,7 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from 'vue-router'
 import { api, jsonBody, saveToken } from '../api'
 import { focusFirst, restoreFocus, trapFocus } from '../focus'
 import { useAppStore } from '../stores/app'
+import IssueDetail from '../components/IssueDetail.vue'
 import {
   assignedEnvKeys, maintenanceNavigation, maintenancePages, platformCredentials,
   sectionPath, settingsNavigation, settingsPages, type SettingsFieldSection,
@@ -736,7 +737,7 @@ watch(activeGroupId, groupId => {
 onMounted(() => {
   void refreshQueueChange()
   queueChangeTimer = window.setInterval(() => { if (!document.hidden) void refreshQueueChange() }, 10_000)
-  mobileQuery = window.matchMedia('(max-width: 900px)')
+  mobileQuery = window.matchMedia('(max-width: 899px)')
   updateViewport()
   mobileQuery.addEventListener('change', updateViewport)
   window.addEventListener('keydown', handleGlobalKeydown)
@@ -754,16 +755,6 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="workspace-card config-workspace">
-    <header class="workspace-header config-shell-header">
-      <div>
-        <h2>{{ props.mode === 'maintenance' ? '运行维护' : '设置' }}</h2>
-        <span>{{ props.mode === 'maintenance' ? '核对服务状态、存储与诊断证据；维护动作始终由你确认。' : '所有网页配置保存后动态生效，敏感值留空表示保持不变。' }}</span>
-      </div>
-      <button ref="directoryTrigger" class="btn ghost directory-trigger" type="button" aria-haspopup="dialog" :aria-expanded="directoryOpen" @click="openDirectory">
-        <Menu :size="16" />{{ props.mode === 'maintenance' ? '维护目录' : '设置目录' }}
-      </button>
-    </header>
-
     <div class="config-layout">
       <button v-if="directoryOpen && mobileViewport" class="directory-backdrop" type="button" aria-label="关闭目录" @click="closeDirectory" />
       <aside
@@ -815,11 +806,14 @@ onBeforeUnmount(() => {
         </nav>
       </aside>
 
-      <main class="config-content">
+      <section class="config-content" :inert="directoryOpen && mobileViewport" :aria-hidden="directoryOpen && mobileViewport ? 'true' : undefined">
         <header class="config-page-bar">
+      <button ref="directoryTrigger" class="icon-btn directory-trigger" type="button" aria-haspopup="dialog" aria-label="打开设置或维护目录" :aria-expanded="directoryOpen" @click="openDirectory">
+        <Menu :size="16" /><span class="sr-only">设置目录</span>
+      </button>
           <div>
             <span>{{ navigation.find(group => group.id === activeGroupId)?.label }}</span>
-            <strong>{{ activePage.title }}</strong>
+            <h2>{{ activePage.title }}</h2>
           </div>
           <div class="page-actions">
             <span v-if="hasActiveChanges" class="dirty-indicator" role="status">{{ activeDirtyCount }} 项未保存</span>
@@ -835,10 +829,10 @@ onBeforeUnmount(() => {
 
         <div class="config-page">
           <header class="config-page-intro">
-            <h3>{{ activePage.title }}</h3>
+
             <p>{{ activePage.description }}</p>
           </header>
-          <p v-if="saveError" class="config-alert" role="alert">{{ saveError }}</p>
+          <div v-if="saveError" class="config-alert" role="alert"><IssueDetail :message="saveError" /></div>
           <p v-if="configurationFeedback && props.mode === 'settings'" class="maintenance-note" role="status">{{ configurationFeedback }}</p>
           <div v-if="queueChange.pending || queueChange.state === 'failed'" class="config-alert" :data-tone="queueChange.state" role="status"><span>{{ queueChange.message }}</span><button v-if="queueChange.pending" class="btn ghost compact" @click="cancelQueueChange">撤回待生效变更</button></div>
 
@@ -1044,15 +1038,15 @@ onBeforeUnmount(() => {
                 <p v-if="lastStorageRepair?.status === 'partial'" class="config-alert" role="status">维护部分完成：{{ lastStorageRepair.errors || 0 }} 项处理失败。{{ lastStorageRepair.verification_error ? '复检失败：' + lastStorageRepair.verification_error : '请查看剩余原因和维护清单。' }}</p>
                 <details v-if="lastStorageRepair?.failure_details?.length || lastStorageRepair?.apply_errors?.length || lastStorageRepair?.skipped_reasons" class="diagnostic-box"><summary>处理失败与剩余原因</summary><pre>{{ JSON.stringify({ failures: lastStorageRepair.failure_details || lastStorageRepair.apply_errors, skipped: lastStorageRepair.skipped_reasons, remaining: lastStorageRepair.remaining_counts }, null, 2) }}</pre></details>
                 <section class="setting-section"><header><div><h4>可恢复维护清单</h4><p>逐批记录隔离位置与结果；恢复前必须预演，不覆盖已有文件。</p></div><button class="btn ghost compact" @click="loadStorageJournals">刷新清单</button></header>
-                  <article v-for="journal in storageJournals" :key="journal.id" class="setting-field-row">
+                  <details v-for="journal in storageJournals" :key="journal.id" class="journal-row">
+                    <summary>{{ journal.id }} · {{ journal.read_error ? '清单不可读取' : journal.state || '历史维护记录（旧版）' }} · {{ journal.moved?.length || 0 }} 个隔离项</summary><div class="journal-body">
                     <div>
-                      <strong>{{ journal.id }} · {{ journal.read_error ? '清单不可读取' : journal.state || '历史维护记录（旧版）' }}</strong>
                       <p>{{ journal.path || `${journal.root}/.quarantine/storage-maintenance/${journal.id}` }}</p>
                       <p v-if="journal.read_error" role="alert">{{ journal.message }}（{{ journal.read_error }}）</p>
                       <details class="diagnostic-box"><summary>查看逐项结果</summary><pre>{{ JSON.stringify({ read_error: journal.read_error, message: journal.message, plan: journal.plan, moved: journal.moved, errors: journal.apply_errors, restored: journal.restore_result }, null, 2) }}</pre></details>
                     </div>
                     <button class="btn ghost compact" :disabled="storageRestoreBusy || !journal.moved?.length" @click="restoreStorage(journal.id)">预演恢复</button>
-                  </article>
+                  </div></details>
                   <div v-if="storageRestorePreview" class="maintenance-note"><strong>允许恢复 {{ storageRestorePreview.items.filter((item: any) => item.eligible).length }} / {{ storageRestorePreview.items.length }} 项</strong><pre>{{ JSON.stringify(storageRestorePreview.items, null, 2) }}</pre><button class="btn ghost" :disabled="storageRestoreBusy || storageRestorePreview.dry_run === false || !storageRestorePreview.items.some((item: any) => item.eligible)" @click="restoreStorage(storageRestorePreview.journalId, true)">确认恢复</button></div>
                   <p v-if="!storageJournals.length">暂无维护清单。</p>
                 </section>
@@ -1103,15 +1097,14 @@ onBeforeUnmount(() => {
             </section>
           </template>
         </div>
-      </main>
+      </section>
     </div>
   </section>
 </template>
 
 <style scoped>
 .config-workspace { min-height: calc(100dvh - 102px); }
-.config-shell-header { min-height: 96px; }
-.directory-trigger { display: none; margin-left: auto; }
+.directory-trigger { display: none; }
 .config-layout { min-height: 0; flex: 1; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
 .config-directory { min-width: 0; padding: 19px 12px; border-right: 1px solid var(--line); background: var(--surface-2); }
 .directory-mobile-header { display: none; }
@@ -1127,17 +1120,17 @@ onBeforeUnmount(() => {
 .directory-children button:hover { color: var(--text); background: var(--surface-3); }
 .directory-children button.active { color: var(--accent); background: var(--accent-soft); font-weight: 700; }
 .config-content { min-width: 0; background: var(--surface); }
-.config-page-bar { position: sticky; z-index: 12; top: 0; min-height: 70px; padding: 12px 24px; display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(12px); }
-.config-page-bar > div:first-child { display: grid; gap: 3px; }
-.config-page-bar > div:first-child span { color: var(--muted); font-size: 11px; }
-.config-page-bar > div:first-child strong { font-size: 15px; }
+.config-page-bar { position: sticky; z-index: 12; top: 0; min-height: 70px; padding: 12px 24px; display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.config-page-bar > div:not(.page-actions) { display: grid; gap: 3px; }
+.config-page-bar > div:not(.page-actions) span { color: var(--muted); font-size: 12px; }
+.config-page-bar > div:not(.page-actions) strong { font-size: 15px; }
 .page-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
-.dirty-indicator { color: var(--amber); font-size: 11px; font-weight: 700; }
-.config-page { width: min(100%, 1120px); padding: 30px 34px 52px; }
-.config-page-intro { margin-bottom: 30px; }
+.dirty-indicator { color: var(--amber); font-size: 12px; font-weight: 700; }
+.config-page { width: min(100%, 1120px); padding: 20px 24px 40px; }
+.config-page-intro { margin-bottom: 20px; }
 .config-page-intro h3 { margin: 0 0 7px; font-size: 24px; letter-spacing: -.025em; }
 .config-page-intro p { max-width: 720px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
-.config-alert { margin: -12px 0 22px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--red) 35%, var(--line)); background: color-mix(in srgb, var(--red) 8%, transparent); color: var(--red); font-size: 12px; line-height: 1.55; }
+.config-alert { margin: 0 0 18px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--red) 35%, var(--line)); background: color-mix(in srgb, var(--red) 8%, transparent); color: var(--red); font-size: 12px; line-height: 1.55; }
 .config-alert[data-tone="draining"] { border-color: var(--line-strong); background: var(--surface-2); color: var(--text); }
 .setting-section { border-top: 1px solid var(--line-strong); }
 .setting-section + .setting-section { margin-top: 34px; }
@@ -1148,8 +1141,8 @@ onBeforeUnmount(() => {
 .setting-row { min-height: 82px; padding: 15px 0; display: grid; grid-template-columns: minmax(220px, .9fr) minmax(310px, 1.1fr); align-items: center; gap: 34px; border-top: 1px solid var(--line); }
 .setting-copy { min-width: 0; display: grid; gap: 5px; }
 .setting-copy strong { display: flex; align-items: center; gap: 7px; font-size: 13px; }
-.setting-copy strong i { padding: 2px 5px; border-radius: 4px; background: var(--surface-3); color: var(--faint); font-size: 9px; font-style: normal; font-weight: 700; }
-.setting-copy small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.setting-copy strong i { padding: 2px 5px; border-radius: 4px; background: var(--surface-3); color: var(--faint); font-size: 12px; font-style: normal; font-weight: 700; }
+.setting-copy small { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .setting-control { min-width: 0; display: flex; justify-content: flex-end; }
 .setting-control > input, .setting-control > textarea, .setting-control > select { width: min(100%, 540px); }
 .setting-control input, .setting-control textarea { min-width: 0; padding: 10px 11px; outline: 0; font-size: 13px; }
@@ -1161,13 +1154,13 @@ onBeforeUnmount(() => {
 .choice-button { min-height: 36px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 680; cursor: pointer; }
 .choice-button.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); color: var(--accent); }
 .notification-result { padding: 12px 0; display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); }
-.notification-result span { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 11px; }
+.notification-result span { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; }
 .notification-result strong { margin-right: 6px; color: var(--text); }
 .account-page, .archive-page, .maintenance-page { display: grid; gap: 34px; }
 .account-summary { min-height: 82px; padding: 15px 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line); }
 .account-summary > div { display: grid; gap: 4px; }
 .account-summary strong { font-size: 14px; }
-.account-summary p { margin: 0; color: var(--muted); font-size: 11px; }
+.account-summary p { margin: 0; color: var(--muted); font-size: 12px; }
 .capability-note { padding: 14px 0; display: flex; align-items: flex-start; gap: 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--accent); }
 .capability-note p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .fact-list { margin: 0; border-bottom: 1px solid var(--line); }
@@ -1178,50 +1171,50 @@ onBeforeUnmount(() => {
 .status-row { min-height: 66px; padding: 12px 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; border-top: 1px solid var(--line); }
 .status-row > span:nth-child(2) { display: grid; gap: 4px; }
 .status-row strong { font-size: 13px; }
-.status-row small { color: var(--muted); font-size: 11px; }
-.status-row > b { color: var(--red); font-size: 11px; }
+.status-row small { color: var(--muted); font-size: 12px; }
+.status-row > b { color: var(--red); font-size: 12px; }
 .status-row > b.good { color: var(--green); }
 .row-buttons, .storage-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .platform-table { border-top: 1px solid var(--line); }
 .platform-table-head, .platform-table-row { display: grid; grid-template-columns: .6fr 1fr 1.15fr 1.15fr; gap: 18px; }
-.platform-table-head { min-height: 42px; align-items: center; color: var(--faint); border-bottom: 1px solid var(--line); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.platform-table-head { min-height: 42px; align-items: center; color: var(--faint); border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
 .platform-table-row { min-height: 86px; padding: 15px 0; align-items: start; border-bottom: 1px solid var(--line); }
 .platform-table-row > span { display: grid; gap: 5px; }
 .platform-table-row strong { font-size: 12px; }
-.platform-table-row small { color: var(--muted); font-size: 10px; line-height: 1.5; }
-.platform-table-row ul { grid-column: 2 / -1; margin: -2px 0 0; padding-left: 18px; color: var(--amber); font-size: 10px; }
+.platform-table-row small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.platform-table-row ul { grid-column: 2 / -1; margin: -2px 0 0; padding-left: 18px; color: var(--amber); font-size: 12px; }
 .storage-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .storage-metrics > div { min-height: 85px; padding: 15px 13px; display: grid; align-content: center; gap: 6px; }
 .storage-metrics > div + div { border-left: 1px solid var(--line); }
 .storage-metrics b { font-size: 20px; letter-spacing: -.03em; }
-.storage-metrics span { color: var(--muted); font-size: 10px; }
+.storage-metrics span { color: var(--muted); font-size: 12px; }
 .storage-actions { padding: 15px 0; border-bottom: 1px solid var(--line); }
-.maintenance-note { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.maintenance-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .diagnostic-box { margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; background: #0b0e11; color: #c5cbd0; }
-.diagnostic-box summary { padding: 11px 13px; cursor: pointer; font-size: 11px; font-weight: 700; }
-.diagnostic-box pre, pre.diagnostic-box { max-height: 420px; margin: 0; padding: 13px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; line-height: 1.55; }
+.diagnostic-box summary { padding: 11px 13px; cursor: pointer; font-size: 12px; font-weight: 700; }
+.diagnostic-box pre, pre.diagnostic-box { max-height: 420px; margin: 0; padding: 13px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.55; }
 .log-filters { padding: 10px 0; display: flex; gap: 5px; border-top: 1px solid var(--line); }
-.log-filters button { min-height: 31px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font-size: 10px; cursor: pointer; }
+.log-filters button { min-height: 31px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
 .log-filters button.active { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .log-console { max-height: 640px; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #0b0e11; color: #c5cbd0; }
-.log-console article { padding: 8px 9px; display: grid; grid-template-columns: 156px 110px minmax(0, 1fr); gap: 8px; border-left: 1px solid var(--blue); font-size: 10px; }
+.log-console article { padding: 8px 9px; display: grid; grid-template-columns: 156px 110px minmax(0, 1fr); gap: 8px; border-left: 1px solid var(--blue); font-size: 12px; }
 .log-console article + article { margin-top: 4px; }
 .log-console article[data-level="warning"] { border-color: var(--amber); }
 .log-console article[data-level="error"] { border-color: var(--red); }
-.log-console time { color: #778189; }
+.log-console time { color: #c5cbd0; }
 .log-console b { color: #93a0ff; }
-.log-console small { grid-column: 3; color: #89939a; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-console small { grid-column: 3; color: #c5cbd0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .directory-backdrop { display: none; }
 
 @media (max-width: 1120px) {
   .config-layout { grid-template-columns: 208px minmax(0, 1fr); }
   .config-page { padding-inline: 25px; }
-  .setting-row { grid-template-columns: minmax(190px, .8fr) minmax(280px, 1.2fr); gap: 24px; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .storage-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .storage-metrics > div:nth-child(4) { border-left: 0; border-top: 1px solid var(--line); }
   .storage-metrics > div:nth-child(5), .storage-metrics > div:nth-child(6) { border-top: 1px solid var(--line); }
 }
-@media (max-width: 900px) {
+@media (max-width: 899px) {
   .directory-trigger { display: inline-flex; }
   .config-layout { display: block; }
   .config-directory { position: fixed; z-index: 410; inset: 0 auto 0 0; width: min(320px, calc(100vw - 48px)); padding: 0 13px 24px; overflow-y: auto; border-right: 1px solid var(--line-strong); background: var(--surface); box-shadow: var(--shadow); transform: translateX(-104%); transition: transform .2s ease; }
@@ -1234,15 +1227,15 @@ onBeforeUnmount(() => {
   .platform-table-row ul { grid-column: 1 / -1; }
 }
 @media (max-width: 680px) {
-  .config-shell-header { min-height: 86px; align-items: center; flex-direction: row; }
-  .config-shell-header > div { min-width: 0; }
-  .config-shell-header .directory-trigger { width: auto; margin-left: auto; }
-  .config-page-bar { padding: 11px 14px; align-items: flex-start; flex-direction: column; gap: 10px; }
-  .page-actions { width: 100%; margin-left: 0; justify-content: flex-start; }
-  .page-actions .dirty-indicator { width: 100%; }
+  .config-page-bar { padding: 10px 12px; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .config-page-bar h2 { font-size: 18px; }
+  .config-page-bar > div:not(.page-actions) span { display: none; }
+  .page-actions { width: auto; margin-left: auto; justify-content: flex-end; }
+  .page-actions .btn { padding-inline: 8px; }
+  .page-actions .dirty-indicator { width: auto; }
   .page-actions .btn { flex: 1; }
-  .config-page { padding: 24px 16px 40px; }
-  .config-page-intro { margin-bottom: 23px; }
+  .config-page { padding: 16px 12px 32px; }
+  .config-page-intro { margin-bottom: 16px; }
   .config-page-intro h3 { font-size: 21px; }
   .setting-section + .setting-section, .account-page, .archive-page, .maintenance-page { gap: 28px; }
   .setting-section > header { min-height: 0; padding: 16px 0 13px; flex-direction: column; }

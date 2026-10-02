@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IssueDetail from './components/IssueDetail.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Activity, BookOpen, ChevronLeft, ChevronRight, Download, HardDrive, LayoutDashboard, Layers3, Menu, MoonStar, Settings, Sun, UserRound, Users, X } from '@lucide/vue'
@@ -124,7 +125,7 @@ function updateMobileViewport(event: MediaQueryListEvent | MediaQueryList) {
   if (!event.matches) store.sidebarOpen = false
 }
 onMounted(() => {
-  mobileQuery = window.matchMedia('(max-width: 900px)')
+  mobileQuery = window.matchMedia('(max-width: 899px)')
   updateMobileViewport(mobileQuery)
   mobileQuery.addEventListener('change', updateMobileViewport)
   void init()
@@ -152,8 +153,8 @@ onBeforeUnmount(() => {
   <BootstrapView v-else-if="!bootstrap.ready" :status="bootstrap" />
   <div v-else class="app-shell" :class="{ collapsed, 'mobile-open': store.sidebarOpen }" :inert="authOpen || newDownloadOpen || previewOpen">
     <a class="skip-link" href="#main-content">跳转到主要内容</a>
-    <aside ref="sidebarElement" class="sidebar" aria-label="主导航" :role="mobileNavigationOpen ? 'dialog' : undefined" :aria-modal="mobileNavigationOpen ? 'true' : undefined" :tabindex="mobileNavigationOpen ? -1 : undefined">
-      <header class="brand"><div class="brand-mark"><Download /></div><div><small>MEDIA OPS</small><strong>媒体控制台</strong></div><button class="collapse-btn" :aria-label="mobileViewport ? '关闭导航' : collapsed ? '展开侧栏' : '收起侧栏'" @click="toggleSidebar"><ChevronLeft v-if="mobileViewport || !collapsed" /><ChevronRight v-else /></button></header>
+    <aside ref="sidebarElement" class="sidebar" :inert="mobileViewport && !store.sidebarOpen" :aria-hidden="mobileViewport && !store.sidebarOpen ? 'true' : undefined" aria-label="主导航" :role="mobileNavigationOpen ? 'dialog' : undefined" :aria-modal="mobileNavigationOpen ? 'true' : undefined" :tabindex="mobileNavigationOpen ? -1 : undefined">
+      <header class="brand"><div class="brand-mark"><Download /></div><div><strong>媒体控制台</strong></div><button class="collapse-btn" :aria-label="mobileViewport ? '关闭导航' : collapsed ? '展开侧栏' : '收起侧栏'" @click="toggleSidebar"><ChevronLeft v-if="mobileViewport || !collapsed" /><ChevronRight v-else /></button></header>
       <nav class="main-nav" aria-label="工作区">
         <span class="nav-label">工作区</span>
         <RouterLink to="/dashboard" title="工作台" @click="closeSidebar"><LayoutDashboard /><span>工作台</span></RouterLink>
@@ -176,12 +177,12 @@ onBeforeUnmount(() => {
     <button class="mobile-backdrop" aria-label="关闭导航" @click="dismissSidebar" />
 
     <main id="main-content" class="main-area" tabindex="-1" :inert="mobileNavigationOpen" :aria-hidden="mobileNavigationOpen ? 'true' : undefined">
-      <header class="topbar"><button ref="mobileMenuButton" class="icon-btn mobile-menu" aria-label="打开导航" @click="openSidebar"><Menu /></button><div class="topbar-title"><span>媒体下载管理系统</span><strong>{{ pageTitle }}</strong></div><div class="topbar-actions"><button ref="newDownloadButton" class="btn primary topbar-create" @click="openNewDownload"><Download :size="17" /><span class="create-label-full">新建下载</span><span class="create-label-short">新建</span></button><a class="icon-btn" href="/docs" target="_blank" rel="noopener noreferrer" title="API 文档" aria-label="打开 API 文档"><BookOpen /></a><button class="profile-button" title="管理凭据" aria-label="管理凭据" @click="openAuth"><UserRound /></button></div></header>
+      <header class="topbar"><button ref="mobileMenuButton" class="icon-btn mobile-menu" aria-label="打开导航" @click="openSidebar"><Menu /></button><div class="topbar-title"><strong>媒体控制台</strong><span class="sr-only">{{ pageTitle }}</span></div><div class="topbar-actions"><button ref="newDownloadButton" class="btn primary topbar-create" @click="openNewDownload"><Download :size="17" /><span class="create-label-full">新建下载</span><span class="create-label-short">新建</span></button><a class="icon-btn" href="/docs" target="_blank" rel="noopener noreferrer" title="API 文档" aria-label="打开 API 文档"><BookOpen /></a><button class="profile-button" title="管理凭据" aria-label="管理凭据" @click="openAuth"><UserRound /></button></div></header>
       <RiskBanner v-if="route.path !== '/dashboard'" />
       <RouterView />
     </main>
 
-    <Transition name="toast"><div v-if="store.toast" class="toast" :data-tone="store.toast.tone" role="status">{{ store.toast.message }}</div></Transition>
+    <Transition name="toast"><div v-if="store.toast" class="toast" :data-tone="store.toast.tone" :role="store.toast.tone === 'error' ? 'alert' : 'status'"><IssueDetail v-if="store.toast.tone === 'error'" :message="store.toast.message" /><span v-else>{{ store.toast.message }}</span><button class="icon-btn" aria-label="关闭通知" @click="store.toast = null"><X :size="16" /></button></div></Transition>
     <MediaLightbox :open="previewOpen" :items="previewItems" :start="previewStart" @close="previewOpen = false; previewItems = []" />
     <Teleport to="body"><NewDownloadPanel v-if="newDownloadOpen" @close="closeNewDownload" /></Teleport>
     <Teleport to="body"><div v-if="authOpen" class="auth-overlay" @click.self="closeAuth"><form ref="authDialog" class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title" tabindex="-1" @submit.prevent="login"><button type="button" class="icon-btn close" aria-label="关闭" @click="closeAuth"><X /></button><div class="brand-mark"><UserRound /></div><h2 id="auth-title">输入管理 Token</h2><p>Token 只保存在当前浏览器，并通过 Authorization 请求头发送。</p><label for="admin-token">管理 Token</label><input id="admin-token" ref="authInput" v-model="token" type="password" autocomplete="off" placeholder="Bearer Token" /><button class="btn primary">登录并继续</button></form></div></Teleport>

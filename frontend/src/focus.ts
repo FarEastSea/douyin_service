@@ -1,5 +1,6 @@
 const focusableSelector = [
   'a[href]',
+  'summary',
   'button:not([disabled])',
   'input:not([disabled])',
   'select:not([disabled])',
@@ -12,7 +13,7 @@ const focusableSelector = [
 export function focusableElements(container: HTMLElement | null) {
   if (!container) return []
   return [...container.querySelectorAll<HTMLElement>(focusableSelector)]
-    .filter(element => !element.hasAttribute('inert') && element.getClientRects().length > 0)
+    .filter(element => !element.closest('[inert]') && element.getClientRects().length > 0)
 }
 
 export function focusFirst(container: HTMLElement | null, preferred?: HTMLElement | null) {

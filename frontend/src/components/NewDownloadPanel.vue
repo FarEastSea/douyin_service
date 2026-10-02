@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowRight, CircleCheck, Link2, Search, X } from '@lucide/vue'
 import { api, jsonBody } from '../api'
+import IssueDetail from './IssueDetail.vue'
 import { focusFirst, trapFocus } from '../focus'
 import { useAppStore } from '../stores/app'
 import type { MediaPlatform } from '../types'
@@ -126,7 +127,7 @@ onBeforeUnmount(() => { identifySequence++; document.body.classList.remove('moda
           <button v-if="platformId && !identified" class="text-button" @click="confirmPlatform">确认选择 {{ selected?.name || '该平台' }}</button>
         </div>
         <div v-if="identified && selected" class="source-confirmed" role="status"><CircleCheck :size="19" /><span><strong>来源已确认：{{ selected.name }}{{ inputKind === 'author' ? ' · 作者主页' : inputKind === 'work' ? ' · 单条作品' : '' }}</strong><small>{{ platformId === 'xhs' ? '小红书当前仅支持单条笔记，不支持作者主页批量采集。' : '提交后会显示在全部任务中；如需调整来源，请重新识别。' }}</small></span></div>
-        <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+        <div v-if="error" class="form-error" role="alert"><IssueDetail :message="error" impact="来源尚未提交，请核对输入后重试。" /></div>
       </div>
       <footer><button class="btn ghost" :disabled="submitting" @click="close">取消</button><button class="btn primary" :disabled="!identified || submitting || (platformId === 'xhs' && inputKind === 'author')" @click="submit">{{ submitting ? '正在提交…' : '确认提交' }}<ArrowRight :size="17" /></button></footer>
     </section>
