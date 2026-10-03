@@ -47,6 +47,7 @@ from app.services.archive_rules import (
 )
 from app.services.work_manager import recalc_author_counts
 from app.services.work_metadata import apply_work_payload
+from app.services.work_factory import ensure_work_async
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.download_lifecycle import prepare_download_retry
 from app.services.douyin_account import get_request_context
@@ -366,22 +367,8 @@ async def _handle_single_work(
         author.share_url = author_info.get("profile_url") or build_author_profile_url(sec_uid) or author.share_url
 
     aweme_id = work_info["aweme_id"]
-    result = await db.execute(select(Work).where(Work.aweme_id == aweme_id))
-    work = result.scalar_one_or_none()
-
-    if not work:
-        work = Work(
-            aweme_id=aweme_id,
-            author_id=author.id,
-            title=work_info.get("desc", ""),
-            work_type="video",
-        )
-        apply_work_payload(db, work, work_info)
-        db.add(work)
-        await db.flush()
-    else:
-        # 更新已存在作品的 URL（抖音 URL 会过期）
-        apply_work_payload(db, work, work_info, preserve_existing=True)
+    work, created = await ensure_work_async(db, aweme_id, author.id)
+    apply_work_payload(db, work, work_info, preserve_existing=not created)
 
     archive_rules = await get_archive_rules(db)
     matches, reason = work_matches_archive_rules(work, archive_rules)
@@ -415,6 +402,8 @@ async def _handle_single_work(
                 work.is_downloaded = False
 
     await recalc_author_counts(db, author)
+    if work.author_id != author.id:
+        await recalc_author_counts(db, await db.get(Author, work.author_id))
     await db.commit()
 
     all_task_ids = created_task_ids + reused_task_ids

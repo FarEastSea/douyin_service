@@ -13,6 +13,7 @@ from celery import shared_task, current_task
 from celery.exceptions import SoftTimeLimitExceeded
 from datetime import datetime, timedelta
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 import time
 import logging
@@ -46,6 +47,7 @@ from app.services.download_lifecycle import (
 )
 from app.services.work_manager import recalc_author_counts_sync, refresh_work_download_state_sync
 from app.services.work_metadata import apply_work_payload
+from app.services.work_factory import ensure_work_sync
 from app.services.douyin_account import get_request_context_sync
 from app.services.douyin_errors import DouyinRequestError
 from app.services.douyin_source import (
@@ -254,24 +256,6 @@ def _select_latest_work(work_list: list) -> dict | None:
     return work_list[0]
 
 
-def _detect_new_works(db: Session, author_id: int, work_list: list) -> list:
-    """
-    基于数据库已存在的作品判断哪些是新作品。
-
-    不再依赖 last_aweme_id 的位置匹配（会被置顶作品破坏），而是直接对比
-    数据库里该作者已记录的 aweme_id 集合，凡是没入库的都算新作品。
-    """
-    if not work_list:
-        return []
-
-    existing_ids = set(
-        db.execute(
-            select(Work.aweme_id).where(Work.author_id == author_id)
-        ).scalars().all()
-    )
-    return [item for item in work_list if str(item["aweme_id"]) not in existing_ids]
-
-
 def _known_work_ids(db: Session, author_id: int) -> set[str]:
     return {
         str(value)
@@ -421,8 +405,10 @@ def _queue_scanned_works(
     if "" in payloads:
         raise ValueError("扫描结果缺少 aweme_id")
     known_works = {str(work.aweme_id): work for work in db.scalars(select(Work).where(
-        Work.author_id == author.id, Work.aweme_id.in_(list(payloads)),
+        Work.aweme_id.in_(list(payloads)),
     )).all()}
+    affected_author_ids = {author.id}
+    persisted_aweme_ids = []
     existing_indices: dict[int, set[int]] = {}
     if known_works:
         for work_id, file_index in db.execute(select(DownloadTask.work_id, DownloadTask.file_index).where(
@@ -433,17 +419,18 @@ def _queue_scanned_works(
         aweme_id = str(item.get("aweme_id") or "")
         if not aweme_id:
             raise ValueError("扫描结果缺少 aweme_id")
-        work = known_works.get(aweme_id)
-        was_known = work is not None
-        if work is None:
-            work = Work(aweme_id=aweme_id, author_id=author.id,
-                        title=item.get("desc", ""), work_type="video")
-            apply_work_payload(db, work, item)
-            db.add(work)
-            db.flush()
-            persisted_works += 1
-        elif work.is_excluded:
+        work, created = ensure_work_sync(db, aweme_id, author.id)
+        was_known = not created
+        if work.is_excluded:
             continue
+        apply_work_payload(db, work, item, preserve_existing=not created)
+        affected_author_ids.add(work.author_id)
+        if created:
+            persisted_works += 1
+            persisted_aweme_ids.append(aweme_id)
+        elif work.author_id != author.id:
+            logger.warning("扫描作品已属于其他作者，复用原记录: aweme_id=%s, scanned_author_id=%s, stored_author_id=%s",
+                           aweme_id, author.id, work.author_id)
 
         matches, _ = work_matches_archive_rules(work, archive_rules)
         if not matches:
@@ -463,7 +450,8 @@ def _queue_scanned_works(
                 work.is_downloaded = False
                 restored_tasks += int(was_known)
 
-    recalc_author_counts_sync(db, author)
+    for owner_id in sorted(affected_author_ids):
+        recalc_author_counts_sync(db, db.get(Author, owner_id))
     db.commit()
 
     celery_task_ids: list[str] = []
@@ -473,35 +461,12 @@ def _queue_scanned_works(
     db.commit()
     return {
         "persisted_works": persisted_works,
+        "persisted_aweme_ids": persisted_aweme_ids,
         "restored_tasks": restored_tasks,
         "file_tasks": len(task_ids),
         "filtered_works": filtered_works,
         "celery_task_ids": celery_task_ids,
     }
-
-
-def _refresh_scanned_works(db: Session, author_id: int, work_list: list[dict]) -> int:
-    """用本轮已取回的数据批量刷新已入库作品，避免逐条查询和覆盖统计历史。"""
-    payloads = {
-        str(item.get("aweme_id")): item
-        for item in work_list
-        if item.get("aweme_id")
-    }
-    if not payloads:
-        return 0
-    works = db.execute(
-        select(Work).where(
-            Work.author_id == author_id,
-            Work.aweme_id.in_(list(payloads)),
-        )
-    ).scalars().all()
-    changed_stats = 0
-    for work in works:
-        if apply_work_payload(
-            db, work, payloads[str(work.aweme_id)], preserve_existing=True
-        ):
-            changed_stats += 1
-    return changed_stats
 
 
 def sync_author_profile(author: Author, source: DouyinSource) -> dict:
@@ -1181,6 +1146,7 @@ def download_author_works(self, author_id: int, start_index: int = 1,
                     "status_label": profile_result.get("account_status_label"),
                 }
         except Exception as profile_error:
+            db.rollback()
             logger.warning(f"作者 {author_id} 资料同步失败，继续作品拉取: {profile_error}")
         
         # 获取作品列表（直接传入 sec_uid，避免冗余请求触发限流）
@@ -1230,6 +1196,7 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         filtered_works = 0
         archive_rules = get_archive_rules_sync(db)
         archive_snapshot = serialize_archive_rules(archive_rules)
+        affected_author_ids = {author_id}
         
         # 处理每个作品
         for idx, item in enumerate(work_list[start_index - 1:], start=start_index):
@@ -1239,32 +1206,13 @@ def download_author_works(self, author_id: int, start_index: int = 1,
 
             aweme_id = item["aweme_id"]
             
-            # 检查作品是否已存在
-            existing_work = db.execute(
-                select(Work).where(Work.aweme_id == aweme_id)
-            ).scalar_one_or_none()
-            
-            if existing_work:
-                # 已被用户删除（排除）的作品：跳过，避免重新下载
-                if getattr(existing_work, "is_excluded", False):
-                    continue
-                work = existing_work
-                # 刷新 URL、元数据及统计快照；增量模式只跳过后续下载任务创建。
-                apply_work_payload(db, work, item, preserve_existing=True)
-                if download_new_only:
-                    continue
-            else:
-                # 创建新作品记录
-                work = Work(
-                    aweme_id=aweme_id,
-                    author_id=author_id,
-                    title=item.get("desc", ""),
-                    work_type="video",
-                )
-                apply_work_payload(db, work, item)
-                
-                db.add(work)
-                db.flush()
+            work, created = ensure_work_sync(db, aweme_id, author_id)
+            if work.is_excluded:
+                continue
+            apply_work_payload(db, work, item, preserve_existing=not created)
+            affected_author_ids.add(work.author_id)
+            if not created and download_new_only:
+                continue
 
             matches, reason = work_matches_archive_rules(work, archive_rules)
             if not matches:
@@ -1310,7 +1258,8 @@ def download_author_works(self, author_id: int, start_index: int = 1,
             db.rollback()
             return {"success": False, "deleted": True, "error": "作者正在删除"}
 
-        recalc_author_counts_sync(db, author)
+        for owner_id in sorted(affected_author_ids):
+            recalc_author_counts_sync(db, db.get(Author, owner_id))
         db.commit()
         
         # 触发所有下载任务（新建的 + 重用的）
@@ -1374,6 +1323,7 @@ def download_author_works(self, author_id: int, start_index: int = 1,
         return {"success": False, "error": e.user_message, "error_code": e.code}
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)[:200]}"
+        db.rollback()
         logger.error(f"下载作者 {author_id} 作品时出错: {error_msg}\n{traceback.format_exc()}")
         redis_client.append_activity_log("error", "task",
             f"下载作者作品失败: author_id={author_id}",
@@ -1722,12 +1672,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         time.sleep(author_delay)
                     continue
                 
-                # 同一批响应先刷新已知作品的元数据与统计历史，再识别新作品。
-                _refresh_scanned_works(db, author.id, work_list)
-
-                # 检查是否有新作品：以数据库已入库作品为基准，避免置顶作品卡死增量游标
-                new_works = _detect_new_works(db, author.id, work_list)
-
+                # 创建、查重、元数据刷新使用同一全局作品身份；并发竞争也不算新作品。
                 queue_result = _queue_scanned_works(db, author, work_list)
                 if queue_result["persisted_works"] or queue_result["file_tasks"]:
                     results.append({
@@ -1785,11 +1730,12 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         f"发现 {queue_result['persisted_works']} 个新作品，下载任务已提交。",
                         level="info",
                         dedupe_key=f"new-works:{author.id}:" + ",".join(
-                            sorted(str(item["aweme_id"]) for item in new_works)
+                            sorted(queue_result["persisted_aweme_ids"])
                         ),
                     )
                 
             except (SoftTimeLimitExceeded, DouyinScanDeadlineExceeded):
+                db.rollback()
                 # 接近 Celery 软超时：优雅退出。已检查作者的进度都已逐个提交，
                 # 未检查的作者会在下一轮（最久未检查优先）继续处理。
                 stopped_for_timeout = True
@@ -1803,6 +1749,30 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 break
             except Exception as e:
                 error_msg = str(e)
+                # flush/commit 失败后会话已失效，必须先回滚再读取作者或写入报告。
+                db.rollback()
+                if isinstance(e, SQLAlchemyError):
+                    author.last_error = f"作品入库失败：{type(e).__name__}: {error_msg[:800]}"
+                    db.commit()
+                    logger.exception("订阅作品入库失败: author_id=%s", author.id)
+                    results.append({
+                        "author_id": author.id,
+                        "nickname": author.nickname,
+                        "status": "failed",
+                        "error_code": "database_error",
+                        "message": "作品入库失败，当前作者变更已回滚；其余作者继续检查",
+                        "action": "查看数据库诊断；不要重复更新 Cookie",
+                        "error": f"{type(e).__name__}: {error_msg}",
+                    })
+                    redis_client.append_activity_log(
+                        "error", "task", "订阅作品入库失败，已回滚当前作者事务",
+                        f"author_id={author.id}, error={type(e).__name__}: {error_msg[:500]}",
+                        event_code="subscription_database_error",
+                        context={"author_id": author.id, "report_id": report.id},
+                    )
+                    consecutive_rate_limited = 0
+                    consecutive_signature_rejected = 0
+                    continue
 
                 # 上游偶尔会仅拒绝某一次时间敏感签名。下载器已用全新签名有限
                 # 重试；单个作者最终仍失败时先跳过，只有连续多个作者都失败才
