@@ -437,7 +437,7 @@ async def list_authors(
     query = base_query.add_columns(
         func.count(Author.id).over().label("_total")
     ).order_by(Author.created_at.desc(), Author.id.desc())
-    query = query.options(defer(SubscriptionCheckReport.details_json)).offset((page - 1) * page_size).limit(page_size)
+    query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
     rows = result.all()
@@ -896,7 +896,7 @@ async def list_author_works(
         discovered_order = Work.discovered_at.desc() if sort_by == "discovered_desc" else Work.discovered_at.asc()
         id_order = Work.id.desc() if sort_by == "discovered_desc" else Work.id.asc()
         query = query.order_by(discovered_order, id_order)
-    query = query.options(defer(SubscriptionCheckReport.details_json)).offset((page - 1) * page_size).limit(page_size)
+    query = query.offset((page - 1) * page_size).limit(page_size)
     
     result = await db.execute(query)
     works = result.scalars().all()

@@ -469,10 +469,16 @@ xhs_api_url = "http://127.0.0.1:5556" if getattr(settings, "XHS_SERVICE_ENABLED"
 
 def get(path, auth=False):
     request = urllib.request.Request(base + path, headers=headers if auth else {})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        if response.status != 200:
-            raise RuntimeError(f"{path} returned HTTP {response.status}")
-        return response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            if response.status != 200:
+                raise RuntimeError(f"{path} returned HTTP {response.status}")
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        # Preserve readiness's status/body handling while identifying the failing API.
+        raise urllib.error.HTTPError(
+            exc.url, exc.code, f"{path} returned HTTP {exc.code}", exc.headers, exc.fp,
+        ) from exc
 
 last_error = None
 for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
