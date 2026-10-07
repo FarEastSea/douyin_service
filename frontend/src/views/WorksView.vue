@@ -1,175 +1,711 @@
 <script setup lang="ts">
-import IssueDetail from '../components/IssueDetail.vue'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ArrowLeft, CheckSquare, Download, Eye, Image, RefreshCw, Search, TrendingUp, Trash2, X } from '@lucide/vue'
-import { useRoute, useRouter } from 'vue-router'
-import { api } from '../api'
-import { openMedia } from '../media'
-import { focusFirst, restoreFocus, trapFocus } from '../focus'
-import { useAppStore } from '../stores/app'
-import Pager from '../components/Pager.vue'
-import MoreActions from '../components/MoreActions.vue'
-import FilterToolbar from '../components/FilterToolbar.vue'
-import type { Author, MediaItem, PageData, Work } from '../types'
+import PageHeader from "../components/PageHeader.vue";
+import StatusIndicator from "../components/StatusIndicator.vue";
+import StateView from "../components/StateView.vue";
+import InspectorPanel from "../components/InspectorPanel.vue";
+import TrendHistory from "../components/TrendHistory.vue";
+import { confirmAction, dateTime, useContextActions } from "../workspace";
+import IssueDetail from "../components/IssueDetail.vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import {
+  ArrowLeft,
+  CheckSquare,
+  Download,
+  Eye,
+  Image,
+  RefreshCw,
+  Search,
+  TrendingUp,
+  Trash2,
+  X,
+} from "@lucide/vue";
+import { useRoute, useRouter } from "vue-router";
+import { api } from "../api";
+import { openMedia } from "../media";
+import { focusFirst, restoreFocus, trapFocus } from "../focus";
+import { useAppStore } from "../stores/app";
+import Pager from "../components/Pager.vue";
+import MoreActions from "../components/MoreActions.vue";
+import FilterToolbar from "../components/FilterToolbar.vue";
+import type { Author, MediaItem, PageData, Work } from "../types";
 
-const route = useRoute(), router = useRouter(), store = useAppStore()
-type WorkSort = 'published_desc' | 'published_asc' | 'discovered_desc' | 'discovered_asc'
-type DownloadFilter = 'all' | 'completed' | 'incomplete' | 'active' | 'failed' | 'not_started'
-type WorkTypeFilter = 'all' | 'video' | 'images'
-const author = ref<Author>(), works = ref<Work[]>([]), loading = ref(false), filter = ref<DownloadFilter>('all'), search = ref(''), selected = ref<number[]>([])
-const loadError = ref('')
-const failedCovers = ref<Set<number>>(new Set())
-const failedVideoPreviews = ref<Set<number>>(new Set())
-const workType = ref<WorkTypeFilter>('all'), publishedFrom = ref(''), publishedTo = ref('')
-const sort = ref<WorkSort>('published_desc')
-const page = ref(1), pages = ref(1), total = ref(0), pageSize = 30
-const searchTimer = ref<number>()
-const trendWork = ref<Work>(), trendSnapshots = ref<any[]>([]), trendMetric = ref('digg_count'), trendLoading = ref(false)
-const trendDialog = ref<HTMLElement | null>(null)
-let trendReturnFocus: HTMLElement | null = null
-const trendMetrics = [
-  ['digg_count', '点赞'], ['comment_count', '评论'], ['collect_count', '收藏'],
-  ['share_count', '分享'], ['play_count', '播放'],
-]
-const trendSeries = computed(() => [...trendSnapshots.value].reverse().filter(item => item[trendMetric.value] != null))
-const trendSummary = computed(() => {
-  const values = trendSeries.value.map(item => Number(item[trendMetric.value] || 0))
-  const deltas = values.slice(1).map((value, index) => value - values[index])
-  const positives = deltas.filter(value => value > 0).sort((a, b) => a - b)
-  const median = positives.length ? positives[Math.floor(positives.length / 2)] : 0
-  const latestDelta = deltas.at(-1) || 0
-  return { first: values[0] || 0, latest: values.at(-1) || 0, delta: (values.at(-1) || 0) - (values[0] || 0), latestDelta, unusual: positives.length >= 3 && latestDelta > Math.max(100, median * 3) }
-})
-const trendPoints = computed(() => {
-  const values = trendSeries.value.map(item => Number(item[trendMetric.value] || 0))
-  if (!values.length) return ''
-  const min = Math.min(...values), max = Math.max(...values), span = Math.max(1, max - min)
-  return values.map((value, index) => `${values.length === 1 ? 50 : index / (values.length - 1) * 100},${90 - (value - min) / span * 80}`).join(' ')
-})
-const id = Number(route.params.id)
+const route = useRoute(),
+  router = useRouter(),
+  store = useAppStore();
+type WorkSort =
+  "published_desc" | "published_asc" | "discovered_desc" | "discovered_asc";
+type DownloadFilter =
+  "all" | "completed" | "incomplete" | "active" | "failed" | "not_started";
+type WorkTypeFilter = "all" | "video" | "images";
+const author = ref<Author>(),
+  works = ref<Work[]>([]),
+  loading = ref(false),
+  filter = ref<DownloadFilter>("all"),
+  search = ref(""),
+  selected = ref<number[]>([]);
+const loadError = ref("");
+const failedCovers = ref<Set<number>>(new Set());
+const failedVideoPreviews = ref<Set<number>>(new Set());
+const workType = ref<WorkTypeFilter>("all"),
+  publishedFrom = ref(""),
+  publishedTo = ref("");
+const sort = ref<WorkSort>("published_desc");
+const page = ref(1),
+  pages = ref(1),
+  total = ref(0),
+  pageSize = 30;
+const searchTimer = ref<number>();
+const id = computed(() => Number(route.params.id));
+const detailId = computed(() => Number(route.query.work) || 0),
+  detail = ref<Work>(),
+  detailBusy = ref(false),
+  detailError = ref(""),
+  tab = ref("files"),
+  layout = ref("grid");
+let sequence = 0,
+  detailSequence = 0;
+const loaded = ref(false);
+page.value = Number(route.query.page) || 1;
+search.value = String(route.query.q || "");
+filter.value = (route.query.status || "all") as DownloadFilter;
+workType.value = (route.query.type || "all") as WorkTypeFilter;
+sort.value = (route.query.sort || "published_desc") as WorkSort;
+publishedFrom.value = String(route.query.from || "");
+publishedTo.value = String(route.query.to || "");
 async function load() {
-  loading.value = true
-  const params = new URLSearchParams({ paginated: 'true', page: String(page.value), page_size: String(pageSize), sort_by: sort.value })
-  if (filter.value !== 'all') params.set('download_status', filter.value)
-  if (workType.value !== 'all') params.set('work_type', workType.value)
-  if (publishedFrom.value) params.set('published_from', publishedFrom.value)
-  if (publishedTo.value) params.set('published_to', publishedTo.value)
-  if (search.value.trim()) params.set('q', search.value.trim())
+  const current = ++sequence;
+  loading.value = true;
+  const params = new URLSearchParams({
+    paginated: "true",
+    page: String(page.value),
+    page_size: String(pageSize),
+    sort_by: sort.value,
+  });
+  if (filter.value !== "all") params.set("download_status", filter.value);
+  if (workType.value !== "all") params.set("work_type", workType.value);
+  if (publishedFrom.value) params.set("published_from", publishedFrom.value);
+  if (publishedTo.value) params.set("published_to", publishedTo.value);
+  if (search.value.trim()) params.set("q", search.value.trim());
   try {
-    const [authorData, data] = await Promise.all([api<Author>(`/authors/${id}`), api<PageData<Work>>(`/authors/${id}/works?${params}`)])
-    author.value = authorData; works.value = data.items; total.value = data.total; pages.value = data.pages; selected.value = []; failedCovers.value = new Set(); failedVideoPreviews.value = new Set(); loadError.value = ''
+    const [authorData, data] = await Promise.all([
+      api<Author>(`/authors/${id.value}`),
+      api<PageData<Work>>(`/authors/${id.value}/works?${params}`),
+    ]);
+    if (current !== sequence) return;
+    loaded.value = true;
+    author.value = authorData;
+    works.value = data.items;
+    total.value = data.total;
+    pages.value = data.pages;
+    selected.value = [];
+    failedCovers.value = new Set();
+    failedVideoPreviews.value = new Set();
+    loadError.value = "";
+  } catch (error: any) {
+    if (current !== sequence) return;
+    loadError.value = error.message || "加载作品失败";
+    store.notify(loadError.value, "error");
+  } finally {
+    if (current === sequence) loading.value = false;
   }
-  catch (error: any) { loadError.value = error.message || '加载作品失败'; store.notify(loadError.value, 'error') }
-  finally { loading.value = false }
 }
-function changeFilters() { page.value = 1; load() }
-function changeSort() { page.value = 1; load() }
-function changePage(value: number) { page.value = value; load() }
+function changeFilters() {
+  page.value = 1;
+  syncQuery();
+  void load();
+}
+function changeSort() {
+  changeFilters();
+}
+function changePage(value: number) {
+  page.value = value;
+  syncQuery();
+  void load();
+}
 function queueSearch() {
-  if (searchTimer.value != null) window.clearTimeout(searchTimer.value)
-  searchTimer.value = window.setTimeout(() => { page.value = 1; load() }, 350)
+  if (searchTimer.value != null) window.clearTimeout(searchTimer.value);
+  searchTimer.value = window.setTimeout(() => {
+    changeFilters();
+  }, 350);
 }
 function formatWorkTime(value?: string) {
-  if (!value) return '未知'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '未知'
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  })
+  if (!value) return "未知";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未知";
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 function formatCount(value?: number) {
-  if (value == null) return '—'
-  if (value >= 100000000) return `${(value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)}亿`
-  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`
-  return String(value)
+  if (value == null) return "—";
+  if (value >= 100000000)
+    return `${(value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)}亿`;
+  if (value >= 10000)
+    return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
+  return String(value);
 }
 function formatDuration(value?: number) {
-  if (value == null) return ''
-  const seconds = Math.max(0, Math.round(value / 1000))
-  const minutes = Math.floor(seconds / 60)
-  return `${minutes ? `${minutes}:` : ''}${String(seconds % 60).padStart(minutes ? 2 : 1, '0')} 秒`
+  if (value == null) return "";
+  const seconds = Math.max(0, Math.round(value / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes ? `${minutes}:` : ""}${String(seconds % 60).padStart(minutes ? 2 : 1, "0")} 秒`;
 }
 function workSpecs(work: Work) {
-  return [work.width && work.height ? `${work.width}×${work.height}` : '', formatDuration(work.duration_ms)].filter(Boolean).join(' · ')
+  return [
+    work.width && work.height ? `${work.width}×${work.height}` : "",
+    formatDuration(work.duration_ms),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 function hasStats(work: Work) {
-  return [work.digg_count, work.comment_count, work.collect_count, work.share_count, work.play_count].some(value => value != null)
+  return [
+    work.digg_count,
+    work.comment_count,
+    work.collect_count,
+    work.share_count,
+    work.play_count,
+  ].some((value) => value != null);
 }
 function media(work: Work): MediaItem[] {
-  if (work.work_type === 'video') {
-    const file = work.files.find(item => item.local_available && item.preview_url)
-    return file?.preview_url ? [{ url: file.preview_url, type: 'video', title: work.title }] : []
+  if (work.work_type === "video") {
+    const file = work.files.find(
+      (item) => item.local_available && item.preview_url,
+    );
+    return file?.preview_url
+      ? [{ url: file.preview_url, type: "video", title: work.title }]
+      : [];
   }
-  const local = work.files.filter(file => file.preview_url).map(file => ({ url: file.preview_url!, type: file.media_type === 'video' ? 'video' : 'image', title: work.title } as MediaItem))
-  if (local.length) return local
-  return work.image_urls.map(url => ({ url, type: 'image', title: work.title }))
+  const local = work.files
+    .filter((file) => file.preview_url)
+    .map(
+      (file) =>
+        ({
+          url: file.preview_url!,
+          type: file.media_type === "video" ? "video" : "image",
+          title: work.title,
+        }) as MediaItem,
+    );
+  if (local.length) return local;
+  return work.image_urls.map((url) => ({
+    url,
+    type: "image",
+    title: work.title,
+  }));
 }
-function preview(work: Work) { const items = media(work); if (items.length) openMedia(items); else store.notify('当前作品暂无可用预览', 'info') }
-function markCoverFailed(workId: number) { failedCovers.value.add(workId) }
-function markVideoPreviewFailed(workId: number) { failedVideoPreviews.value.add(workId) }
+function preview(work: Work) {
+  const items = media(work);
+  if (items.length) openMedia(items);
+  else store.notify("当前作品暂无可用预览", "info");
+}
+function markCoverFailed(workId: number) {
+  failedCovers.value.add(workId);
+}
+function markVideoPreviewFailed(workId: number) {
+  failedVideoPreviews.value.add(workId);
+}
 function primeVideoPreview(event: Event) {
-  const video = event.currentTarget as HTMLVideoElement
-  if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = Math.min(0.1, video.duration / 2)
+  const video = event.currentTarget as HTMLVideoElement;
+  if (Number.isFinite(video.duration) && video.duration > 0)
+    video.currentTime = Math.min(0.1, video.duration / 2);
 }
-async function workAction(work: Work, endpoint: string, method = 'POST') {
-  try { const result = await api<any>(`/works/${work.id}/${endpoint}`, { method }); store.notify(result.message || '操作成功'); await load() }
-  catch (error: any) { store.notify(error.message || '操作失败', 'error') }
+async function workAction(work: Work, endpoint: string, method = "POST") {
+  try {
+    const result = await api<any>(`/works/${work.id}/${endpoint}`, { method });
+    store.notify(result.message || "操作成功");
+    await load();
+    if (detailId.value === work.id) await loadDetail();
+  } catch (error: any) {
+    store.notify(error.message || "操作失败", "error");
+  }
 }
 async function remove(work: Work) {
-  if (!confirm('确定删除该作品记录及已下载文件？')) return
-  try { await api(`/works/${work.id}`, { method: 'DELETE' }); store.notify('作品已删除'); await load() }
-  catch (error: any) { store.notify(error.message || '删除失败', 'error') }
+  if (!(await confirmAction("确定删除该作品记录及已下载文件？"))) return;
+  try {
+    await api(`/works/${work.id}`, { method: "DELETE" });
+    store.notify("作品已删除");
+    closeDetail();
+    await load();
+  } catch (error: any) {
+    store.notify(error.message || "删除失败", "error");
+  }
 }
 async function batchDelete() {
-  if (!selected.value.length || !confirm(`确定删除选中的 ${selected.value.length} 个作品？`)) return
-  try { const result = await api<any>('/works/batch-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ work_ids: selected.value }) }); store.notify(result.message || '批量删除完成'); selected.value = []; await load() }
-  catch (error: any) { store.notify(error.message || '批量删除失败', 'error') }
+  if (
+    !selected.value.length ||
+    !(await confirmAction(
+      `确定删除选中的 ${selected.value.length} 个作品、关联任务和已下载文件？订阅不会自动重新下载这些作品。`,
+    ))
+  )
+    return;
+  try {
+    const result = await api<any>("/works/batch-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ work_ids: selected.value }),
+    });
+    store.notify(result.message || "批量删除完成");
+    selected.value = [];
+    await load();
+  } catch (error: any) {
+    store.notify(error.message || "批量删除失败", "error");
+  }
 }
-async function showTrend(work: Work) {
-  trendReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-  trendWork.value = work; trendLoading.value = true
-  document.body.classList.add('modal-open')
-  void nextTick(() => focusFirst(trendDialog.value))
-  try { trendSnapshots.value = await api<any[]>(`/works/${work.id}/stats`) }
-  catch (error: any) { trendSnapshots.value = []; store.notify(error.message || '加载统计趋势失败', 'error') }
-  finally { trendLoading.value = false }
+function syncQuery() {
+  void router.replace({
+    query: {
+      ...route.query,
+      page: page.value > 1 ? String(page.value) : undefined,
+      q: search.value || undefined,
+      status: filter.value !== "all" ? filter.value : undefined,
+      type: workType.value !== "all" ? workType.value : undefined,
+      sort: sort.value !== "published_desc" ? sort.value : undefined,
+      from: publishedFrom.value || undefined,
+      to: publishedTo.value || undefined,
+    },
+  });
 }
-function closeTrend() {
-  trendWork.value = undefined
-  document.body.classList.remove('modal-open')
-  const target = trendReturnFocus
-  trendReturnFocus = null
-  void nextTick(() => restoreFocus(target))
+function openDetail(work: Work) {
+  tab.value = "files";
+  void router.replace({ query: { ...route.query, work: String(work.id) } });
 }
-function trendKeydown(event: KeyboardEvent) {
-  if (!trendWork.value) return
-  if (event.key === 'Escape') { event.preventDefault(); closeTrend() }
-  else trapFocus(event, trendDialog.value)
+function closeDetail() {
+  void router.replace({ query: { ...route.query, work: undefined } });
 }
-onMounted(() => { void load(); document.addEventListener('keydown', trendKeydown) })
-onBeforeUnmount(() => { if (searchTimer.value != null) window.clearTimeout(searchTimer.value); document.removeEventListener('keydown', trendKeydown); document.body.classList.remove('modal-open') })
+async function loadDetail() {
+  const current = ++detailSequence;
+  detail.value = undefined;
+  detailError.value = "";
+  if (!detailId.value) return;
+  detailBusy.value = true;
+  try {
+    const data = await api<Work>(`/works/${detailId.value}`);
+    if (current === detailSequence) {
+      if (data.author_id !== id.value) throw new Error("该作品不属于当前作者");
+      detail.value = data;
+    }
+  } catch (e: any) {
+    if (current === detailSequence) detailError.value = e.message;
+  } finally {
+    if (current === detailSequence) detailBusy.value = false;
+  }
+}
+async function removeFile(index: number) {
+  if (!detail.value) return;
+  const workId = detail.value.id;
+  if (
+    !(await confirmAction(
+      `删除作品“${detail.value.title || detail.value.aweme_id}”的第 ${index + 1} 个文件？只删除该文件及关联任务，其他文件保留。后续订阅不会自动重新下载这一项。`,
+      "删除单个文件",
+      "删除文件",
+    ))
+  )
+    return;
+  try {
+    const data = await api<any>(`/works/${workId}/files/${index}`, {
+      method: "DELETE",
+    });
+    store.notify(data.message);
+    await load();
+    await loadDetail();
+  } catch (e: any) {
+    store.notify(e.message, "error");
+  }
+}
+useContextActions(() =>
+  detail.value
+    ? [
+        {
+          id: "preview-current-work",
+          label: "预览当前作品",
+          run: () => preview(detail.value!),
+        },
+        {
+          id: "download-current-work",
+          label: "重新下载当前作品",
+          run: () => workAction(detail.value!, "redownload"),
+          disabled: store.risk.active,
+        },
+      ]
+    : [],
+);
+watch(detailId, loadDetail);
+watch(id, () => {
+  sequence++;
+  detailSequence++;
+  works.value = [];
+  author.value = undefined;
+  selected.value = [];
+  page.value = 1;
+  void load();
+  void loadDetail();
+});
+watch(
+  () => route.query,
+  () => {
+    const next = {
+      page: Number(route.query.page) || 1,
+      q: String(route.query.q || ""),
+      status: String(route.query.status || "all"),
+      type: String(route.query.type || "all"),
+      sort: String(route.query.sort || "published_desc"),
+      from: String(route.query.from || ""),
+      to: String(route.query.to || ""),
+    };
+    if (
+      next.page === page.value &&
+      next.q === search.value &&
+      next.status === filter.value &&
+      next.type === workType.value &&
+      next.sort === sort.value &&
+      next.from === publishedFrom.value &&
+      next.to === publishedTo.value
+    )
+      return;
+    page.value = next.page;
+    search.value = next.q;
+    filter.value = next.status as DownloadFilter;
+    workType.value = next.type as WorkTypeFilter;
+    sort.value = next.sort as WorkSort;
+    publishedFrom.value = next.from;
+    publishedTo.value = next.to;
+    void load();
+  },
+);
+onMounted(() => {
+  void load();
+  void loadDetail();
+});
+onBeforeUnmount(() => {
+  sequence++;
+  detailSequence++;
+  clearTimeout(searchTimer.value);
+});
 </script>
 
 <template>
-  <section class="works-workspace">
-    <header class="works-hero"><button class="icon-btn" aria-label="返回作者列表" @click="router.push('/douyin/authors')"><ArrowLeft /></button><span class="avatar large"><img v-if="author?.avatar_url" :src="`/api/authors/${id}/avatar`" alt="" /></span><div><h2>{{ author?.nickname || '作者作品' }}</h2><span>{{ loadError && !author ? '—' : total }} 个作品 · 当前页 {{ works.filter(w => w.is_downloaded).length }} 个已完成</span></div><div class="header-actions"><button v-if="selected.length" class="btn danger" @click="batchDelete"><Trash2 :size="16" />删除选中 ({{ selected.length }})</button><button class="btn ghost" @click="load"><RefreshCw :size="16" />刷新</button></div></header>
-    <div v-if="loadError" class="load-error-banner" role="alert"><IssueDetail :message="loadError" impact="当前数据读取失败；下方如有列表，为上次读取的结果。" /><button class="text-button" @click="load">重试</button></div>
-    <FilterToolbar :active="[filter !== 'all' && '状态已筛选', workType !== 'all' && '类型已筛选', publishedFrom && '起始日期', publishedTo && '结束日期', sort !== 'published_desc' && '排序已修改'].filter(Boolean).join(' · ')" @clear="filter = 'all'; workType = 'all'; publishedFrom = ''; publishedTo = ''; sort = 'published_desc'; changeFilters()"><template #search><label class="search"><Search :size="16" /><input v-model="search" aria-label="搜索全部作品" placeholder="搜索全部作品" @input="queueSearch" /></label></template><label class="work-sort"><span>状态</span><select v-model="filter" aria-label="下载状态" @change="changeFilters"><option value="all">全部状态</option><option value="completed">已下载</option><option value="incomplete">未完成</option><option value="active">处理中</option><option value="failed">失败/取消</option><option value="not_started">未创建任务</option></select></label><label class="work-sort"><span>类型</span><select v-model="workType" aria-label="作品类型" @change="changeFilters"><option value="all">全部类型</option><option value="video">视频</option><option value="images">图集</option></select></label><label class="work-sort work-date"><span>从</span><input v-model="publishedFrom" type="date" aria-label="发布日期起始" @change="changeFilters" /></label><label class="work-sort work-date"><span>至</span><input v-model="publishedTo" type="date" aria-label="发布日期结束" @change="changeFilters" /></label><label class="work-sort"><span>排序</span><select v-model="sort" aria-label="作品排序方式" @change="changeSort"><option value="published_desc">作品时间：最新</option><option value="published_asc">作品时间：最早</option><option value="discovered_desc">收录时间：最新</option><option value="discovered_asc">收录时间：最早</option></select></label></FilterToolbar>
-    <div class="work-grid" :class="{ loading }">
-      <article v-for="work in works" :key="work.id" class="work-card">
-        <div class="work-cover"><button class="cover-preview" :aria-label="`预览 ${work.title || `作品 ${work.aweme_id}`}`" @click="preview(work)"><img v-if="work.primary_preview_url && !failedCovers.has(work.id)" :src="work.primary_preview_url" alt="" loading="lazy" @error="markCoverFailed(work.id)" /><video v-else-if="work.work_type === 'video' && work.video_url && !failedVideoPreviews.has(work.id)" :src="work.video_url" muted playsinline preload="metadata" aria-hidden="true" @loadedmetadata="primeVideoPreview" @error="markVideoPreviewFailed(work.id)" /><div v-else class="cover-placeholder"><Image :size="34" /><small>封面暂不可用</small></div></button><span>{{ work.work_type === 'images' ? `${work.image_count} 张` : '视频' }}</span><button class="select-box" :class="{ active: selected.includes(work.id) }" :aria-label="`${selected.includes(work.id) ? '取消选择' : '选择'} ${work.title || `作品 ${work.aweme_id}`}`" @click="selected = selected.includes(work.id) ? selected.filter(v => v !== work.id) : [...selected, work.id]"><CheckSquare :size="18" /></button></div>
-        <div class="work-copy">
-          <strong :title="work.title">{{ work.title || `作品 ${work.aweme_id}` }}</strong>
-          <time v-if="work.published_at" :datetime="work.published_at">作品时间：{{ formatWorkTime(work.published_at) }}</time><span v-else>作品时间：未知</span>
-          <span class="work-file-state">{{ work.completed_task_count }}/{{ work.total_task_count }} 个文件 · {{ work.is_downloaded ? '已完成' : '未完成' }}</span>
-          <details class="work-details"><summary>作品详情</summary><div><span v-if="workSpecs(work)">{{ workSpecs(work) }}</span><span v-if="work.hashtags?.length">{{ work.hashtags.join(' · ') }}</span><span v-if="work.music_title">音乐：{{ work.music_title }} · {{ work.music_author }}</span><div v-if="hasStats(work)" class="work-stats"><span>赞 {{ formatCount(work.digg_count) }}</span><span>评 {{ formatCount(work.comment_count) }}</span><span>藏 {{ formatCount(work.collect_count) }}</span><span>转 {{ formatCount(work.share_count) }}</span><span v-if="work.play_count != null">播 {{ formatCount(work.play_count) }}</span></div></div></details>
-        </div>
-        <footer><button class="btn ghost compact" :aria-label="`预览 ${work.title || work.aweme_id}`" @click="preview(work)"><Eye :size="14" />预览</button><MoreActions :label="'作品操作：' + (work.title || work.aweme_id)"><button v-if="hasStats(work)" class="btn ghost compact" @click="showTrend(work)"><TrendingUp :size="14" />趋势</button><button class="btn ghost compact" @click="workAction(work, 'redownload')"><Download :size="14" />重新下载</button><button v-if="work.download_status === 'failed'" class="btn ghost compact" @click="workAction(work, 'retry-failed')"><RefreshCw :size="14" />重试</button><button class="icon-btn danger" :aria-label="`删除 ${work.title || `作品 ${work.aweme_id}`}`" @click="remove(work)"><Trash2 :size="16" /></button></MoreActions></footer>
-      </article>
-      <div v-if="!loading && !works.length && !loadError" class="empty-state wide"><Image /><strong>没有符合条件的作品</strong></div>
+  <section class="workspace-page works-workspace">
+    <RouterLink class="back-link" to="/authors/douyin"
+      ><ArrowLeft :size="14" />作者</RouterLink
+    ><PageHeader
+      :title="author?.nickname || '作者作品'"
+      :description="
+        (loaded ? total.toLocaleString() : '—') + ' 个作品 · 完整浏览与文件管理'
+      "
+      :busy="loading"
+      refreshable
+      @refresh="load"
+      ><div class="segmented-control" aria-label="作品布局">
+        <button :aria-pressed="layout === 'grid'" @click="layout = 'grid'">
+          网格</button
+        ><button :aria-pressed="layout === 'list'" @click="layout = 'list'">
+          列表
+        </button>
+      </div></PageHeader
+    >
+    <div v-if="loadError && works.length" class="load-error-banner">
+      <IssueDetail :message="loadError" impact="显示上次读取的数据。" />
     </div>
-    <Pager v-if="!loadError || works.length" :page="page" :pages="pages" :total="total" @change="changePage" />
-    <Teleport to="body"><div v-if="trendWork" class="trend-overlay" @click.self="closeTrend"><section ref="trendDialog" class="trend-dialog" role="dialog" aria-modal="true" aria-labelledby="work-trend-title" tabindex="-1"><header><div><h3 id="work-trend-title">{{ trendWork.title || `作品 ${trendWork.aweme_id}` }}</h3><span>{{ trendSnapshots.length }} 个统计快照</span></div><button class="icon-btn" aria-label="关闭作品趋势" @click="closeTrend"><X /></button></header><nav aria-label="趋势指标"><button v-for="metric in trendMetrics" :key="metric[0]" :class="{ active: trendMetric === metric[0] }" :aria-pressed="trendMetric === metric[0]" @click="trendMetric = metric[0]">{{ metric[1] }}</button></nav><div v-if="trendLoading" class="empty-state">正在读取趋势…</div><template v-else-if="trendSeries.length"><div class="trend-kpis"><article><strong>{{ formatCount(trendSummary.latest) }}</strong><span>当前值</span></article><article><strong>+{{ formatCount(trendSummary.delta) }}</strong><span>区间增长</span></article><article :data-alert="trendSummary.unusual"><strong>+{{ formatCount(trendSummary.latestDelta) }}</strong><span>最近增量{{ trendSummary.unusual ? ' · 异常增长' : '' }}</span></article></div><svg class="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="互动数据变化曲线"><line x1="0" y1="90" x2="100" y2="90" /><line x1="0" y1="50" x2="100" y2="50" /><line x1="0" y1="10" x2="100" y2="10" /><polyline :points="trendPoints" /></svg><div class="trend-range"><span>{{ new Date(trendSeries[0].observed_at).toLocaleString() }}</span><span>{{ new Date(trendSeries[trendSeries.length - 1].observed_at).toLocaleString() }}</span></div><div class="trend-table"><article v-for="snapshot in [...trendSeries].reverse().slice(0, 20)" :key="snapshot.id"><time>{{ new Date(snapshot.observed_at).toLocaleString() }}</time><strong>{{ formatCount(snapshot[trendMetric]) }}</strong><span>{{ snapshot.source }}</span></article></div></template><div v-else class="empty-state"><TrendingUp /><strong>暂无可绘制的统计历史</strong><span>后续采集到变化后会自动追加快照</span></div></section></div></Teleport>
+    <FilterToolbar
+      :active="
+        [
+          filter !== 'all' && '状态已筛选',
+          workType !== 'all' && '类型已筛选',
+          publishedFrom && '起始日期',
+          publishedTo && '结束日期',
+          sort !== 'published_desc' && '排序已修改',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      "
+      @clear="
+        filter = 'all';
+        workType = 'all';
+        publishedFrom = '';
+        publishedTo = '';
+        sort = 'published_desc';
+        changeFilters();
+      "
+      ><template #search
+        ><label class="search"
+          ><Search :size="16" /><input
+            v-model="search"
+            aria-label="搜索全部作品"
+            placeholder="搜索全部作品"
+            @input="queueSearch" /></label></template
+      ><label class="work-sort"
+        ><span>状态</span
+        ><select v-model="filter" aria-label="下载状态" @change="changeFilters">
+          <option value="all">全部状态</option>
+          <option value="completed">已下载</option>
+          <option value="incomplete">未完成</option>
+          <option value="active">处理中</option>
+          <option value="failed">失败/取消</option>
+          <option value="not_started">未创建任务</option>
+        </select></label
+      ><label class="work-sort"
+        ><span>类型</span
+        ><select
+          v-model="workType"
+          aria-label="作品类型"
+          @change="changeFilters"
+        >
+          <option value="all">全部类型</option>
+          <option value="video">视频</option>
+          <option value="images">图集</option>
+        </select></label
+      ><label class="work-sort work-date"
+        ><span>从</span
+        ><input
+          v-model="publishedFrom"
+          type="date"
+          aria-label="发布日期起始"
+          @change="changeFilters" /></label
+      ><label class="work-sort work-date"
+        ><span>至</span
+        ><input
+          v-model="publishedTo"
+          type="date"
+          aria-label="发布日期结束"
+          @change="changeFilters" /></label
+      ><label class="work-sort"
+        ><span>排序</span
+        ><select v-model="sort" aria-label="作品排序方式" @change="changeSort">
+          <option value="published_desc">作品时间：最新</option>
+          <option value="published_asc">作品时间：最早</option>
+          <option value="discovered_desc">收录时间：最新</option>
+          <option value="discovered_asc">收录时间：最早</option>
+        </select></label
+      ></FilterToolbar
+    >
+    <div v-if="selected.length" class="selection-bar">
+      <span>已选择 {{ selected.length }} 个当前页作品</span
+      ><button class="btn compact danger" @click="batchDelete">
+        删除作品及文件</button
+      ><button class="text-button" @click="selected = []">取消选择</button>
+    </div>
+    <StateView
+      v-if="!works.length"
+      :loading="loading"
+      :error="loadError"
+      title="没有符合条件的作品"
+      @retry="load"
+    />
+    <div v-else class="work-grid" :class="{ 'list-layout': layout === 'list' }">
+      <article
+        v-for="work in works"
+        :key="work.id"
+        class="work-card"
+        :class="{ selected: detailId === work.id }"
+      >
+        <div class="work-cover">
+          <button
+            class="cover-preview"
+            :aria-label="'预览 ' + (work.title || work.aweme_id)"
+            @click="preview(work)"
+          >
+            <img
+              v-if="work.primary_preview_url && !failedCovers.has(work.id)"
+              :src="work.primary_preview_url"
+              alt=""
+              loading="lazy"
+              @error="markCoverFailed(work.id)"
+            />
+            <div v-else class="cover-placeholder">
+              <Image :size="24" /><small>封面暂不可用</small>
+            </div></button
+          ><span>{{
+            work.work_type === "images" ? work.image_count + " 张" : "视频"
+          }}</span
+          ><label class="select-box"
+            ><input
+              type="checkbox"
+              :aria-label="'选择作品 ' + work.aweme_id"
+              :checked="selected.includes(work.id)"
+              @change="
+                selected = selected.includes(work.id)
+                  ? selected.filter((value) => value !== work.id)
+                  : [...selected, work.id]
+              "
+          /></label>
+        </div>
+        <div class="work-copy">
+          <button
+            class="record-link"
+            :title="work.title"
+            @click="openDetail(work)"
+          >
+            {{ work.title || "作品 " + work.aweme_id }}</button
+          ><time>{{ dateTime(work.published_at) }}</time
+          ><StatusIndicator
+            :status="work.download_status"
+            :label="work.is_downloaded ? '已下载' : undefined"
+          /><span
+            >{{ work.completed_task_count }}/{{
+              work.total_task_count
+            }}
+            个文件</span
+          >
+        </div>
+        <footer>
+          <button class="text-button" @click="openDetail(work)">详情</button
+          ><MoreActions :label="'作品 ' + work.aweme_id"
+            ><button @click="preview(work)">预览</button
+            ><button
+              @click="
+                openDetail(work);
+                tab = 'stats';
+              "
+            >
+              互动趋势</button
+            ><button
+              :disabled="store.risk.active"
+              @click="workAction(work, 'redownload')"
+            >
+              重新下载</button
+            ><button
+              v-if="work.download_status === 'failed'"
+              :disabled="store.risk.active"
+              @click="workAction(work, 'retry-failed')"
+            >
+              重试失败文件</button
+            ><button class="danger" @click="remove(work)">
+              删除作品及文件
+            </button></MoreActions
+          >
+        </footer>
+      </article>
+    </div>
+    <Pager
+      v-if="loaded"
+      :page="page"
+      :pages="pages"
+      :total="total"
+      @change="changePage"
+    />
+    <InspectorPanel
+      :open="!!detailId"
+      :title="detail?.title || '作品详情'"
+      :subtitle="detail?.aweme_id"
+      @close="closeDetail"
+      ><StateView
+        v-if="!detail"
+        :loading="detailBusy"
+        :error="detailError"
+        @retry="loadDetail"
+      /><template v-else
+        ><nav class="view-tabs" aria-label="作品详情">
+          <button
+            v-for="item in [
+              ['files', '文件'],
+              ['metadata', '元数据'],
+              ['stats', '趋势'],
+            ]"
+            :key="item[0]"
+            :class="{ active: tab === item[0] }"
+            :aria-pressed="tab === item[0]"
+            @click="tab = item[0]"
+          >
+            {{ item[1] }}
+          </button>
+        </nav>
+        <template v-if="tab === 'files'"
+          ><button class="btn" @click="preview(detail)">预览作品</button>
+          <div class="file-list">
+            <article v-for="file in detail.files" :key="file.task_id">
+              <div>
+                <strong>{{
+                  file.file_name || "文件 " + (file.file_index + 1)
+                }}</strong
+                ><StatusIndicator :status="file.status" />
+              </div>
+              <button
+                v-if="file.preview_url"
+                class="text-button"
+                @click="
+                  openMedia([
+                    {
+                      url: file.preview_url,
+                      type: file.media_type === 'video' ? 'video' : 'image',
+                      title: detail.title,
+                    },
+                  ])
+                "
+              >
+                预览</button
+              ><button
+                v-if="detail.work_type === 'images'"
+                class="text-button danger"
+                @click="removeFile(file.file_index)"
+              >
+                删除此文件
+              </button>
+            </article>
+          </div>
+          <p v-if="!detail.files.length" class="inline-note">
+            尚无下载文件。
+          </p></template
+        >
+        <dl v-else-if="tab === 'metadata'" class="detail-fields">
+          <div>
+            <dt>发布时间</dt>
+            <dd>{{ formatWorkTime(detail.published_at) }}</dd>
+          </div>
+          <div>
+            <dt>收录时间</dt>
+            <dd>{{ formatWorkTime(detail.discovered_at) }}</dd>
+          </div>
+          <div>
+            <dt>规格</dt>
+            <dd>{{ workSpecs(detail) || "未提供" }}</dd>
+          </div>
+          <div>
+            <dt>标签</dt>
+            <dd>{{ detail.hashtags?.join(" · ") || "未提供" }}</dd>
+          </div>
+          <div>
+            <dt>音乐</dt>
+            <dd>
+              {{ detail.music_title || "未提供" }} {{ detail.music_author }}
+            </dd>
+          </div>
+          <div>
+            <dt>数据版本</dt>
+            <dd>
+              {{ detail.metadata_schema_version }} /
+              {{ detail.raw_data_version }}
+            </dd>
+          </div>
+        </dl>
+        <TrendHistory
+          v-else
+          :endpoint="'/works/' + detail.id + '/stats'"
+          work /></template
+      ><template #footer
+        ><template v-if="detail"
+          ><button
+            class="btn"
+            :disabled="store.risk.active"
+            @click="workAction(detail, 'redownload')"
+          >
+            重新下载</button
+          ><button class="btn danger" @click="remove(detail)">
+            删除作品及文件
+          </button></template
+        ></template
+      ></InspectorPanel
+    >
   </section>
 </template>

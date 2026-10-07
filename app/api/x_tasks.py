@@ -4,7 +4,7 @@ X/Twitter 下载任务 API 路由
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import Optional
@@ -318,14 +318,25 @@ async def add_x_author(
 async def list_x_authors(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    q: str | None = Query(None, max_length=255),
+    is_subscribed: bool | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
 ):
     """获取 X 用户列表"""
-    count_query = select(func.count(XAuthor.id))
+    conditions = []
+    if q and q.strip():
+        search = q.strip().lstrip("@")
+        conditions.append(or_(
+            XAuthor.username.contains(search, autoescape=True),
+            XAuthor.display_name.contains(search, autoescape=True),
+        ))
+    if is_subscribed is not None:
+        conditions.append(XAuthor.is_subscribed == is_subscribed)
+    count_query = select(func.count(XAuthor.id)).where(*conditions)
     query = select(
         XAuthor,
         func.count(XAuthor.id).over().label("_total"),
-    ).order_by(XAuthor.created_at.desc(), XAuthor.id.desc())
+    ).where(*conditions).order_by(XAuthor.created_at.desc(), XAuthor.id.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     rows = result.all()
@@ -345,6 +356,14 @@ async def list_x_authors(
         page_size=page_size,
         pages=pages,
     )
+
+
+@router.get("/authors/{author_id}", response_model=XAuthorResponse)
+async def get_x_author(author_id: int, db: AsyncSession = Depends(get_async_db)):
+    author = (await db.execute(select(XAuthor).where(XAuthor.id == author_id))).scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return serialize_x_author(author)
 
 
 @router.delete("/authors/{author_id}", response_model=MessageResponse)

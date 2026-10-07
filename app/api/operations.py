@@ -577,6 +577,7 @@ async def unified_tasks(
     task_key: str | None = Query(None, max_length=80),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    sort_by: Literal["created_desc", "created_asc"] = Query("created_desc"),
     db: AsyncSession = Depends(get_async_db),
 ):
     """跨三套任务表统一检索、汇总，并通过数据库联合分页限制内存占用。"""
@@ -695,7 +696,10 @@ async def unified_tasks(
     combined = combined_statement.subquery()
     page_rows = (await db.execute(
         select(combined.c.platform, combined.c.task_id, combined.c.created_at)
-        .order_by(combined.c.created_at.desc().nullslast(), combined.c.platform, combined.c.task_id.desc())
+        .order_by(
+            (combined.c.created_at.asc() if sort_by == "created_asc" else combined.c.created_at.desc()).nullslast(),
+            combined.c.platform, combined.c.task_id.desc(),
+        )
         .offset((page - 1) * page_size).limit(page_size)
     )).all()
     ordered_keys = [(str(row.platform), int(row.task_id)) for row in page_rows]
@@ -1090,3 +1094,48 @@ async def storage_repair(
         "repair_state": repair_state,
         "message": "部分完成，请查看失败项" if result["apply_errors"] else "处理完成；文件未删除，隔离项可按清单恢复",
     }
+
+
+@router.get("/tasks/{platform}/{task_id}")
+async def unified_task_detail(platform: str, task_id: int, db: AsyncSession = Depends(get_async_db)):
+    """Read one task without applying list filters or loading its logs/media."""
+    if platform == "douyin":
+        from app.api.tasks import _serialize_download_task
+        task = (await db.execute(select(DownloadTask).options(
+            selectinload(DownloadTask.work).selectinload(Work.author),
+        ).where(DownloadTask.id == task_id))).scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        payload = _serialize_douyin_task(task)
+        native = await asyncio.to_thread(_serialize_download_task, task, include_remote_preview=False)
+        if hasattr(native, "model_dump"):
+            native = native.model_dump()
+        payload.update(
+            file_name=task.file_name, work_id=task.work_id,
+            author_id=task.work.author_id if task.work else None,
+            source_url=task.work.author.share_url if task.work and task.work.author else None,
+            transfer={key: native.get(key) for key in ("total_bytes", "downloaded_bytes", "download_speed", "retry_count")},
+            error_code=native.get("error_code"), error_action=native.get("error_action"),
+        )
+    elif platform == "x":
+        task = (await db.execute(select(XDownloadTask).options(
+            selectinload(XDownloadTask.x_author), selectinload(XDownloadTask.media_assets),
+        ).where(XDownloadTask.id == task_id))).scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        payload = _serialize_x_task(task)
+        payload.update(source_url=task.profile_url, log_endpoint=f"/x/tasks/{task.id}/log")
+    else:
+        try:
+            platform_registry.get(platform)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="平台不存在") from exc
+        task = (await db.execute(select(PlatformDownloadTask).options(
+            selectinload(PlatformDownloadTask.media_assets),
+        ).where(PlatformDownloadTask.id == task_id, PlatformDownloadTask.platform == platform))).scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        payload = _serialize_platform_task(task)
+        payload.update(source_url=task.source_url, engine_name=task.engine_name,
+                       log_endpoint=f"/platform-downloads/{platform}/tasks/{task.id}/log")
+    return payload

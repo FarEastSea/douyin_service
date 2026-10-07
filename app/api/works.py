@@ -64,6 +64,12 @@ async def _load_work_with_tasks(db: AsyncSession, work_id: int) -> Work:
     return work
 
 
+@router.get("/{work_id}")
+async def get_work_detail(work_id: int, db: AsyncSession = Depends(get_async_db)):
+    from app.api.authors import _serialize_work_response
+    return _serialize_work_response(await _load_work_with_tasks(db, work_id))
+
+
 @router.get("/{work_id}/cover")
 async def get_work_cover(work_id: int, db: AsyncSession = Depends(get_async_db)):
     """返回本地缓存的作品封面；缓存缺失时仅请求已入库的受信任图片地址。"""

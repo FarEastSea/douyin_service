@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, case, select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 from typing import List, Literal, Optional, Union
 from datetime import date, datetime, time as datetime_time, timedelta
 
@@ -204,7 +204,7 @@ def _build_work_files(work: Work) -> List[WorkFileItem]:
             preview_url=f"/api/tasks/{task.id}/preview" if local_available else None,
             media_type=(
                 "video"
-                if file_index < len(live_photo_urls) and live_photo_urls[file_index]
+                if work.work_type == "video" or (file_index < len(live_photo_urls) and live_photo_urls[file_index])
                 else "image"
             ),
             local_available=local_available,
@@ -437,7 +437,7 @@ async def list_authors(
     query = base_query.add_columns(
         func.count(Author.id).over().label("_total")
     ).order_by(Author.created_at.desc(), Author.id.desc())
-    query = query.offset((page - 1) * page_size).limit(page_size)
+    query = query.options(defer(SubscriptionCheckReport.details_json)).offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
     rows = result.all()
@@ -896,7 +896,7 @@ async def list_author_works(
         discovered_order = Work.discovered_at.desc() if sort_by == "discovered_desc" else Work.discovered_at.asc()
         id_order = Work.id.desc() if sort_by == "discovered_desc" else Work.id.asc()
         query = query.order_by(discovered_order, id_order)
-    query = query.offset((page - 1) * page_size).limit(page_size)
+    query = query.options(defer(SubscriptionCheckReport.details_json)).offset((page - 1) * page_size).limit(page_size)
     
     result = await db.execute(query)
     works = result.scalars().all()
@@ -1065,58 +1065,75 @@ async def reconcile_all_subscriptions(db: AsyncSession = Depends(get_async_db)):
     )
 
 
-@router.get("/reports/subscriptions")
-async def get_subscription_reports(
-    limit: int = Query(10, ge=1, le=50),
-    db: AsyncSession = Depends(get_async_db),
-):
-    """获取最近的订阅检查报告，包含每位作者的明确结果。"""
-    runtime_config = await get_runtime_config(db)
-    current_settings = await asyncio.to_thread(settings.snapshot)
-    global_interval = int(runtime_config.get("subscription_check_interval", current_settings.DEFAULT_CHECK_INTERVAL))
-    result = await db.execute(
-        select(SubscriptionCheckReport)
-        .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
-        .limit(limit)
-    )
-    reports = []
-    for report in result.scalars().all():
+def _subscription_report_payload(report, newest_id: int | None, global_interval: int, include_details: bool = True):
+    details = []
+    if include_details:
         try:
             details = json.loads(report.details_json or "[]")
         except (TypeError, ValueError):
             details = []
-        display_status = report.status
-        display_summary = report.summary
-        if display_status == "running" and reports:
-            display_status = "interrupted"
-            display_summary = "该批次未正常写入结束状态，后续批次已经接管续检"
-        elif display_status == "running" and report.started_at and (datetime.now() - report.started_at).total_seconds() > 2100:
-            display_status = "interrupted"
-            display_summary = "任务超过 35 分钟仍未结束，可能被 Worker 中断；下一轮会继续检查未处理作者"
-        reports.append({
-            "id": report.id,
-            "celery_task_id": report.celery_task_id,
-            "trigger_type": report.trigger_type,
-            "status": display_status,
-            "total_authors": report.total_authors or 0,
-            "due_authors": report.due_authors or 0,
-            "checked_authors": report.checked_authors or 0,
-            "success_authors": report.success_authors or 0,
-            "new_works": report.new_works or 0,
-            "warning_authors": report.warning_authors or 0,
-            "failed_authors": report.failed_authors or 0,
-            "skipped_authors": report.skipped_authors or 0,
-            "remaining_authors": report.remaining_authors or 0,
-            "summary": display_summary,
-            "details": details,
-            "started_at": report.started_at.isoformat() if report.started_at else None,
-            "finished_at": report.finished_at.isoformat() if report.finished_at else None,
-            "global_interval_seconds": global_interval,
-            "expected_next_cycle_at": (
-                (report.started_at + timedelta(seconds=global_interval)).isoformat()
-                if report.started_at and report.trigger_type == "auto" else None
-            ),
-        })
+        details = [item for item in details if isinstance(item, dict)] if isinstance(details, list) else []
+    display_status = report.status
+    display_summary = report.summary
+    if display_status == "running" and report.id != newest_id:
+        display_status = "interrupted"
+        display_summary = "该批次未正常写入结束状态，后续批次已经接管续检"
+    elif display_status == "running" and report.started_at and (datetime.now() - report.started_at).total_seconds() > 2100:
+        display_status = "interrupted"
+        display_summary = "任务超过 35 分钟仍未结束，可能被 Worker 中断；下一轮会继续检查未处理作者"
+    return {
+        "id": report.id,
+        "celery_task_id": report.celery_task_id,
+        "trigger_type": report.trigger_type,
+        "status": display_status,
+        "total_authors": report.total_authors or 0,
+        "due_authors": report.due_authors or 0,
+        "checked_authors": report.checked_authors or 0,
+        "success_authors": report.success_authors or 0,
+        "new_works": report.new_works or 0,
+        "warning_authors": report.warning_authors or 0,
+        "failed_authors": report.failed_authors or 0,
+        "skipped_authors": report.skipped_authors or 0,
+        "remaining_authors": report.remaining_authors or 0,
+        "summary": display_summary,
+        "details": details,
+        "started_at": report.started_at.isoformat() if report.started_at else None,
+        "finished_at": report.finished_at.isoformat() if report.finished_at else None,
+        "global_interval_seconds": global_interval,
+        "expected_next_cycle_at": (
+            (report.started_at + timedelta(seconds=global_interval)).isoformat()
+            if report.started_at and report.trigger_type == "auto" else None
+        ),
+    }
+
+
+@router.get("/reports/subscriptions")
+async def get_subscription_reports(
+    limit: int = Query(10, ge=1, le=50),
+    paginated: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Legacy calls keep full reports; paginated calls return bounded summaries."""
+    runtime_config = await get_runtime_config(db)
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    global_interval = int(runtime_config.get("subscription_check_interval", current_settings.DEFAULT_CHECK_INTERVAL))
+    newest_id = (await db.execute(select(SubscriptionCheckReport.id).order_by(
+        SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc(),
+    ).limit(1))).scalar_one_or_none()
+    query = select(SubscriptionCheckReport).order_by(
+        SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc(),
+    )
+    total = 0
+    if paginated:
+        total = int((await db.execute(select(func.count(SubscriptionCheckReport.id)))).scalar() or 0)
+        query = query.options(defer(SubscriptionCheckReport.details_json)).offset((page - 1) * page_size).limit(page_size)
+    else:
+        query = query.limit(limit)
+    result = await db.execute(query)
+    reports = [_subscription_report_payload(report, newest_id, global_interval, not paginated)
+               for report in result.scalars().all()]
     cycle_result = await db.execute(
         select(SystemConfig).where(SystemConfig.key == SUBSCRIPTION_CYCLE_STATE_KEY)
     )
@@ -1125,16 +1142,25 @@ async def get_subscription_reports(
         cycle = json.loads(cycle_row.value or "{}") if cycle_row else {}
     except (TypeError, ValueError):
         cycle = {}
-    if not cycle and reports:
-        latest = reports[0]
+    if not cycle and newest_id is not None:
+        if reports and reports[0]["id"] == newest_id:
+            latest = reports[0]
+        else:
+            newest = (await db.execute(select(SubscriptionCheckReport).options(
+                defer(SubscriptionCheckReport.details_json),
+            ).where(SubscriptionCheckReport.id == newest_id))).scalar_one_or_none()
+            latest = _subscription_report_payload(newest, newest_id, global_interval, False) if newest else {}
         cycle = {
-            "active": latest["status"] == "running",
-            "total_authors": latest["total_authors"],
-            "checked_authors": latest["checked_authors"],
-            "remaining_authors": latest["remaining_authors"],
-            "new_works": latest["new_works"],
+            "active": latest.get("status") == "running",
+            "total_authors": latest.get("total_authors"),
+            "checked_authors": latest.get("checked_authors"),
+            "remaining_authors": latest.get("remaining_authors"),
+            "new_works": latest.get("new_works"),
         }
-    return {"items": reports, "cycle": cycle}
+    payload = {"items": reports, "cycle": cycle}
+    if paginated:
+        payload.update(total=total, page=page, page_size=page_size, pages=max(1, (total + page_size - 1) // page_size))
+    return payload
 
 
 @router.get("/reports/subscriptions/diagnostic")
@@ -1243,3 +1269,19 @@ async def get_subscription_diagnostic(db: AsyncSession = Depends(get_async_db)):
         "privacy": "Cookie、UIFID、代理凭据、请求令牌和请求签名均未包含在此诊断中。",
     }
 
+
+
+@router.get("/reports/subscriptions/{report_id}")
+async def get_subscription_report(report_id: int, db: AsyncSession = Depends(get_async_db)):
+    report = (await db.execute(select(SubscriptionCheckReport).where(
+        SubscriptionCheckReport.id == report_id,
+    ))).scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="检查记录不存在")
+    newest_id = (await db.execute(select(SubscriptionCheckReport.id).order_by(
+        SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc(),
+    ).limit(1))).scalar_one_or_none()
+    runtime_config = await get_runtime_config(db)
+    current_settings = await asyncio.to_thread(settings.snapshot)
+    interval = int(runtime_config.get("subscription_check_interval", current_settings.DEFAULT_CHECK_INTERVAL))
+    return _subscription_report_payload(report, newest_id, interval)
