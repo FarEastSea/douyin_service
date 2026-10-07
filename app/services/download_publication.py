@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.config_transaction import atomic_json
 from app.models.models import DownloadTask, SystemConfig
 from app.services.download_lifecycle import lock_download_attempt
+from app.services.download_paths import build_download_attempt_path
 
 
 def publication_directory() -> Path:
@@ -49,7 +50,7 @@ def publish_media(db, task_id: int, token: str, temporary: str, target: str):
     # 上一轮不确定提交必须先恢复，不能用新执行覆盖证据。
     for pending in publication_directory().glob(f"{task_id}-*.json"):
         _settle(db, pending)
-    backup = target_path.with_name(target_path.name + f".{token}.previous")
+    backup = Path(build_download_attempt_path(target, token, suffix=".previous"))
     temp_stat = temp_path.stat()
     entry = {"task_id": task_id, "token": token, "temporary": temporary, "target": target,
              "published_identity": [temp_stat.st_dev, temp_stat.st_ino, temp_stat.st_size, temp_stat.st_mtime_ns],

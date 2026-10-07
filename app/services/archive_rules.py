@@ -41,8 +41,8 @@ _FILENAME_FIELDS = {
 }
 _INVALID_FILENAME = re.compile(r'[\x00-\x1f\\/:*?"<>|]')
 FILESYSTEM_COMPONENT_MAX_BYTES = 255
-# 下载器会在最终文件名后追加 .downloading。预留最长运行期后缀，确保
-# 中文、emoji 等多字节文件名也不会超过 Linux NAME_MAX。
+# 正式文件名为元数据 .json.tmp / .csv.tmp 及旧版 .downloading 预留空间。
+# 带执行标识的临时文件与发布备份使用独立的定长名称，不再追加媒体标题。
 MEDIA_FILENAME_MAX_BYTES = FILESYSTEM_COMPONENT_MAX_BYTES - len(".downloading".encode("utf-8"))
 
 

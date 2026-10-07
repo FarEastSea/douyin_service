@@ -29,6 +29,7 @@ from app.core.network_security import get_douyin_response, validate_douyin_url
 from app.core.runtime_config import get_cached_runtime_config
 from app.core.traffic_control import wait_for_douyin_request_slot
 from app.core.request_budget import remaining_timeout, DouyinScanDeadlineExceeded
+from app.services.download_paths import build_download_attempt_path
 from app.services.douyin_errors import (
     DouyinCooldownError,
     DouyinRequestError,
@@ -993,7 +994,7 @@ class DouyinDownloader:
         Returns:
             下载结果字典
         """
-        temp_path = file_path + (f".{attempt_id}" if attempt_id else "") + ".downloading"
+        temp_path = build_download_attempt_path(file_path, attempt_id)
         metadata_path = temp_path + ".json"
         res = None
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)

@@ -41,6 +41,7 @@ from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
 from app.core.traffic_control import global_download_slot
 from app.services.download_task_factory import ensure_download_task_sync
+from app.services.download_paths import build_download_attempt_path
 from app.services.download_lifecycle import (
     FencedDownloadTask, StaleDownloadAttempt, bind_download_attempt,
     lock_download_attempt, prepare_download_retry,
@@ -829,7 +830,7 @@ def _download_single_file_impl(
         
         # 执行下载
         resume_path = task.temp_file_path
-        task.temp_file_path = file_path + f".{self_task.request.id}.downloading"
+        task.temp_file_path = build_download_attempt_path(file_path, self_task.request.id)
         db.commit()
         result = media.download(
             url=url,
