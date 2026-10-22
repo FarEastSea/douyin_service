@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Plus, Search, UserRound } from "@lucide/vue";
+import { Plus, Search } from "@lucide/vue";
 import { api, jsonBody } from "../api";
 import { useAppStore } from "../stores/app";
 import { confirmAction, dateTime, useContextActions } from "../workspace";
@@ -13,6 +13,7 @@ import MoreActions from "../components/MoreActions.vue";
 import FilterToolbar from "../components/FilterToolbar.vue";
 import Pager from "../components/Pager.vue";
 import IssueDetail from "../components/IssueDetail.vue";
+import AuthorAvatar from "../components/AuthorAvatar.vue";
 import type { Author, XAuthor, PageData } from "../types";
 type AuthorRecord = Partial<Author & XAuthor> & {
   id: number;
@@ -35,12 +36,9 @@ const authors = ref<AuthorRecord[]>([]),
 const search = ref(String(route.query.q || "")),
   subscribed = ref(String(route.query.subscribed || "")),
   account = ref(String(route.query.account || "all"));
-const addOpen = ref(false),
-  input = ref(""),
-  adding = ref(false),
-  selected = computed(
-    () => Number(route.query.author || route.query.focus) || 0,
-  );
+const selected = computed(
+  () => Number(route.query.author || route.query.focus) || 0,
+);
 const detail = ref<AuthorRecord>(),
   detailBusy = ref(false),
   detailError = ref(""),
@@ -215,39 +213,15 @@ async function remove(item: AuthorRecord) {
   if (!authors.value.some((author) => author.id === item.id) && !error.value)
     closeAuthor();
 }
-async function add() {
-  if (!input.value.trim() || adding.value) return;
-  const target = props.platform;
-  adding.value = true;
-  try {
-    const data = await api<any>(prefix.value + "/", {
-      method: "POST",
-      ...jsonBody(
-        isX.value
-          ? {
-              profile_url: input.value.trim(),
-              is_subscribed: false,
-              check_interval: 3600,
-            }
-          : {
-              share_url: input.value.trim(),
-              is_subscribed: false,
-              check_interval: 21600,
-            },
-      ),
-    });
-    if (target !== props.platform) return;
-    addOpen.value = false;
-    input.value = "";
-    store.notify(data.already_exists ? "作者已存在，已打开详情" : "作者已添加");
-    await load();
-    if (data.id) openAuthor(data);
-    await store.refreshStatus();
-  } catch (e: any) {
-    store.notify(e.message, "error");
-  } finally {
-    adding.value = false;
-  }
+function openAdd() {
+  window.dispatchEvent(
+    new CustomEvent("app:new-download", {
+      detail: { intent: "subscribe", platform: props.platform },
+    }),
+  );
+}
+function authorsChanged(event: Event) {
+  if ((event as CustomEvent).detail?.platform === props.platform) void load();
 }
 async function checkAll() {
   if (!isX.value && store.risk.active) return;
@@ -301,9 +275,7 @@ useContextActions(() => [
   {
     id: "add-author",
     label: "添加" + (isX.value ? " X 用户" : "抖音作者"),
-    run: () => {
-      addOpen.value = true;
-    },
+    run: openAdd,
   },
   {
     id: "author-check",
@@ -325,7 +297,6 @@ watch(
     search.value = String(route.query.q || "");
     subscribed.value = String(route.query.subscribed || "");
     account.value = "all";
-    addOpen.value = false;
     void load();
     void loadDetail();
   },
@@ -352,10 +323,12 @@ watch(
   },
 );
 onMounted(() => {
+  window.addEventListener("app:authors-changed", authorsChanged);
   void load();
   void loadDetail();
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("app:authors-changed", authorsChanged);
   sequence++;
   detailSequence++;
   resourceSequence++;
@@ -378,9 +351,9 @@ onBeforeUnmount(() => {
       ><button
         class="btn primary"
         :disabled="!isX && store.risk.active"
-        @click="addOpen = true"
+        @click="openAdd"
       >
-        <Plus :size="15" />添加作者
+        <Plus :size="15" />订阅作者
       </button></PageHeader
     >
     <nav class="view-tabs" aria-label="作者平台">
@@ -464,17 +437,11 @@ onBeforeUnmount(() => {
           >
             <td>
               <div class="author-cell">
-                <span class="avatar"
-                  ><img
-                    v-if="item.avatar_url"
-                    :src="
-                      isX
-                        ? item.avatar_url
-                        : '/api/authors/' + item.id + '/avatar'
-                    "
-                    alt=""
-                    loading="lazy" /><UserRound v-else :size="18"
-                /></span>
+                <AuthorAvatar
+                  :id="item.id"
+                  :platform="props.platform"
+                  :url="item.avatar_url"
+                />
                 <div>
                   <button class="record-link" @click="openAuthor(item)">
                     {{ name(item) }}</button
@@ -754,29 +721,6 @@ onBeforeUnmount(() => {
           ></template
         ></template
       ></InspectorPanel
-    >
-    <InspectorPanel
-      :open="addOpen"
-      title="添加作者"
-      :subtitle="isX ? 'X 主页链接或 @用户名' : '抖音作者主页或分享链接'"
-      modal
-      @close="addOpen = false"
-      ><form class="stacked-form" @submit.prevent="add">
-        <label class="stacked-field"
-          >{{ isX ? "用户主页或用户名" : "作者主页链接"
-          }}<input
-            v-model="input"
-            required
-            :placeholder="isX ? '@username' : '粘贴作者分享链接'"
-        /></label>
-        <p class="inline-note">添加后默认未订阅。可在作者列表开启自动更新。</p>
-        <button
-          class="btn primary"
-          :disabled="adding || (!isX && store.risk.active)"
-        >
-          {{ adding ? "添加中…" : "添加作者" }}
-        </button>
-      </form></InspectorPanel
     >
   </section>
 </template>

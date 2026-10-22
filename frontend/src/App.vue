@@ -41,7 +41,12 @@ import {
   sectionPath,
 } from "./settings-registry";
 import RiskBanner from "./components/RiskBanner.vue";
-import { focusFirst, restoreFocus, trapFocus } from "./focus";
+import {
+  captureFocusOrigin,
+  focusFirst,
+  restoreFocus,
+  trapFocus,
+} from "./focus";
 import { useAppStore } from "./stores/app";
 import type { MediaItem, MediaPlatform } from "./types";
 import BootstrapView from "./views/BootstrapView.vue";
@@ -60,6 +65,9 @@ const previewOpen = ref(false),
   previewStart = ref(0);
 const newDownloadOpen = ref(false),
   newDownloadButton = ref<HTMLButtonElement | null>(null);
+const captureIntent = ref<"download" | "subscribe">("download"),
+  capturePlatform = ref("");
+const captureOrigin = ref<HTMLElement | null>(null);
 const sidebarElement = ref<HTMLElement | null>(null),
   mobileMenuButton = ref<HTMLButtonElement | null>(null);
 const authDialog = ref<HTMLElement | null>(null),
@@ -144,13 +152,26 @@ function preview(event: Event) {
   previewStart.value = detail.start || 0;
   previewOpen.value = true;
 }
-function openNewDownload() {
+function openNewDownload(event?: Event) {
+  captureOrigin.value =
+    event?.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : captureFocusOrigin();
+  const detail = (event as CustomEvent | undefined)?.detail;
+  captureIntent.value =
+    detail?.intent === "subscribe" ? "subscribe" : "download";
+  capturePlatform.value =
+    typeof detail?.platform === "string" ? detail.platform : "";
   newDownloadOpen.value = true;
   closeSidebar();
 }
+function openSubscription() {
+  openNewDownload(
+    new CustomEvent("app:new-download", { detail: { intent: "subscribe" } }),
+  );
+}
 function closeNewDownload() {
   newDownloadOpen.value = false;
-  void nextTick(() => newDownloadButton.value?.focus());
 }
 function handleVisibilityChange() {
   if (!document.hidden) void refreshHealth();
@@ -203,7 +224,7 @@ function closeAuth() {
 }
 function requireAuth() {
   newDownloadOpen.value = false;
-  void nextTick(() => showAuth(newDownloadButton.value));
+  void nextTick(() => showAuth(captureOrigin.value || newDownloadButton.value));
 }
 function onGlobalKeydown(event: KeyboardEvent) {
   if (
@@ -278,7 +299,11 @@ onBeforeUnmount(() => {
   <div
     v-else
     class="app-shell"
-    :class="{ collapsed, 'mobile-open': store.sidebarOpen }"
+    :class="{
+      collapsed,
+      'mobile-open': store.sidebarOpen,
+      'has-capture-dock': !directoryMode,
+    }"
     :inert="blocking"
   >
     <a class="skip-link" href="#main-content">跳转到主要内容</a>
@@ -416,7 +441,7 @@ onBeforeUnmount(() => {
             <Search :size="15" /><span>命令</span><kbd>⌘ / Ctrl K</kbd></button
           ><button
             ref="newDownloadButton"
-            class="icon-btn"
+            class="icon-btn topbar-add"
             aria-label="新建下载"
             title="新建下载"
             @click="openNewDownload"
@@ -435,12 +460,26 @@ onBeforeUnmount(() => {
       <RiskBanner v-if="route.path !== '/dashboard'" />
       <RouterView />
     </main>
+    <nav
+      v-if="!directoryMode"
+      class="mobile-capture-dock"
+      aria-label="快捷添加"
+      :inert="mobileNavigationOpen"
+    >
+      <button class="btn ghost" @click="openSubscription">
+        <Users :size="18" />订阅作者
+      </button>
+      <button class="btn primary" @click="openNewDownload">
+        <Download :size="18" />下载作品
+      </button>
+    </nav>
 
     <Teleport to="body">
       <Transition name="toast"
         ><div
           v-if="store.toast"
           class="toast"
+          :class="{ 'above-capture-dock': !directoryMode }"
           :data-tone="store.toast.tone"
           :role="store.toast.tone === 'error' ? 'alert' : 'status'"
         >
@@ -469,7 +508,12 @@ onBeforeUnmount(() => {
     <CommandPalette v-if="commandOpen" @close="commandOpen = false" />
     <ConfirmDialog />
     <Teleport to="body"
-      ><NewDownloadPanel v-if="newDownloadOpen" @close="closeNewDownload"
+      ><NewDownloadPanel
+        v-if="newDownloadOpen"
+        :intent="captureIntent"
+        :platform="capturePlatform"
+        :return-focus="captureOrigin"
+        @close="closeNewDownload"
     /></Teleport>
     <Teleport to="body"
       ><div v-if="authOpen" class="auth-overlay" @click.self="closeAuth">

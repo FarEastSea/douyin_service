@@ -295,6 +295,8 @@ async def add_author(
         stable_share_url = author_info.get("profile_url") or build_author_profile_url(sec_uid) or request.share_url
         
         if existing:
+            if request.is_subscribed:
+                existing.is_subscribed = True
             if stable_share_url and existing.share_url != stable_share_url:
                 existing.share_url = stable_share_url
             latest_nickname = author_info.get("nickname")
@@ -634,19 +636,26 @@ async def get_author_avatar(author_id: int, db: AsyncSession = Depends(get_async
     if not author.avatar_url:
         raise HTTPException(status_code=404, detail="作者暂无头像")
 
-    request_context = await get_request_context(db)
-    runtime_config = await get_runtime_config(db)
-
-    def _cache_avatar():
-        source = build_douyin_source(
-            request_context.cookie, current_settings.DOWNLOAD_DIR,
-            runtime_config=runtime_config, request_context=request_context,
-        )
-        return source.cache_author_avatar(author.id, author.avatar_url)
-
     try:
+        request_context = await get_request_context(db)
+        runtime_config = await get_runtime_config(db)
+
+        def _cache_avatar():
+            source = build_douyin_source(
+                request_context.cookie, current_settings.DOWNLOAD_DIR,
+                runtime_config=runtime_config, request_context=request_context,
+            )
+            return source.cache_author_avatar(author.id, author.avatar_url)
+
         cached = await asyncio.to_thread(_cache_avatar)
     except Exception as exc:
+        # A rotated/expired CDN URL must not hide a usable local avatar. Keep
+        # the source fingerprint unchanged so a later request can refresh it.
+        cached = await asyncio.to_thread(
+            find_cached_author_avatar, author.id, current_settings.DOWNLOAD_DIR,
+        )
+        if cached:
+            return FileResponse(cached, headers={"Cache-Control": "private, no-cache"})
         raise HTTPException(status_code=502, detail=f"缓存作者头像失败: {str(exc)}")
     if not cached:
         raise HTTPException(status_code=404, detail="作者暂无头像")

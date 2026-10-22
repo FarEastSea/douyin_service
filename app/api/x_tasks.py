@@ -300,6 +300,11 @@ async def add_x_author(
     )
     existing = result.scalar_one_or_none()
     if existing:
+        if request.is_subscribed:
+            existing.is_subscribed = True
+            await db.commit()
+            await db.refresh(existing)
+            return serialize_x_author(existing)
         raise HTTPException(status_code=400, detail=f"用户 @{username} 已存在")
 
     author = create_x_author(

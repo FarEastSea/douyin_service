@@ -270,6 +270,11 @@ async def create_download_task(
         if url_info["type"] == "work":
             return await _handle_single_work(source, url_info["canonical_url"], db)
         else:
+            if not request.allow_author_scan:
+                raise HTTPException(status_code=400, detail={
+                    "code": "author_link_requires_confirmation",
+                    "message": "该链接指向作者主页，尚未创建下载任务。可改为订阅作者，或明确选择下载作者作品。",
+                })
             return await _handle_author_download(source, url_info["sec_uid"], db)
     
     except DouyinRequestError as e:

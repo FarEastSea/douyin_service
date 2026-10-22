@@ -115,7 +115,12 @@ let pollTimer: number | undefined;
 let loadSequence = 0;
 let pollInFlight = false;
 type TaskAction =
-  "retry" | "cancel" | "pause" | "resume" | "refresh_retry" | "delete";
+  | "retry"
+  | "cancel"
+  | "pause"
+  | "resume"
+  | "refresh_retry"
+  | "delete";
 const platformNames: Record<string, string> = {
   douyin: "抖音",
   x: "X",
@@ -477,7 +482,11 @@ async function copyFailure(task: UnifiedTask) {
     store.notify("复制失败，请检查浏览器剪贴板权限", "error");
   }
 }
+function tasksChanged() {
+  void load();
+}
 onMounted(() => {
+  window.addEventListener("app:tasks-changed", tasksChanged);
   void load();
   void loadRetryJob();
   void loadDeleteJob();
@@ -489,6 +498,7 @@ onMounted(() => {
   }, 5000);
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("app:tasks-changed", tasksChanged);
   loadSequence++;
   retryJobSequence++;
   deleteJobSequence++;

@@ -8,36 +8,71 @@ import {
   watch,
 } from "vue";
 import { useRouter } from "vue-router";
-import { ArrowRight, CircleCheck, Link2, Search, X } from "@lucide/vue";
+import {
+  ArrowRight,
+  Check,
+  ClipboardPaste,
+  Download,
+  Link2,
+  LoaderCircle,
+  Users,
+  X,
+} from "@lucide/vue";
 import { modalDepth } from "../workspace";
 import { api, jsonBody } from "../api";
-import IssueDetail from "./IssueDetail.vue";
-import { focusFirst, trapFocus } from "../focus";
+import {
+  captureFocusOrigin,
+  focusFirst,
+  restoreFocus,
+  trapFocus,
+} from "../focus";
 import { useAppStore } from "../stores/app";
 import type { MediaPlatform } from "../types";
-
+const props = withDefaults(
+  defineProps<{
+    intent?: "download" | "subscribe";
+    platform?: string;
+    returnFocus?: HTMLElement | null;
+  }>(),
+  { intent: "download", platform: "" },
+);
 const emit = defineEmits<{ close: [] }>();
-const router = useRouter();
-const store = useAppStore();
-const input = ref("");
-const inputElement = ref<HTMLInputElement | null>(null);
-const panelElement = ref<HTMLElement | null>(null);
-const platformId = ref("");
-const inputKind = ref<"author" | "work" | "unknown">("unknown");
-const identified = ref(false);
-const detecting = ref(false);
-const submitting = ref(false);
-const error = ref("");
-let identifySequence = 0;
-const confirmedInput = ref("");
-watch(input, () => {
-  identifySequence++;
-  identified.value = false;
-  detecting.value = false;
-  confirmedInput.value = "";
-  inputKind.value = "unknown";
-  error.value = "";
-});
+const router = useRouter(),
+  store = useAppStore();
+const mode = ref(props.intent),
+  input = ref(""),
+  manualPlatform = ref(props.platform),
+  manualOpen = ref(false);
+const field = ref<HTMLTextAreaElement | null>(null),
+  panel = ref<HTMLElement | null>(null);
+type Detection = {
+  platform_id: string;
+  input_kind: "author" | "work" | "unknown";
+};
+const found = ref<Detection | null>(null),
+  detecting = ref(false),
+  submitting = ref(false),
+  pasting = ref(false);
+const error = ref(""),
+  pasteHint = ref("");
+const success = ref<{
+  message: string;
+  path: string;
+  query?: Record<string, string>;
+} | null>(null);
+let disposed = false;
+let sequence = 0,
+  timer: number | undefined,
+  controller: AbortController | undefined;
+let pending: { source: string; promise: Promise<Detection | null> } | null =
+  null;
+let origin: HTMLElement | null = null;
+const viewportHeight = ref(0),
+  viewportTop = ref(0);
+function updateViewport() {
+  viewportHeight.value = window.visualViewport?.height || window.innerHeight;
+  viewportTop.value = window.visualViewport?.offsetTop || 0;
+}
 const options = computed(() =>
   store.platforms.length
     ? store.platforms
@@ -50,298 +85,447 @@ const options = computed(() =>
         { id: "xhs", name: "小红书" },
       ] as MediaPlatform[]),
 );
-const selected = computed(() =>
-  options.value.find((item) => item.id === platformId.value),
+const platform = computed(
+  () =>
+    found.value?.platform_id ||
+    manualPlatform.value ||
+    (mode.value === "subscribe" ? "douyin" : ""),
 );
-
+const selected = computed(() =>
+  options.value.find((item) => item.id === platform.value),
+);
+const kind = computed(() => found.value?.input_kind || "unknown");
+const blocked = computed(() => {
+  if (
+    mode.value === "subscribe" &&
+    platform.value &&
+    !["douyin", "x"].includes(platform.value)
+  )
+    return "目前支持订阅抖音和 X 作者，请粘贴对应的作者主页。";
+  if (mode.value === "subscribe" && kind.value === "work")
+    return "这是作品链接。订阅请使用作者主页，或切换到下载作品。";
+  if (platform.value === "xhs" && kind.value === "author")
+    return "小红书目前仅支持单条笔记，请粘贴笔记链接。";
+  return "";
+});
+const submitLabel = computed(() =>
+  submitting.value
+    ? "正在提交…"
+    : mode.value === "subscribe"
+      ? "添加并订阅"
+      : kind.value === "author"
+        ? "下载作者作品"
+        : "开始下载",
+);
 function close() {
   if (!submitting.value) emit("close");
 }
-function onKeydown(event: KeyboardEvent) {
+function keydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
+    event.preventDefault();
     close();
-    return;
-  }
-  trapFocus(event, panelElement.value);
+  } else trapFocus(event, panel.value);
 }
-function selectPlatform() {
-  identifySequence++;
+function invalidate() {
+  ++sequence;
+  controller?.abort();
+  pending = null;
+  found.value = null;
   detecting.value = false;
-  identified.value = false;
-  confirmedInput.value = "";
-  inputKind.value = "unknown";
+  clearTimeout(timer);
   error.value = "";
+  pasteHint.value = "";
 }
-async function identify() {
-  if (submitting.value) return;
-  if (!input.value.trim()) {
-    error.value = "先粘贴作品链接、作者主页或平台支持的用户标识。";
-    return;
-  }
+watch(
+  input,
+  () => {
+    invalidate();
+    if (input.value.trim())
+      timer = window.setTimeout(() => void identify(input.value.trim()), 250);
+  },
+  { flush: "sync" },
+);
+watch(mode, () => {
+  error.value = "";
+  success.value = null;
+});
+function identify(source: string): Promise<Detection | null> {
+  if (found.value && source === input.value.trim())
+    return Promise.resolve(found.value);
+  if (pending?.source === source) return pending.promise;
+  const current = ++sequence;
+  controller?.abort();
+  controller = new AbortController();
   detecting.value = true;
-  error.value = "";
-  const sequence = ++identifySequence,
-    source = input.value.trim();
-  try {
-    const found = await api<{
-      platform_id: string;
-      input_kind: "author" | "work" | "unknown";
-    }>("/platforms/detect", { method: "POST", ...jsonBody({ value: source }) });
-    if (sequence !== identifySequence || source !== input.value.trim()) return;
-    platformId.value = found.platform_id;
-    inputKind.value = found.input_kind;
-    if (found.platform_id === "xhs" && found.input_kind === "author") {
-      identified.value = false;
-      error.value = "小红书目前仅支持单条笔记；作者主页批量采集已搁置。";
-      return;
-    }
-    identified.value = true;
-    confirmedInput.value = source;
-  } catch {
-    if (sequence !== identifySequence) return;
-    identified.value = false;
-    error.value =
-      "未能从链接识别平台。若输入的是用户名或短文本，请手动选择平台。";
-    await nextTick();
-  } finally {
-    if (sequence === identifySequence) detecting.value = false;
-  }
+  const promise = api<Detection>("/platforms/detect", {
+    method: "POST",
+    signal: controller.signal,
+    ...jsonBody({ value: source }),
+  })
+    .then((value) => {
+      if (current === sequence && input.value.trim() === source)
+        found.value = value;
+      return current === sequence ? value : null;
+    })
+    .catch(() => null)
+    .finally(() => {
+      if (current === sequence) {
+        detecting.value = false;
+        pending = null;
+      }
+    });
+  pending = { source, promise };
+  return promise;
 }
-function confirmPlatform() {
-  if (!input.value.trim()) {
-    error.value = "先填写下载来源。";
-    return;
+async function paste() {
+  if (pasting.value || submitting.value) return;
+  pasting.value = true;
+  pasteHint.value = "";
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text.trim()) input.value = text.slice(0, 4096);
+    else pasteHint.value = "剪贴板为空，也可以长按输入框粘贴。";
+  } catch {
+    pasteHint.value = "浏览器未允许读取剪贴板，请长按输入框粘贴。";
+  } finally {
+    pasting.value = false;
+    await nextTick();
+    field.value?.focus();
   }
-  if (!platformId.value) {
-    error.value = "先选择平台。";
-    return;
-  }
-  if (
-    platformId.value === "xhs" &&
-    /\/(?:user\/profile)\/[a-z0-9]+\/?(?:\?.*)?$/i.test(input.value.trim())
-  ) {
-    error.value = "小红书目前仅支持单条笔记；作者主页批量采集已搁置。";
-    return;
-  }
-  identified.value = true;
-  confirmedInput.value = input.value.trim();
-  error.value = "";
 }
 async function submit() {
-  if (!identified.value || !platformId.value || submitting.value) return;
-  if (confirmedInput.value !== input.value.trim()) {
-    identified.value = false;
-    error.value = "来源已改变，请重新识别并确认。";
-    return;
-  }
-  if (platformId.value === "xhs" && inputKind.value === "author") {
-    error.value = "小红书目前仅支持单条笔记。";
+  if (submitting.value || pasting.value || disposed) return;
+  const source = input.value.trim();
+  if (!source) {
+    field.value?.focus();
     return;
   }
   submitting.value = true;
   error.value = "";
-  const source = input.value.trim(),
-    platform = platformId.value;
+  success.value = null;
+  clearTimeout(timer);
   try {
-    if (platform === "douyin") {
-      const result = await api<{
-        url_type?: string;
-        author_already_exists?: boolean;
-        author_id?: number;
-        author_position?: number;
-        job_id?: string;
-        task_ids?: number[];
-      }>("/tasks/download", {
-        method: "POST",
-        ...jsonBody({ share_url: source, start_index: 1, wait_time: 1 }),
-      });
-      if (result.url_type === "author" && result.author_id) {
-        emit("close");
-        store.notify(
-          `${result.author_already_exists ? "作者已存在；" : ""}已提交作者扫描（作业 ${result.job_id || "待确认"}），扫描后才会创建下载任务。`,
-          "info",
-        );
-        await router.push({
-          path: "/douyin/authors",
-          query: {
-            focus: String(result.author_id),
-            position: String(result.author_position || 0),
-          },
-        });
-        return;
-      }
-      if (result.task_ids?.length) {
-        store.notify(
-          `已创建下载任务：${result.task_ids.map((id) => "#" + id).join("、")}`,
-        );
-        emit("close");
-        await router.push({
-          path: "/operations/tasks",
-          query: {
-            platform: "douyin",
-            task_key: `douyin:${result.task_ids[0]}`,
-          },
-        });
-        return;
-      }
-    } else {
-      const result =
-        platform === "x"
-          ? await api<any>("/x/download", {
-              method: "POST",
-              ...jsonBody({ profile_url: source }),
-            })
-          : await api<any>(`/platform-downloads/${platform}/download`, {
-              method: "POST",
-              ...jsonBody({ source }),
-            });
-      if (result.id) {
-        store.notify(`下载任务 #${result.id} 已提交`);
-        emit("close");
-        await router.push({
-          path: "/operations/tasks",
-          query: { platform, task_key: `${platform}:${result.id}` },
-        });
-        return;
-      }
+    await identify(source);
+    if (disposed || source !== input.value.trim()) return;
+    if (blocked.value) {
+      error.value = blocked.value;
+      return;
     }
-    const destination = `/operations/tasks?platform=${encodeURIComponent(platform)}`;
-    store.notify("下载任务已提交，可以在全部任务中查看进度。");
-    emit("close");
-    await router.push(destination);
+    const target = platform.value;
+    if (!target) {
+      manualOpen.value = true;
+      error.value = "未能识别平台，请在下方选择平台后提交。";
+      return;
+    }
+    if (mode.value === "subscribe") {
+      const author = await api<any>(
+        target === "x" ? "/x/authors/" : "/authors/",
+        {
+          method: "POST",
+          ...jsonBody({
+            [target === "x" ? "profile_url" : "share_url"]: source,
+            is_subscribed: true,
+          }),
+        },
+      );
+      if (!author.id || author.is_subscribed !== true)
+        throw new Error("订阅状态尚未确认，请在作者页检查后重试。");
+      success.value = {
+        message: `已订阅 ${author.nickname || author.display_name || author.username || "作者"}`,
+        path: `/authors/${target}`,
+        query: { author: String(author.id) },
+      };
+      window.dispatchEvent(
+        new CustomEvent("app:authors-changed", {
+          detail: { platform: target },
+        }),
+      );
+    } else if (target === "douyin") {
+      const result = await api<any>("/tasks/download", {
+        method: "POST",
+        ...jsonBody({
+          share_url: source,
+          allow_author_scan: kind.value === "author",
+        }),
+      });
+      success.value =
+        result.url_type === "author" && result.author_id
+          ? {
+              message: "作者作品扫描已提交，扫描后创建下载任务",
+              path: "/authors/douyin",
+              query: { author: String(result.author_id) },
+            }
+          : {
+              message: result.task_ids?.length
+                ? `已加入下载队列 · ${result.task_ids.length} 个文件`
+                : "下载任务已提交",
+              path: "/operations/tasks",
+              query: {
+                platform: target,
+                ...(result.task_ids?.length
+                  ? { task_key: `douyin:${result.task_ids[0]}` }
+                  : {}),
+              },
+            };
+      window.dispatchEvent(new CustomEvent("app:tasks-changed"));
+    } else {
+      const result = await api<any>(
+        target === "x"
+          ? "/x/download"
+          : `/platform-downloads/${target}/download`,
+        {
+          method: "POST",
+          ...jsonBody(target === "x" ? { profile_url: source } : { source }),
+        },
+      );
+      success.value = {
+        message: "下载任务已提交",
+        path: "/operations/tasks",
+        query: {
+          platform: target,
+          ...(result.id ? { task_key: `${target}:${result.id}` } : {}),
+        },
+      };
+      window.dispatchEvent(new CustomEvent("app:tasks-changed"));
+    }
+    input.value = "";
+    void store.refreshStats();
   } catch (reason: any) {
-    error.value = reason.message || "提交失败，请检查链接和平台后重试。";
+    error.value = reason.message || "提交失败，请稍后重试。";
+    if (reason.code === "author_link_requires_confirmation") {
+      found.value = { platform_id: "douyin", input_kind: "author" };
+    }
   } finally {
     submitting.value = false;
+    await nextTick();
+    field.value?.focus();
   }
 }
+function viewResult() {
+  if (success.value) {
+    emit("close");
+    void router.push({ path: success.value.path, query: success.value.query });
+  }
+}
+function submitFromKeyboard(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  event.preventDefault();
+  void submit();
+}
 onMounted(() => {
+  origin = props.returnFocus || captureFocusOrigin();
   modalDepth.value++;
-  document.addEventListener("keydown", onKeydown);
-  void nextTick(() => focusFirst(panelElement.value, inputElement.value));
+  document.addEventListener("keydown", keydown);
+  updateViewport();
+  window.visualViewport?.addEventListener("resize", updateViewport);
+  window.visualViewport?.addEventListener("scroll", updateViewport);
+  void nextTick(() => focusFirst(panel.value, field.value));
 });
 onBeforeUnmount(() => {
-  identifySequence++;
+  disposed = true;
+  window.visualViewport?.removeEventListener("resize", updateViewport);
+  window.visualViewport?.removeEventListener("scroll", updateViewport);
+  invalidate();
   modalDepth.value--;
-  document.removeEventListener("keydown", onKeydown);
+  document.removeEventListener("keydown", keydown);
+  void nextTick(() => restoreFocus(origin));
 });
 </script>
 
 <template>
-  <div class="download-backdrop" @click.self="close">
-    <section
-      ref="panelElement"
-      class="download-panel"
+  <div
+    class="download-backdrop"
+    :style="
+      viewportHeight
+        ? {
+            '--capture-height': viewportHeight + 'px',
+            '--capture-top': viewportTop + 'px',
+          }
+        : undefined
+    "
+    @click.self="close"
+  >
+    <form
+      ref="panel"
+      class="download-panel quick-capture"
       role="dialog"
       aria-modal="true"
       aria-labelledby="new-download-title"
+      @submit.prevent="submit"
     >
       <header>
         <div>
-          <h2 id="new-download-title">新建下载</h2>
-          <p>先确认来源，再提交到后台队列。</p>
+          <h2 id="new-download-title">
+            {{ mode === "subscribe" ? "订阅作者" : "下载作品" }}
+          </h2>
+          <p>粘贴分享内容，一次提交。</p>
         </div>
         <button
+          type="button"
           class="icon-btn"
-          aria-label="关闭新建下载"
+          aria-label="关闭添加面板"
           :disabled="submitting"
           @click="close"
         >
           <X :size="19" />
         </button>
       </header>
+      <div class="capture-tabs" aria-label="添加内容类型">
+        <button
+          type="button"
+          :aria-pressed="mode === 'download'"
+          :disabled="submitting"
+          @click="mode = 'download'"
+        >
+          <Download :size="17" />下载作品
+        </button>
+        <button
+          type="button"
+          :aria-pressed="mode === 'subscribe'"
+          :disabled="submitting"
+          @click="mode = 'subscribe'"
+        >
+          <Users :size="17" />订阅作者
+        </button>
+      </div>
       <div class="download-panel-body">
-        <label for="download-source">作品链接、作者主页或用户标识</label>
+        <div class="capture-input-label">
+          <label for="download-source">{{
+            mode === "subscribe" ? "作者主页链接" : "作品链接或分享内容"
+          }}</label
+          ><button
+            type="button"
+            class="text-button"
+            :disabled="submitting || pasting"
+            @click="paste"
+          >
+            <ClipboardPaste :size="15" />{{ pasting ? "正在读取…" : "粘贴" }}
+          </button>
+        </div>
         <div class="source-input">
-          <Link2 :size="19" /><input
+          <Link2 :size="18" /><textarea
             id="download-source"
-            ref="inputElement"
+            ref="field"
             v-model="input"
+            :disabled="submitting"
+            rows="3"
+            maxlength="4096"
+            inputmode="url"
+            enterkeyhint="go"
             autocomplete="off"
-            placeholder="粘贴分享链接或输入用户标识"
-            @input="
-              identified = false;
-              inputKind = 'unknown';
-              error = '';
+            autocapitalize="off"
+            :spellcheck="false"
+            :aria-invalid="Boolean(error || blocked)"
+            :aria-describedby="
+              error || blocked ? 'capture-error' : 'capture-help'
             "
-            @keyup.enter="identify"
+            :placeholder="
+              mode === 'subscribe'
+                ? '粘贴作者分享链接，也支持 X 用户名'
+                : '直接粘贴复制的整段分享内容'
+            "
+            @keydown.enter.exact="submitFromKeyboard"
           />
         </div>
-        <p class="field-help">
-          识别只检查链接所属平台，不会发起下载。单条作品和作者主页由各平台按已有能力处理。
+        <p id="capture-help" class="field-help">
+          {{
+            mode === "subscribe"
+              ? "添加后直接开启自动更新，无需再去列表打开订阅。"
+              : "视频、单图、实况、图集自动识别；图集会创建对应文件任务。"
+          }}
         </p>
-        <button
-          class="btn ghost"
-          :disabled="detecting || !input.trim()"
-          @click="identify"
-        >
-          <Search :size="17" />{{ detecting ? "识别中…" : "识别来源" }}
-        </button>
-
-        <div class="download-platform-choice">
-          <label for="download-platform">平台</label>
-          <select
-            id="download-platform"
-            v-model="platformId"
-            @change="selectPlatform"
+        <p v-if="pasteHint" class="field-help" role="status">{{ pasteHint }}</p>
+        <div v-if="input.trim()" class="capture-detection" aria-live="polite">
+          <LoaderCircle v-if="detecting" :size="15" class="spinning" /><Check
+            v-else-if="found"
+            :size="15"
+          /><span>{{
+            detecting
+              ? "正在识别链接…"
+              : selected
+                ? `${selected.name}${kind === "author" ? " · 作者主页" : kind === "work" ? " · 单条作品" : ""}`
+                : "选择平台后即可提交"
+          }}</span
+          ><button
+            v-if="!found"
+            type="button"
+            class="text-button"
+            :disabled="submitting"
+            @click="manualOpen = !manualOpen"
           >
-            <option value="">选择平台</option>
-            <option v-for="item in options" :key="item.id" :value="item.id">
+            选择平台
+          </button>
+        </div>
+        <div v-if="manualOpen && !found" class="download-platform-choice">
+          <label for="download-platform">平台</label
+          ><select
+            id="download-platform"
+            v-model="manualPlatform"
+            :disabled="submitting"
+          >
+            <option value="">自动识别</option>
+            <option
+              v-for="item in options.filter(
+                (item) =>
+                  mode !== 'subscribe' || ['douyin', 'x'].includes(item.id),
+              )"
+              :key="item.id"
+              :value="item.id"
+            >
               {{ item.name }}
             </option>
           </select>
-          <button
-            v-if="platformId && !identified"
-            class="text-button"
-            @click="confirmPlatform"
-          >
-            确认选择 {{ selected?.name || "该平台" }}
-          </button>
         </div>
-        <div
-          v-if="identified && selected"
-          class="source-confirmed"
-          role="status"
+        <p
+          v-if="mode === 'download' && kind === 'author' && !blocked"
+          class="capture-profile-note"
         >
-          <CircleCheck :size="19" /><span
-            ><strong
-              >来源已确认：{{ selected.name
-              }}{{
-                inputKind === "author"
-                  ? " · 作者主页"
-                  : inputKind === "work"
-                    ? " · 单条作品"
-                    : ""
-              }}</strong
-            ><small>{{
-              platformId === "xhs"
-                ? "小红书当前仅支持单条笔记，不支持作者主页批量采集。"
-                : "提交后会显示在全部任务中；如需调整来源，请重新识别。"
-            }}</small></span
+          这是作者主页，提交会扫描该作者作品并创建下载任务。<button
+            type="button"
+            class="text-button"
+            :disabled="submitting"
+            @click="mode = 'subscribe'"
           >
-        </div>
-        <div v-if="error" class="form-error" role="alert">
-          <IssueDetail
-            :message="error"
-            impact="来源尚未提交，请核对输入后重试。"
-          />
+            只订阅此作者
+          </button>
+        </p>
+        <p
+          v-if="error || blocked"
+          id="capture-error"
+          class="form-error"
+          role="alert"
+        >
+          {{ error || blocked }}
+        </p>
+        <div v-if="success" class="capture-success" role="status">
+          <Check :size="18" />
+          <div>
+            <strong>{{ success.message }}</strong
+            ><span>可继续粘贴下一条链接</span>
+          </div>
+          <button type="button" class="text-button" @click="viewResult">
+            查看<ArrowRight :size="14" />
+          </button>
         </div>
       </div>
       <footer>
-        <button class="btn ghost" :disabled="submitting" @click="close">
-          取消</button
+        <button
+          type="button"
+          class="btn ghost"
+          :disabled="submitting"
+          @click="close"
+        >
+          关闭</button
         ><button
           class="btn primary"
-          :disabled="
-            !identified ||
-            submitting ||
-            (platformId === 'xhs' && inputKind === 'author')
-          "
-          @click="submit"
+          :disabled="!input.trim() || submitting || pasting || Boolean(blocked)"
         >
-          {{ submitting ? "正在提交…" : "确认提交" }}<ArrowRight :size="17" />
+          <LoaderCircle v-if="submitting" :size="17" class="spinning" /><span>{{
+            submitLabel
+          }}</span
+          ><ArrowRight v-if="!submitting" :size="17" />
         </button>
       </footer>
-    </section>
+    </form>
   </div>
 </template>

@@ -191,6 +191,7 @@ class TaskProgressResponse(BaseModel):
 class BatchDownloadRequest(BaseModel):
     """批量下载请求"""
     share_url: str = Field(..., description="作者分享链接")
+    allow_author_scan: bool = Field(True, description="是否允许作者主页批量扫描；单条作品入口传 False")
     download_all: bool = Field(True, description="是否下载全部作品")
     work_ids: Optional[List[str]] = Field(None, description="指定作品ID列表")
 
