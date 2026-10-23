@@ -33,6 +33,7 @@ DATABASE_BACKUP=""
 DATABASE_MIGRATED=0
 MAINTENANCE_STARTED=0
 RUNTIME_PREVIOUS_BUILD=""
+OLD_RUNTIME_STATE=""
 
 validate_layout() {
     test -d "$SERVICE_ROOT/.git" || {
@@ -431,6 +432,119 @@ deployment_action() {
     (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.deployment "$@" --root "$SERVICE_ROOT")
 }
 
+old_runtime_state() {
+    # 失败发生在代码切换前时，仍由旧 Web 使用自己的解释器和进程协议恢复。
+    # 候选管理器不能为旧代码启动 Worker/Beat，更不能替换其在途 Worker。
+    (
+        cd "$SERVICE_ROOT"
+        APP_PORT="$PORT" "$RUNTIME_VENV/bin/python" - "$1" "$OLD_RUNTIME_STATE" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import time
+import urllib.error
+import urllib.request
+
+import psutil
+from app.core.config import settings
+
+action, filename = sys.argv[1:]
+path = Path(filename)
+port = int(os.environ["APP_PORT"])
+if not 1 <= port <= 65535:
+    raise SystemExit("Invalid runtime port")
+base = f"http://127.0.0.1:{port}"
+token = settings.ADMIN_TOKEN
+headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+def request(endpoint, *, write=False, payload=None):
+    req = urllib.request.Request(base + endpoint, headers={**headers, "Content-Type": "application/json"},
+                                 data=json.dumps(payload or {}).encode() if write else None,
+                                 method="POST" if write else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        if not write and endpoint == "/api/ready" and exc.code == 503:
+            return exc.code, json.loads(exc.read())
+        raise RuntimeError(f"Old runtime API failed: {endpoint}, HTTP {exc.code}") from None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Old runtime API failed: {endpoint}, {type(exc).__name__}") from None
+
+def process_identity(item):
+    if not item.get("pid"):
+        return None
+    try:
+        return psutil.Process(int(item["pid"])).create_time()
+    except psutil.NoSuchProcess:
+        return None
+
+if action == "capture":
+    _, status = request("/api/process/status")
+    _, readiness = request("/api/ready")
+    state = {"port": port, "worker_concurrency": int(settings.MAX_CONCURRENT_DOWNLOADS),
+             "components": {name: bool(value.get("ok"))
+             for name, value in readiness.get("components", {}).items()}, "processes": {}}
+    for name in ("worker", "beat"):
+        item = status[name]
+        state["processes"][name] = {"running": bool(item.get("running")),
+            "desired": bool(item.get("desired", item.get("running"))), "pid": item.get("pid"),
+            "created_at": process_identity(item)}
+    candidate = path.with_suffix(".tmp")
+    with open(candidate, "w", encoding="utf-8") as handle:
+        os.chmod(candidate, 0o600)
+        json.dump(state, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(candidate, path)
+    print("Previous runtime process intent and readiness recorded")
+elif action == "restore":
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if state["port"] != port:
+        raise SystemExit("Old runtime recovery port mismatch")
+    targets = {name: bool(item["running"] or item["desired"]) for name, item in state["processes"].items()}
+    for name in ("worker", "beat"):
+        _, current = request("/api/process/status")
+        if not targets[name] or current[name].get("running"):
+            continue
+        original = state["processes"][name]
+        if original.get("running") and original.get("created_at") is not None:
+            try:
+                process = psutil.Process(int(original["pid"]))
+                if (abs(process.create_time() - original["created_at"]) <= 0.01
+                        and process.is_running() and process.status() != psutil.STATUS_ZOMBIE):
+                    raise RuntimeError(f"Original {name} is alive but old Web cannot confirm ownership; no replacement attempted")
+            except psutil.NoSuchProcess:
+                pass
+        try:
+            payload = {"concurrency": int(state["worker_concurrency"])} if name == "worker" else {}
+            request(f"/api/process/{name}/start", write=True, payload=payload)
+        except RuntimeError:
+            # 启动响应丢失时只读确认，不重复写入。
+            pass
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        _, current = request("/api/process/status")
+        code, readiness = request("/api/ready")
+        components = readiness.get("components", {})
+        processes_ok = all(not desired or current[name].get("running") for name, desired in targets.items())
+        baseline_ok = all(not was_ready or components.get(name, {}).get("ok") is True
+                          for name, was_ready in state["components"].items())
+        targets_ready = all(not desired or components.get(name, {}).get("ok") is True
+                            for name, desired in targets.items())
+        if processes_ok and baseline_ok and targets_ready:
+            print("Previous runtime restored and readiness confirmed through its own Web process")
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit("Old runtime recovery did not confirm readiness; deployment artifacts retained")
+else:
+    raise SystemExit("Unknown runtime state action")
+PY
+    )
+}
+
 stop_optional_supervisor() {
     local file="$SERVICE_ROOT/logs/optional-services.pid" pid="" command=""
     [ -f "$file" ] || return 0
@@ -517,7 +631,7 @@ smoke_check() {
         trap - ERR
         cd "$SERVICE_ROOT"
         APP_PORT="$PORT" ALLOW_LEGACY_HEALTH="$allow_legacy_health" SMOKE_ATTEMPTS="$attempts" \
-            "$BUILD_VENV/bin/python" - <<'PY'
+            "$RUNTIME_VENV/bin/python" - <<'PY'
 import json, os, time, urllib.error, urllib.request
 from app.core.config import settings
 
@@ -724,15 +838,22 @@ reconcile_published_worktree_changes() {
 }
 
 rollback() {
-    local exit_code=$?
+    local exit_code="${1:-$?}"
     trap - ERR
+    # 收到第二个终止信号时仍完成恢复或留下明确的失败状态，不递归回滚。
+    trap '' TERM HUP INT
     if [ "$ROLLING_BACK" -eq 1 ] || [ "$MAINTENANCE_STARTED" -eq 0 ] || [ -z "$PREVIOUS_SHA" ]; then
         cleanup_candidate
         exit "$exit_code"
     fi
     if [ "$CODE_SWITCHED" -eq 0 ] && [ "$DATABASE_MIGRATED" -eq 0 ]; then
         rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
-        deployment_action resume || true
+        if ! old_runtime_state restore; then
+            echo "Early rollback recovery failed; old code, candidate and backups retained for recovery." >&2
+            printf '%s\n' 'Old runtime recovery failed before code switch; inspect old Web readiness.' \
+                > "$DEPENDENCY_BACKUP/recovery-failed.txt"
+            exit "$exit_code"
+        fi
         cleanup_candidate
         exit "$exit_code"
     fi
@@ -782,6 +903,9 @@ PY
 }
 
 trap rollback ERR
+trap 'rollback 143' TERM
+trap 'rollback 129' HUP
+trap 'rollback 130' INT
 validate_layout
 mkdir -p "$SERVICE_ROOT/logs"
 mkdir -p "$SERVICE_ROOT/.runtime"
@@ -822,9 +946,11 @@ if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
         cp -p "$SERVICE_ROOT/.env" "$DEPENDENCY_BACKUP/runtime.env"
         chmod 600 "$DEPENDENCY_BACKUP/runtime.env"
     fi
+    OLD_RUNTIME_STATE="$DEPENDENCY_BACKUP/runtime-state.json"
+    old_runtime_state capture
     touch "$SERVICE_ROOT/.runtime/deployment-maintenance"
     MAINTENANCE_STARTED=1
-    deployment_action drain --timeout 300
+    deployment_action drain --timeout 7500
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。
     CODE_SWITCHED=1
     stop_running_instances
@@ -851,7 +977,7 @@ smoke_check 0 30
 rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
 
 CODE_SWITCHED=0
-trap - ERR
+trap - ERR TERM HUP INT
 cleanup_legacy_release_layout
 cleanup_candidate
 echo "Deploy success. ${PROJECT_NAME} root worktree is at ${TARGET_SHA}; Jenkins restarted it with the BT Panel environment."

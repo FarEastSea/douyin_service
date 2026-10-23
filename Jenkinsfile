@@ -4,7 +4,8 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
-        timeout(time: 30, unit: 'MINUTES')
+        // 最长存储维护任务排空 125 分钟，另留依赖准备、数据库恢复与验收时间。
+        timeout(time: 240, unit: 'MINUTES')
         timestamps()
     }
 

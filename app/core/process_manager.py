@@ -78,6 +78,21 @@ class ProcessManager:
     def _pidfile(self, name: str) -> Path:
         return Path(self._project_dir) / "logs" / f"celery_{name}.pid"
 
+    @staticmethod
+    def _pid_is_terminal(pid: int, entry: dict) -> bool:
+        """僵尸已不能执行任务；只有创建时间匹配的记录才能证明其身份。"""
+        try:
+            process = psutil.Process(pid)
+            return (entry.get("pid") == pid and entry.get("created_at") is not None
+                    and abs(process.create_time() - float(entry["created_at"])) <= 0.01
+                    and process.status() == psutil.STATUS_ZOMBIE)
+        except psutil.ZombieProcess:
+            return False
+        except psutil.NoSuchProcess:
+            return True
+        except (psutil.Error, ValueError, TypeError):
+            return False
+
     def _process(self, name: str, entry: dict) -> Optional[psutil.Process]:
         """身份包含创建时间，不能仅凭可能复用的 PID 杀进程。"""
         child = self._children.get(name)
@@ -178,7 +193,7 @@ class ProcessManager:
             if pidfile.exists():
                 try:
                     stale_pid = int(pidfile.read_text().strip())
-                    if psutil.pid_exists(stale_pid):
+                    if psutil.pid_exists(stale_pid) and not self._pid_is_terminal(stale_pid, entry):
                         return {"success": False, "message": f"{name} PID 文件指向未确认身份的进程"}
                 except (OSError, ValueError):
                     pass
@@ -265,20 +280,33 @@ class ProcessManager:
         self._save(state)
         if process is None and self._pidfile(name).exists():
             try:
-                if psutil.pid_exists(int(self._pidfile(name).read_text().strip())):
+                pid = int(self._pidfile(name).read_text().strip())
+                if psutil.pid_exists(pid) and not self._pid_is_terminal(pid, entry):
                     return {"success": False, "message": f"{name} PID 身份无法确认，未停止该进程"}
             except (OSError, ValueError):
                 pass
         if process is not None:
             try:
                 process.send_signal(signal.SIGTERM)
-                process.wait(timeout=30)
-            except psutil.TimeoutExpired:
-                return {"success": False, "message": f"{name} 正等待在途任务结束"}
+                deadline = time.monotonic() + 30
+                while process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    if time.monotonic() >= deadline:
+                        return {"success": False, "message": f"{name} 正等待在途任务结束"}
+                    time.sleep(0.25)
             except psutil.NoSuchProcess:
                 pass
             except psutil.Error:
                 return {"success": False, "message": f"{name} 进程无法停止"}
+        pidfile = self._pidfile(name)
+        if pidfile.exists():
+            try:
+                if int(pidfile.read_text().strip()) == entry.get("pid"):
+                    pidfile.unlink()
+            except (OSError, ValueError):
+                pass
+        child = self._children.get(name)
+        if child is not None:
+            child.poll()
         entry.update(pid=None, ready=False)
         self._save(state)
         return {"success": True, "message": f"{name} 已停止"}

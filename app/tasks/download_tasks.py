@@ -102,6 +102,21 @@ AUTHOR_ACCOUNT_STATUS_MARKER_PREFIX = "__ACCOUNT_STATUS__"
 TERMINAL_AUTHOR_ACCOUNT_STATUSES = {"deleted", "banned", "restricted"}
 
 
+def _deployment_in_progress() -> bool:
+    from app.core import env_config
+    return (env_config.ENV_PATH.parent / ".runtime" / "deployment-maintenance").exists()
+
+
+def _subscription_delay(seconds: float, deadline: float) -> None:
+    """作者之间的等待可以被发布协作暂停，已开始的作者仍正常提交断点。"""
+    until = min(deadline, time.monotonic() + seconds)
+    while not _deployment_in_progress():
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
+
+
 def _notify_event(event: str, title: str, body: str, *, level: str, dedupe_key: str) -> None:
     try:
         celery_app.send_task(
@@ -1403,6 +1418,19 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
     
     try:
         runtime_config = get_runtime_config_sync(db)
+        # 维护暂停的人工检查也是已接受的工作，恢复其 force/full_reconcile 意图后
+        # 再判断自动检查开关，避免把人工请求静默降级成普通周期扫描。
+        if not author_ids and not full_reconcile:
+            saved_cycle = _load_subscription_cycle_state(db)
+            saved_remaining = saved_cycle.get("remaining_author_ids") or []
+            if saved_cycle.get("active") and saved_remaining:
+                author_ids = [int(author_id) for author_id in saved_remaining]
+                cycle_id = str(saved_cycle.get("cycle_id") or cycle_id or uuid4().hex)
+                cycle_total = int(saved_cycle.get("total_authors") or cycle_total or len(author_ids))
+                cycle_checked = int(saved_cycle.get("checked_authors") or cycle_checked or 0)
+                cycle_new_works = int(saved_cycle.get("new_works") or cycle_new_works or 0)
+                full_reconcile = bool(saved_cycle.get("full_reconcile", full_reconcile))
+                force = bool(force or saved_cycle.get("force", False))
         if not force and not runtime_config.get("auto_check_enabled", True):
             redis_client.append_activity_log(
                 "info",
@@ -1414,18 +1442,6 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 
         global_interval = int(runtime_config.get("subscription_check_interval", settings.DEFAULT_CHECK_INTERVAL))
         author_delay = float(runtime_config.get("author_check_delay", settings.AUTHOR_CHECK_DELAY))
-
-        # 风控或超时留下的周期由下一次自动调度或手动触发从断点继续，不新开一轮。
-        if not author_ids and not full_reconcile:
-            saved_cycle = _load_subscription_cycle_state(db)
-            saved_remaining = saved_cycle.get("remaining_author_ids") or []
-            if saved_cycle.get("active") and saved_remaining:
-                author_ids = [int(author_id) for author_id in saved_remaining]
-                cycle_id = str(saved_cycle.get("cycle_id") or cycle_id or uuid4().hex)
-                cycle_total = int(saved_cycle.get("total_authors") or cycle_total or len(author_ids))
-                cycle_checked = int(saved_cycle.get("checked_authors") or cycle_checked or 0)
-                cycle_new_works = int(saved_cycle.get("new_works") or cycle_new_works or 0)
-                full_reconcile = bool(saved_cycle.get("full_reconcile", full_reconcile))
 
         if not force and not author_ids:
             last_check_time = _get_last_subscription_check_time(db)
@@ -1515,6 +1531,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             "remaining_authors": max(0, cycle_total - cycle_checked),
             "new_works": cycle_new_works,
             "full_reconcile": full_reconcile,
+            "force": force,
             "remaining_author_ids": [author.id for author in authors],
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         })
@@ -1528,6 +1545,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         stopped_for_timeout = False
         stopped_for_rate_limit = False
         stopped_for_upstream = False
+        stopped_for_deployment = False
         risk_author_id = None
         risk_error_code = None
         REQUEST_FAILURE_STOP_THRESHOLD = 3
@@ -1583,12 +1601,17 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 "remaining_authors": len(round_remaining_ids),
                 "new_works": cycle_new_works + current_new_works,
                 "full_reconcile": full_reconcile,
+                "force": force,
                 "remaining_author_ids": round_remaining_ids,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             })
             db.commit()
         
         for author in authors:
+            if _deployment_in_progress():
+                stopped_for_deployment = True
+                logger.info("发布维护已开始，订阅检查保留作者断点并协作暂停")
+                break
             if time.monotonic() >= round_deadline:
                 stopped_for_timeout = True
                 logger.info("订阅检查达到单轮时间预算，剩余作者交由续检处理")
@@ -1649,7 +1672,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "message": profile_result.get("account_status_label"),
                     })
                     if author_delay > 0:
-                        time.sleep(author_delay)
+                        _subscription_delay(author_delay, round_deadline)
                     continue
                 
                 # 日常使用有界增量扫描；到达网页设置的周期或人工指定时执行全量对账。
@@ -1704,7 +1727,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         **scan_audit,
                     })
                     if author_delay > 0:
-                        time.sleep(author_delay)
+                        _subscription_delay(author_delay, round_deadline)
                     continue
                 
                 # 创建、查重、元数据刷新使用同一全局作品身份；并发竞争也不算新作品。
@@ -1861,7 +1884,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         correlation_id=str(e.diagnostics.get("request_id") or ""),
                     )
                     if author_delay > 0:
-                        time.sleep(author_delay)
+                        _subscription_delay(author_delay, round_deadline)
                     continue
 
                 if isinstance(e, DouyinRequestError) and e.code in {
@@ -1929,7 +1952,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                         "message": anomaly_label,
                     })
                     if author_delay > 0:
-                        time.sleep(author_delay)
+                        _subscription_delay(author_delay, round_deadline)
                     continue
 
                 probable_rate_limit = _is_probable_rate_limit_error(error_msg)
@@ -2006,7 +2029,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 
             # 请求间隔
             if author_delay > 0 and time.monotonic() < round_deadline:
-                time.sleep(min(author_delay, max(0, round_deadline - time.monotonic())))
+                _subscription_delay(author_delay, round_deadline)
         
         # 若因接近超时被迫提前结束，清除全局冷却，让下一次 Beat 立即继续。
         if stopped_for_timeout and not force:
@@ -2026,8 +2049,11 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         resume_author_ids = [author.id for author in authors if author.id not in settled_author_ids]
         if risk_author_id is not None and risk_author_id not in resume_author_ids:
             resume_author_ids.insert(0, risk_author_id)
-        if stopped_for_timeout or stopped_for_rate_limit or stopped_for_upstream:
-            if risk_error_code in {"account_isolated", "browser_identity_missing"}:
+        stopped_for_deployment = stopped_for_deployment or bool(resume_author_ids and _deployment_in_progress())
+        if stopped_for_timeout or stopped_for_rate_limit or stopped_for_upstream or stopped_for_deployment:
+            if stopped_for_deployment:
+                deferred_reason = "发布维护暂停，已保留断点，维护结束后由下一次调度续检"
+            elif risk_error_code in {"account_isolated", "browser_identity_missing"}:
                 deferred_reason = "抖音账号请求上下文不可用，重新保存账号档案后优先续检"
             elif stopped_for_upstream:
                 deferred_reason = "多个作者的请求签名连续被拒绝，等待下一轮优先续检"
@@ -2044,7 +2070,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
 
         round_checked = len(completed_author_ids)
         remaining_count = len(resume_author_ids) if (
-            stopped_for_timeout or stopped_for_rate_limit or stopped_for_upstream
+            stopped_for_timeout or stopped_for_rate_limit or stopped_for_upstream or stopped_for_deployment
         ) else 0
         due_count = round_checked + remaining_count
         status_counts = {}
@@ -2065,12 +2091,14 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         report.skipped_authors = skipped_count
         report.remaining_authors = remaining_count
         report.status = (
-            "partial_authentication" if risk_error_code in {"account_isolated", "browser_identity_missing"}
+            "paused" if stopped_for_deployment
+            else "partial_authentication" if risk_error_code in {"account_isolated", "browser_identity_missing"}
             else ("partial_upstream" if stopped_for_upstream
                   else ("partial_rate_limited" if stopped_for_rate_limit
                         else ("partial_timeout" if stopped_for_timeout else "completed")))
         )
         report.summary = (
+            ("发布维护暂停，已保留断点；" if stopped_for_deployment else "") +
             f"本轮已检查 {round_checked} 位，累计已检查 {cumulative_checked}/{cycle_total} 位，"
             f"等待续检 {remaining_count} 位，发现新作品 {report.new_works} 个，"
             f"请求作品页 {requested_pages} 页，全量对账 {full_scans} 位"
@@ -2086,6 +2114,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 "remaining_authors": remaining_count,
                 "new_works": cumulative_new_works,
                 "full_reconcile": full_reconcile,
+                "force": force,
                 "remaining_author_ids": resume_author_ids,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             })
@@ -2096,7 +2125,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         # 纯执行超时属于容量分片，可短延迟承接；风控中断则严格等待下一个
         # 设置中心定义的自动更新周期，避免过早重试加重账号风险。
         continuation_task_id = None
-        if stopped_for_timeout and remaining_count > 0:
+        if stopped_for_timeout and remaining_count > 0 and not _deployment_in_progress():
             countdown = 30
             try:
                 continuation = check_subscriptions.apply_async(kwargs={
@@ -2115,7 +2144,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 )
             except Exception as continuation_error:
                 logger.warning(f"订阅检查续检任务提交失败，将等待下一次 Beat: {continuation_error}")
-        elif stopped_for_rate_limit and remaining_count > 0 and risk_error_code in {
+        elif stopped_for_rate_limit and remaining_count > 0 and not _deployment_in_progress() and risk_error_code in {
             "argus_blocked", "rate_limited", "suspected_rate_limit",
         }:
             auto_retry = bool(runtime_config.get("douyin_risk_auto_retry", settings.DOUYIN_RISK_AUTO_RETRY))
@@ -2153,6 +2182,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             "stopped_for_timeout": stopped_for_timeout,
             "stopped_for_rate_limit": stopped_for_rate_limit,
             "stopped_for_upstream": stopped_for_upstream,
+            "stopped_for_deployment": stopped_for_deployment,
             "report_id": report.id,
             "continuation_task_id": continuation_task_id,
             "results": results,

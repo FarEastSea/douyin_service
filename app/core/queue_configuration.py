@@ -170,8 +170,10 @@ class DynamicQueueTask(Task):
         executing = bool(getattr(getattr(current_task, "request", None), "id", None))
         if journal_path().exists():
             raise RuntimeError("配置发布尚未完成，任务暂未投递；系统正在自动恢复")
-        if (env_config.ENV_PATH.parent / ".runtime" / "deployment-maintenance").exists() and not executing:
-            raise RuntimeError("项目正在发布，暂停新任务投递；请稍后重试")
+        if (env_config.ENV_PATH.parent / ".runtime" / "deployment-maintenance").exists():
+            if not executing or self.name == "app.tasks.download_tasks.check_subscriptions":
+                # 文件子任务仍正常完成；订阅周期已有数据库断点，不能无限续投阻止发布排空。
+                raise RuntimeError("项目正在发布，暂停新任务投递；请稍后重试")
         if (restart_path().exists() or change_status().get("state") == "switching"
                 or (pending_path().exists() and not executing)):
             raise RuntimeError("后台队列正在切换，暂未投递；请稍后重试")

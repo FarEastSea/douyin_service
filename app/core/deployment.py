@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+import json
+import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -11,26 +15,131 @@ import tempfile
 import time
 
 
-def queue_is_empty() -> bool:
+logger = logging.getLogger(__name__)
+SUBSCRIPTION_TASK = "app.tasks.download_tasks.check_subscriptions"
+# 单次存储修复允许运行两小时；发布不能把正常执行误判为挂死。
+DEFAULT_DRAIN_TIMEOUT = 125 * 60
+
+
+def _broker_counts(client) -> tuple[int, int]:
+    queued = sum(int(client.llen(key)) for key in client.scan_iter(match="celery*", count=100)
+                 if client.type(key) in {b"list", "list"})
+    return queued, int(client.hlen("unacked"))
+
+
+def _queue_snapshot() -> dict:
     from app.core.config import settings
     from app.tasks.celery_app import celery_app
     import redis
     with redis.Redis.from_url(settings.effective_celery_broker, socket_connect_timeout=3, socket_timeout=3) as client:
-        queued = sum(int(client.llen(key)) for key in client.scan_iter(match="celery*", count=100)
-                     if client.type(key) in {b"list", "list"})
-        unacked = int(client.hlen("unacked"))
-    from app.core.process_manager import process_manager
-    from app.core.queue_configuration import inspect_inflight
-    worker = process_manager.get_status().get("worker", {})
-    active, reserved, scheduled = inspect_inflight(celery_app, settings.effective_celery_broker,
-                                                  worker.get("pid") if worker.get("running") else None)
-    return not (queued or unacked or any(items for group in (active, reserved, scheduled) for items in (group or {}).values()))
+        from app.core.process_manager import process_manager
+        from app.core.queue_configuration import inspect_inflight
+        worker = process_manager.get_status().get("worker", {})
+        active, reserved, scheduled = inspect_inflight(celery_app, settings.effective_celery_broker,
+                                                      worker.get("pid") if worker.get("running") else None)
+        # 先核验执行端再读取 broker，避免父任务刚投递子任务并完成时漏掉新消息。
+        queued, unacked = _broker_counts(client)
+    return {"queued": queued, "unacked": unacked, "active": active or {},
+            "reserved": reserved or {}, "scheduled": scheduled or {}}
+
+
+def _requests(snapshot: dict, group: str):
+    for worker, tasks in snapshot[group].items():
+        for task in tasks:
+            request = task.get("request", task) if group == "scheduled" else task
+            yield worker, request
+
+
+def _snapshot_summary(snapshot: dict) -> dict:
+    summary = {key: snapshot[key] for key in ("queued", "unacked")}
+    for group in ("active", "reserved", "scheduled"):
+        requests = list(_requests(snapshot, group))
+        summary[group] = len(requests)
+        # 只记录程序任务名称及计数，不记录作者、任务参数或连接信息。
+        summary[group + "_types"] = dict(Counter(
+            name if re.fullmatch(r"[a-zA-Z0-9_.]+", name) else "unknown"
+            for _, request in requests for name in [str(request.get("name") or "unknown")]))
+    return summary
+
+
+def _snapshot_is_empty(snapshot: dict) -> bool:
+    return not (snapshot["queued"] or snapshot["unacked"] or any(
+        tasks for group in ("active", "reserved", "scheduled") for tasks in snapshot[group].values()))
+
+
+def queue_is_empty() -> bool:
+    return _snapshot_is_empty(_queue_snapshot())
+
+
+def _matching_subscription_continuation(request: dict, state: dict) -> bool:
+    """旧 Worker 没有维护栅栏；只允许撤销已经有持久断点的自动续检。"""
+    if request.get("name") != SUBSCRIPTION_TASK or not request.get("id") or request.get("args") not in (None, [], ()):
+        return False
+    kwargs = request.get("kwargs")
+    if not isinstance(kwargs, dict) or not state.get("active") or not state.get("remaining_author_ids"):
+        return False
+    allowed = {"force", "author_ids", "cycle_id", "cycle_total", "cycle_checked", "cycle_new_works",
+               "full_reconcile", "risk_retry_attempt"}
+    if set(kwargs) - allowed or kwargs.get("force") is not False or kwargs.get("full_reconcile", False) is not False:
+        return False
+    if kwargs.get("risk_retry_attempt", 0) not in (0, 1) or state.get("full_reconcile", False) or state.get("force", False):
+        return False
+    return bool(state.get("cycle_id")) and all((
+        kwargs.get("cycle_id") == state.get("cycle_id"),
+        kwargs.get("author_ids") == state.get("remaining_author_ids"),
+        kwargs.get("cycle_total") == state.get("total_authors"),
+        kwargs.get("cycle_checked") == state.get("checked_authors"),
+        kwargs.get("cycle_new_works") == state.get("new_works"),
+    ))
+
+
+def _defer_legacy_subscription_continuations(snapshot: dict, revoked: set[str]) -> None:
+    from app.core import env_config
+    if not (env_config.ENV_PATH.parent / ".runtime" / "deployment-maintenance").exists():
+        return
+    # 正在执行的扫描必须自行提交断点并结束，绝不终止活动任务。
+    if any(request.get("name") == SUBSCRIPTION_TASK
+           for group in ("active", "reserved") for _, request in _requests(snapshot, group)):
+        return
+    candidates = [(worker, request) for worker, request in _requests(snapshot, "scheduled")
+                  if request.get("name") == SUBSCRIPTION_TASK and request.get("id") not in revoked]
+    if not candidates:
+        return
+    from app.models.database import get_sync_db
+    from app.tasks.download_tasks import _load_subscription_cycle_state
+    from app.tasks.celery_app import celery_app
+    from app.core.config import settings
+    db = get_sync_db()
+    try:
+        state = _load_subscription_cycle_state(db)
+        with celery_app.connection_for_write(url=settings.effective_celery_broker) as connection:
+            for worker, request in candidates:
+                if _matching_subscription_continuation(request, state):
+                    # revoke 仅标记跳过；仍等 Worker 对该消息正常 ACK，不能提前声称排空。
+                    replies = celery_app.control.revoke(request["id"], terminate=False, destination=[worker],
+                                                       reply=True, timeout=3, connection=connection)
+                    if not any(worker in reply and "ok" in reply[worker] for reply in (replies or [])):
+                        raise RuntimeError("订阅续检撤销尚未获得目标 Worker 确认")
+                    revoked.add(request["id"])
+    finally:
+        db.close()
+
+
+def _record_drain_state(state: dict) -> None:
+    from app.core import env_config
+    from app.core.config_transaction import atomic_json
+    try:
+        atomic_json(env_config.ENV_PATH.parent / ".runtime" / "deployment-drain.json", state)
+    except OSError as exc:
+        logger.warning("发布排空诊断暂不能写入（%s）", type(exc).__name__)
 
 
 def drain(timeout: float) -> None:
     from app.core.process_manager import process_manager
     from app.core.config_transaction import configuration_lock, journal_path
     from app.core.queue_configuration import pending_path, restart_path
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("发布排空时间必须为有限正数")
     with configuration_lock():
         if pending_path().exists() or restart_path().exists():
             raise RuntimeError("存在待生效的队列变更，请等待切换完成后发布")
@@ -39,16 +148,51 @@ def drain(timeout: float) -> None:
         result = process_manager.stop_beat(preserve_desired=True)
     if not result.get("success"):
         raise RuntimeError("调度进程尚未停止，拒绝开始迁移")
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    revoked: set[str] = set()
+    empty_samples = 0
+    last_summary = None
+    last_error = None
+    coordination_failure_started = None
+    last_report = 0.0
     while time.monotonic() < deadline:
         try:
-            if queue_is_empty():
+            snapshot = _queue_snapshot()
+            _defer_legacy_subscription_continuations(snapshot, revoked)
+            summary = _snapshot_summary(snapshot)
+            last_error = None
+            coordination_failure_started = None
+            empty_samples = empty_samples + 1 if _snapshot_is_empty(snapshot) else 0
+            state = {"state": "drained" if empty_samples >= 2 else "waiting", "stage": "drain",
+                     "elapsed_seconds": round(time.monotonic() - started), "budget_seconds": timeout,
+                     "deferred_subscription_messages": len(revoked), **summary}
+            now = time.monotonic()
+            if summary != last_summary or now - last_report >= 30 or empty_samples >= 2:
+                _record_drain_state(state)
+                print("Deployment drain: " + json.dumps(state, ensure_ascii=False), flush=True)
+                last_summary, last_report = summary, now
+            if empty_samples >= 2:
                 return
-        except Exception:
+        except Exception as exc:
             # 故障不能降级为排空；保留旧进程并等待协调恢复。
-            pass
+            empty_samples = 0
+            last_error = type(exc).__name__
+            coordination_failure_started = coordination_failure_started or time.monotonic()
+            if time.monotonic() - last_report >= 30 or not last_report:
+                state = {"state": "waiting_coordination", "stage": "drain", "error_class": last_error,
+                         "elapsed_seconds": round(time.monotonic() - started), "budget_seconds": timeout}
+                _record_drain_state(state)
+                print("Deployment drain: " + json.dumps(state, ensure_ascii=False), flush=True)
+                last_report = time.monotonic()
+            if time.monotonic() - coordination_failure_started >= 60:
+                break
         time.sleep(2)
-    raise RuntimeError("在途任务未排空，发布已中止；旧服务和数据保持可恢复")
+    reason = "coordination_unavailable" if last_error else "tasks_still_inflight"
+    _record_drain_state({"state": "failed", "stage": "drain", "reason": reason,
+                         "error_class": last_error, "elapsed_seconds": round(time.monotonic() - started),
+                         "budget_seconds": timeout, **(last_summary or {})})
+    raise RuntimeError(f"发布排空超时（{reason}{': ' + last_error if last_error else ''}）；未执行迁移，旧服务和数据保持可恢复")
 
 
 def database_snapshot(path: Path, *, restore: bool = False) -> None:
@@ -156,7 +300,7 @@ def main() -> None:
     parser.add_argument("action", choices=("drain", "assert-empty", "assert-recovery", "backup", "restore", "shutdown", "resume"))
     parser.add_argument("--root", required=True)
     parser.add_argument("--path")
-    parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_DRAIN_TIMEOUT)
     options = parser.parse_args()
     root = Path(options.root).resolve(strict=True)
     if not (root / "main.py").is_file() or root == Path(root.anchor):
