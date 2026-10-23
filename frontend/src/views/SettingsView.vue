@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue';
 import PageHeader from "../components/PageHeader.vue";
 import SettingsSections from "../components/SettingsSections.vue";
 import MaintenanceSections from "../components/MaintenanceSections.vue";
@@ -24,7 +25,17 @@ const {
   configurationFeedback,
   queueChange,
   cancelQueueChange,
+  fieldErrors,
 } = controller;
+const errorSummary = ref<HTMLElement | null>(null);
+watch(() => Object.keys(fieldErrors.value).length, async (value, previous) => {
+  if (value > previous) { await nextTick(); errorSummary.value?.focus(); }
+});
+function focusField(key: string) {
+  const field = document.getElementById('setting-'+key);
+  field?.focus({preventScroll:true});
+  field?.scrollIntoView({block:'center'});
+}
 </script>
 <template>
   <section class="workspace-page config-workspace">
@@ -55,6 +66,7 @@ const {
     <div v-if="saveError" class="config-alert" role="alert">
       <IssueDetail :message="saveError" />
     </div>
+    <div v-if="Object.keys(fieldErrors).length" ref="errorSummary" class="field-error-summary" tabindex="-1" role="alert" aria-label="请检查以下配置字段"><strong>请检查以下字段</strong><button v-for="(message,key) in fieldErrors" :key="key" class="text-button" @click="focusField(String(key))">{{message}}</button></div>
     <p
       v-if="configurationFeedback && mode === 'settings'"
       class="maintenance-note"

@@ -25,6 +25,7 @@ from app.models.models import (
     SystemConfig, Work, Author,
 )
 from app.core.config_transaction import atomic_json
+from app.services.download_state_lock import lock_task_graph, lock_works
 
 
 PARTIAL_SUFFIXES = {".part", ".tmp", ".downloading"}
@@ -69,23 +70,17 @@ def _normalized_record_path(root: Path, value: str) -> Path:
     return candidate.resolve(strict=False)
 
 
-def find_rebase_candidate(root: Path, value: str) -> Path | None:
-    """Find one unambiguous existing file after replacing an obsolete absolute root."""
+def find_rebase_candidate(root: Path, value: str, *, old_root: Path | None = None) -> Path | None:
+    """只使用明确旧根映射重定位完整相对路径；文件名或路径后缀不能证明归属。"""
     original = Path(value).expanduser()
-    if not original.is_absolute() or original.exists():
+    if old_root is None or not original.is_absolute() or original.exists():
         return None
-    matches: list[Path] = []
-    parts = original.parts
-    # Keep at least a directory and filename. Matching a bare filename is too ambiguous.
-    for index in range(1, len(parts) - 1):
-        try:
-            candidate, _ = _resolved_under(root, str(root.joinpath(*parts[index:])))
-            if candidate.is_file() and candidate.stat().st_size > 0:
-                matches.append(candidate)
-        except (OSError, RuntimeError, ValueError):
-            continue
-    unique = list(dict.fromkeys(matches))
-    return unique[0] if len(unique) == 1 else None
+    try:
+        relative = original.relative_to(old_root.expanduser().resolve())
+        candidate, _ = _resolved_under(root, str(root / relative))
+        return candidate if candidate.is_file() and candidate.stat().st_size > 0 else None
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 async def _load_record(db: AsyncSession, kind: str, record_id: int | None):
@@ -94,6 +89,24 @@ async def _load_record(db: AsyncSession, kind: str, record_id: int | None):
         return None
     model, _ = definition
     return await db.get(model, int(record_id))
+
+
+async def _lock_record_and_task(db: AsyncSession, kind: str, record_id: int | None):
+    """先锁任务及其父记录，再锁媒体/历史，统一维护与下载写入的顺序。"""
+    record = await _load_record(db, kind, record_id)
+    if record is None:
+        return None, None
+    if isinstance(record, (DownloadTask, DownloadHistory)):
+        task_id = record.id if isinstance(record, DownloadTask) else record.task_id
+        task = await lock_task_graph(db, task_id) if task_id else None
+    else:
+        model = XDownloadTask if isinstance(record, XMediaAsset) else PlatformDownloadTask
+        task = (await db.scalars(select(model).where(model.id == record.task_id)
+            .with_for_update().execution_options(populate_existing=True))).one_or_none()
+    # 等待父锁期间记录可能已经被删除。重新读取而不复用旧 ORM 快照。
+    record = (await db.scalars(select(type(record)).where(type(record).id == record.id)
+        .with_for_update().execution_options(populate_existing=True))).one_or_none()
+    return record, task
 
 
 def _record_path(record: Any) -> str | None:
@@ -238,23 +251,9 @@ async def build_storage_repair_plan(
 async def _mark_related_task_failed(
     db: AsyncSession, record_kind: str | None, record_id: int | None,
 ) -> str | None:
-    record = await _load_record(db, record_kind or "", record_id)
-    if record is not None:
-        await db.refresh(record, with_for_update=True)
-    if isinstance(record, DownloadTask) and record.status in {"pending", "downloading", "paused"}:
-        raise ValueError("任务正在使用该文件，跳过缺失标记")
-    task = None
-    if isinstance(record, DownloadTask):
-        task = record
-    elif isinstance(record, DownloadHistory) and record.task_id:
-        task = await db.get(DownloadTask, record.task_id)
-    elif isinstance(record, XMediaAsset):
-        task = await db.get(XDownloadTask, record.task_id)
-    elif isinstance(record, PlatformMediaAsset):
-        task = await db.get(PlatformDownloadTask, record.task_id)
-    if task is None:
+    record, task = await _lock_record_and_task(db, record_kind or "", record_id)
+    if record is None or task is None:
         return None
-    await db.refresh(task, with_for_update=True)
     if task.status in {"pending", "downloading", "paused"}:
         raise ValueError("任务已经进入活跃状态，未标记失败")
     task.status = "failed"
@@ -280,10 +279,8 @@ async def _relink_record(
     old_path: str,
     new_path: str,
 ) -> dict[str, Any]:
-    record = await _load_record(db, record_kind or "", record_id)
-    if record is not None:
-        await db.refresh(record, with_for_update=True)
-    if isinstance(record, DownloadTask) and record.status in {"pending", "downloading", "paused"}:
+    record, task = await _lock_record_and_task(db, record_kind or "", record_id)
+    if task is not None and task.status in {"pending", "downloading", "paused"}:
         raise ValueError("任务正在使用该文件，跳过路径回填")
     if record is None or _record_path(record) != old_path:
         raise ValueError("关联记录路径已经变化")
@@ -353,6 +350,13 @@ async def _apply_storage_repair_plan(
     await recover_storage_journals(db, root)
     plan = await build_storage_repair_plan(db, root, targets)
     eligible = [item for item in plan if item["eligible"]]
+    # 整批预锁父记录，避免 savepoint 内逐项处理时跨作者倒序加锁。
+    work_ids = set()
+    for item in eligible:
+        record = await _load_record(db, item.get("record_kind") or "", item.get("record_id"))
+        if isinstance(record, (DownloadTask, DownloadHistory)):
+            work_ids.add(record.work_id)
+    await lock_works(db, work_ids)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     quarantine_root = root / ".quarantine" / "storage-maintenance" / timestamp
     moved: list[dict[str, str]] = []

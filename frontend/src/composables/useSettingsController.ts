@@ -8,7 +8,7 @@ import {
 } from "vue";
 
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from "vue-router";
-import { api, jsonBody, saveToken } from "../api";
+import { api, ApiError, jsonBody, saveToken } from "../api";
 
 import { useAppStore } from "../stores/app";
 
@@ -36,7 +36,11 @@ export function useSettingsController(props: {
     | "archive"
     | "douyinAccount"
     | "platformCredentials"
-    | "logs";
+    | "logs"
+    | "process"
+    | "readiness"
+    | "platformReadiness"
+    | "update";
   type ResolvedField = {
     source: "env" | "runtime";
     key: string;
@@ -87,10 +91,15 @@ export function useSettingsController(props: {
     douyinAccount: { loaded: false, error: "" },
     platformCredentials: { loaded: false, error: "" },
     logs: { loaded: false, error: "" },
+    process: { loaded: false, error: "" },
+    readiness: { loaded: false, error: "" },
+    platformReadiness: { loaded: false, error: "" },
+    update: { loaded: false, error: "" },
   });
   const saving = ref(false);
   const pageLoading = ref(false);
   const saveError = ref("");
+  const fieldErrors = ref<Record<string, string>>({});
   const configurationFeedback = ref("");
   const queueChange = ref<any>({ state: "applied", pending: false });
   let queueChangeTimer: number | undefined;
@@ -299,6 +308,7 @@ export function useSettingsController(props: {
       : (allValues.value[field.key]?.value ?? "");
   }
   function setFieldValue(field: ResolvedField, value: any) {
+    delete fieldErrors.value[field.key];
     if (field.secret) {
       secretValues.value[field.key] = String(value);
     } else if (field.source === "runtime") {
@@ -327,6 +337,9 @@ export function useSettingsController(props: {
   }
   function runtimeKeyDirty(key: string) {
     return !same(runtime.value[key], baselineRuntime.value[key]);
+  }
+  function fieldDirty(field: ResolvedField) {
+    return field.source === "runtime" ? runtimeKeyDirty(field.key) : envKeyDirty(field.key);
   }
   const dirtyEnvKeys = computed(() => activeEnvKeys.value.filter(envKeyDirty));
   const dirtyRuntimeKeys = computed(() =>
@@ -546,23 +559,35 @@ export function useSettingsController(props: {
     return ok;
   }
   async function loadProcess() {
-    process.value = await api("/process/status");
+    return trackedLoad("process", async (isCurrent) => {
+      const data = await api("/process/status");
+      if (isCurrent()) process.value = data;
+    });
   }
   async function loadReadiness() {
-    readiness.value = await api("/status/readiness");
+    return trackedLoad("readiness", async (isCurrent) => {
+      const data = await api("/status/readiness");
+      if (isCurrent()) readiness.value = data;
+    });
   }
   async function loadPlatformReadiness() {
     platformAuditBusy.value = true;
+    const pending = trackedLoad("platformReadiness", async (isCurrent) => {
+      const data = await api("/operations/platform-readiness");
+      if (isCurrent()) platformReadiness.value = data;
+    });
+    const revision = resourceRevision.platformReadiness;
     try {
-      platformReadiness.value = await api("/operations/platform-readiness");
-    } catch (error: any) {
-      store.notify(error.message || "平台验收状态加载失败", "error");
+      return await pending;
     } finally {
-      platformAuditBusy.value = false;
+      if (resourceRevision.platformReadiness === revision) platformAuditBusy.value = false;
     }
   }
   async function loadUpdateInfo() {
-    updateInfo.value = await api<any>("/update/info");
+    return trackedLoad("update", async (isCurrent) => {
+      const data = await api<any>("/update/info");
+      if (isCurrent()) updateInfo.value = data;
+    });
   }
   function stopStorageAuditPolling() {
     if (storageAuditTimer != null) window.clearInterval(storageAuditTimer);
@@ -759,8 +784,11 @@ export function useSettingsController(props: {
 
   async function loadActivePage() {
     const current = ++pageLoadSequence;
+    for (const key of Object.keys(resourceState.value) as ResourceKey[])
+      resourceRevision[key] = (resourceRevision[key] || 0) + 1;
     pageLoading.value = true;
     saveError.value = "";
+    fieldErrors.value = {};
     const jobs: Promise<any>[] = [];
     if (props.mode === "settings") {
       if (activePage.value.id === "archive") jobs.push(loadArchiveRules());
@@ -807,6 +835,7 @@ export function useSettingsController(props: {
     }
   }
   function discardActiveChanges() {
+    fieldErrors.value = {};
     for (const key of activeEnvKeys.value) {
       if (allValues.value[key])
         allValues.value[key].value = clone(baselineAll.value[key]);
@@ -842,8 +871,53 @@ export function useSettingsController(props: {
     await loadActivePage();
   }
 
-  async function saveEnvBlock(keys: string[]) {
-    const dirtyKeys = keys.filter(envKeyDirty);
+  function captureSettings() {
+    return {
+      pageId: activePage.value.id,
+      envKeys: activeEnvKeys.value.filter(envKeyDirty),
+      envValues: clone(Object.fromEntries(activeEnvKeys.value.map((key) => [key, allValues.value[key]?.value]))),
+      secrets: { ...secretValues.value },
+      runtimeKeys: activeRuntimeKeys.value.filter(runtimeKeyDirty),
+      runtime: clone(runtime.value),
+      archive: clone(archiveRules.value),
+      archiveDirty: archiveDirty.value,
+      douyin: clone(douyinAccount.value),
+      douyinBaseline: clone(baselineDouyinAccount.value),
+      douyinDirty: douyinDirtyCount.value,
+      douyinCookie: douyinCookieValue.value,
+      douyinProxy: douyinProxyValue.value,
+      credentialDirty: credentialDirty.value,
+      xCookie: xCookieValue.value,
+      platformId: activePlatform.value?.id,
+      platformCookie: activePlatform.value ? platformCookieValues.value[activePlatform.value.id] || "" : "",
+    };
+  }
+  type SaveSnapshot = ReturnType<typeof captureSettings>;
+  class SaveCancelled extends Error {}
+  function assertSaved(result: any) {
+    if (result?.success === false)
+      throw new ApiError(result.message || "保存失败", 400, result);
+  }
+  function validateFields() {
+    const errors: Record<string, string> = {};
+    for (const section of resolvedSections.value) {
+      for (const field of section.fields) {
+        const value = fieldValue(field);
+        if (field.required && !field.secret && String(value ?? "").trim() === "")
+          errors[field.key] = "请填写" + field.label;
+        else if (field.kind === "number" && value !== "" && value != null) {
+          const number = Number(value);
+          if (!Number.isFinite(number)) errors[field.key] = "请输入有效数字";
+          else if (field.min != null && number < field.min) errors[field.key] = "不能小于 " + field.min;
+          else if (field.max != null && number > field.max) errors[field.key] = "不能大于 " + field.max;
+        }
+      }
+    }
+    fieldErrors.value = errors;
+    return Object.keys(errors).length === 0;
+  }
+  async function saveEnvBlock(snapshot: SaveSnapshot) {
+    const dirtyKeys = snapshot.envKeys;
     if (!dirtyKeys.length) return false;
     if (!resourceState.value.all.loaded)
       throw new Error("基础配置尚未成功读取");
@@ -851,8 +925,8 @@ export function useSettingsController(props: {
     for (const key of dirtyKeys) {
       const field = allFieldMap.value[key];
       values[key] = field?.secret
-        ? secretValues.value[key].trim()
-        : allValues.value[key]?.value;
+        ? snapshot.secrets[key].trim()
+        : snapshot.envValues[key];
     }
     if (
       dirtyKeys.some(
@@ -863,6 +937,7 @@ export function useSettingsController(props: {
         method: "POST",
         ...jsonBody({ values }),
       });
+      assertSaved(preview);
       const counts = preview.data?.migrated_paths || {};
       const count = Object.values(counts)
         .filter((value) => typeof value === "number")
@@ -872,104 +947,123 @@ export function useSettingsController(props: {
           `目录预演通过，将更新 ${count} 条文件关联。不搬移或删除文件，是否保存？`,
         ))
       )
-        return false;
+        throw new SaveCancelled();
     }
     const result = await api<any>("/config/all", {
       method: "POST",
       ...jsonBody({ values }),
     });
+    assertSaved(result);
     configurationFeedback.value = result.message || "配置已生效";
     if (result.data?.admin_token) saveToken(result.data.admin_token);
     for (const key of dirtyKeys) {
       const field = allFieldMap.value[key];
-      if (field?.secret) delete secretValues.value[key];
-      else baselineAll.value[key] = clone(allValues.value[key]?.value);
+      if (field?.secret) {
+        if (secretValues.value[key] === snapshot.secrets[key]) delete secretValues.value[key];
+      } else {
+        const saved = result.data?.values?.[key] ?? snapshot.envValues[key];
+        baselineAll.value[key] = clone(saved);
+        if (same(allValues.value[key]?.value, snapshot.envValues[key])) allValues.value[key].value = clone(saved);
+      }
     }
     return true;
   }
-  async function saveRuntimeBlock(keys: string[]) {
-    const dirtyKeys = keys.filter(runtimeKeyDirty);
+  async function saveRuntimeBlock(snapshot: SaveSnapshot) {
+    const dirtyKeys = snapshot.runtimeKeys;
     if (!dirtyKeys.length) return false;
     if (!resourceState.value.runtime.loaded)
       throw new Error("运行配置尚未成功读取");
     const payload = Object.fromEntries(
-      dirtyKeys.map((key) => [key, runtime.value[key]]),
+      dirtyKeys.map((key) => [key, snapshot.runtime[key]]),
     );
     const result = await api<any>("/config/runtime", {
       method: "POST",
       ...jsonBody(payload),
     });
+    assertSaved(result);
+    configurationFeedback.value = result.message || "运行配置已保存";
     for (const key of dirtyKeys) {
-      if (result.data?.config && key in result.data.config)
-        runtime.value[key] = result.data.config[key];
-      baselineRuntime.value[key] = clone(runtime.value[key]);
+      const saved = result.data?.config?.[key] ?? snapshot.runtime[key];
+      if (same(runtime.value[key], snapshot.runtime[key])) runtime.value[key] = clone(saved);
+      baselineRuntime.value[key] = clone(saved);
     }
     await store.refreshStatus();
     return true;
   }
-  async function saveArchiveBlock() {
-    if (!archiveDirty.value) return false;
+  async function saveArchiveBlock(snapshot: SaveSnapshot) {
+    if (!snapshot.archiveDirty) return false;
     if (!resourceState.value.archive.loaded)
       throw new Error("归档规则尚未成功读取");
     const result = await api<any>("/config/archive-rules", {
       method: "POST",
-      ...jsonBody(archiveRules.value),
+      ...jsonBody(snapshot.archive),
     });
-    archiveRules.value = result.rules;
-    baselineArchive.value = clone(result.rules);
+    assertSaved(result);
+    const current = archiveRules.value;
+    const saved = result.rules || snapshot.archive;
+    archiveRules.value = Object.fromEntries(Object.entries(saved).map(([key, value]) => [
+      key, same(current[key], snapshot.archive[key]) ? clone(value) : current[key],
+    ]));
+    baselineArchive.value = clone(saved);
     return true;
   }
-  async function saveDouyinBlock() {
-    if (!douyinDirtyCount.value) return false;
+  async function saveDouyinBlock(snapshot: SaveSnapshot) {
+    if (!snapshot.douyinDirty) return false;
     if (!resourceState.value.douyinAccount.loaded)
       throw new Error("抖音账号状态尚未成功读取");
     const payload: Record<string, any> = {};
-    if (douyinCookieValue.value.trim())
-      payload.cookie = douyinCookieValue.value.trim();
-    if (douyinProxyValue.value.trim())
-      payload.proxy_url = douyinProxyValue.value.trim();
+    if (snapshot.douyinCookie.trim()) payload.cookie = snapshot.douyinCookie.trim();
+    if (snapshot.douyinProxy.trim()) payload.proxy_url = snapshot.douyinProxy.trim();
     if (
       !same(
-        douyinAccount.value.user_agent || "",
-        baselineDouyinAccount.value.user_agent || "",
+        snapshot.douyin.user_agent || "",
+        snapshot.douyinBaseline.user_agent || "",
       )
     )
-      payload.user_agent = douyinAccount.value.user_agent;
+      payload.user_agent = snapshot.douyin.user_agent;
     if (
       !same(
-        Boolean(douyinAccount.value.proxy_enabled),
-        Boolean(baselineDouyinAccount.value.proxy_enabled),
+        Boolean(snapshot.douyin.proxy_enabled),
+        Boolean(snapshot.douyinBaseline.proxy_enabled),
       )
     )
-      payload.proxy_enabled = Boolean(douyinAccount.value.proxy_enabled);
+      payload.proxy_enabled = Boolean(snapshot.douyin.proxy_enabled);
     const result = await api<any>("/config/douyin-account", {
       method: "POST",
       ...jsonBody(payload),
     });
-    douyinAccount.value = result.data || {};
-    baselineDouyinAccount.value = clone(douyinAccount.value);
-    douyinCookieValue.value = "";
-    douyinProxyValue.value = "";
+    assertSaved(result);
+    const saved = result.data || snapshot.douyin;
+    const current = douyinAccount.value;
+    douyinAccount.value = { ...saved };
+    for (const key of ["user_agent", "proxy_enabled"]) {
+      if (!same(current[key], snapshot.douyin[key])) douyinAccount.value[key] = current[key];
+    }
+    baselineDouyinAccount.value = clone(saved);
+    if (douyinCookieValue.value === snapshot.douyinCookie) douyinCookieValue.value = "";
+    if (douyinProxyValue.value === snapshot.douyinProxy) douyinProxyValue.value = "";
     await store.refreshRisk();
     return true;
   }
-  async function saveCredentialBlock() {
-    if (!credentialDirty.value) return false;
-    if (activePage.value.id === "account-x") {
-      await api<any>("/x/config/cookie", {
+  async function saveCredentialBlock(snapshot: SaveSnapshot) {
+    if (!snapshot.credentialDirty) return false;
+    if (snapshot.pageId === "account-x") {
+      const result = await api<any>("/x/config/cookie", {
         method: "POST",
-        ...jsonBody({ cookie: xCookieValue.value.trim() }),
+        ...jsonBody({ cookie: snapshot.xCookie.trim() }),
       });
-      xCookieValue.value = "";
+      assertSaved(result);
+      if (xCookieValue.value === snapshot.xCookie) xCookieValue.value = "";
       return true;
     }
-    const platform = activePlatform.value;
-    if (!platform) return false;
-    await api<any>("/platform-downloads/" + platform.id + "/config/cookie", {
+    const platformId = snapshot.platformId;
+    if (!platformId) return false;
+    const result = await api<any>("/platform-downloads/" + platformId + "/config/cookie", {
       method: "POST",
-      ...jsonBody({ cookie: platformCookieValues.value[platform.id].trim() }),
+      ...jsonBody({ cookie: snapshot.platformCookie.trim() }),
     });
-    platformCookieValues.value[platform.id] = "";
+    assertSaved(result);
+    if (platformCookieValues.value[platformId] === snapshot.platformCookie) platformCookieValues.value[platformId] = "";
     await loadPlatformCredentialStatus();
     return true;
   }
@@ -980,28 +1074,41 @@ export function useSettingsController(props: {
         store.notify("当前子页没有需要保存的修改", "info");
       return true;
     }
+    if (!validateFields()) {
+      saveError.value = "请修正标出的字段后保存";
+      return false;
+    }
+    const snapshot = captureSettings();
     saving.value = true;
     saveError.value = "";
     const errors: string[] = [];
     let savedBlocks = 0;
+    let cancelled = false;
     const run = async (label: string, operation: () => Promise<boolean>) => {
+      if (cancelled) return;
       try {
         if (await operation()) savedBlocks += 1;
       } catch (error: any) {
+        if (error instanceof SaveCancelled) { cancelled = true; return; }
+        if (error instanceof ApiError) Object.assign(fieldErrors.value, error.fieldErrors);
         errors.push(label + "：" + (error.message || "保存失败"));
       }
     };
-    if (activePage.value.id === "archive")
-      await run("归档规则", saveArchiveBlock);
-    else if (activePage.value.id === "account-douyin")
-      await run("抖音账号", saveDouyinBlock);
+    if (snapshot.pageId === "archive")
+      await run("归档规则", () => saveArchiveBlock(snapshot));
+    else if (snapshot.pageId === "account-douyin")
+      await run("抖音账号", () => saveDouyinBlock(snapshot));
     else {
-      await run("基础配置", () => saveEnvBlock(activeEnvKeys.value));
-      await run("运行配置", () => saveRuntimeBlock(activeRuntimeKeys.value));
-      if (activePage.value.id === "account-x" || activePlatform.value)
-        await run("平台凭据", saveCredentialBlock);
+      await run("基础配置", () => saveEnvBlock(snapshot));
+      await run("运行配置", () => saveRuntimeBlock(snapshot));
+      if (snapshot.pageId === "account-x" || snapshot.platformId)
+        await run("平台凭据", () => saveCredentialBlock(snapshot));
     }
     saving.value = false;
+    if (cancelled) {
+      store.notify("已取消保存，修改已保留", "info");
+      return false;
+    }
     if (errors.length) {
       saveError.value = errors.join("；");
       store.notify(
@@ -1011,7 +1118,7 @@ export function useSettingsController(props: {
       return false;
     }
     if (!options.silentSuccess)
-      store.notify("“" + activePage.value.title + "”已保存");
+      store.notify(hasActiveChanges.value ? "本次提交已保存，后续修改仍待保存" : "“" + activePage.value.title + "”已保存");
     return true;
   }
   async function saveAndTestNotification() {
@@ -1092,11 +1199,17 @@ export function useSettingsController(props: {
   }
   async function checkUpdate() {
     updateBusy.value = true;
+    const pending = trackedLoad("update", async (isCurrent) => {
+      const data = await api<any>("/update/check");
+      if (!isCurrent()) return;
+      updateInfo.value = data;
+      store.notify(data.message || "检查完成");
+    });
+    const revision = resourceRevision.update;
     try {
-      updateInfo.value = await api<any>("/update/check");
-      store.notify(updateInfo.value.message || "检查完成");
-    } catch (error: any) {
-      store.notify(error.message || "检查更新失败", "error");
+      const ok = await pending;
+      if (!ok && resourceRevision.update === revision)
+        store.notify(resourceState.value.update.error || "检查更新失败", "error");
     } finally {
       updateBusy.value = false;
     }
@@ -1110,19 +1223,6 @@ export function useSettingsController(props: {
       store.notify("诊断信息已复制");
     } catch (error: any) {
       store.notify(error.message || "诊断失败", "error");
-    }
-  }
-  async function applyUpdate() {
-    if (!(await confirmAction("确定拉取远程更新并重启 Worker/Beat？"))) return;
-    updateBusy.value = true;
-    try {
-      const result = await api<any>("/update/apply", { method: "POST" });
-      store.notify(result.message || "更新完成");
-      await loadUpdateInfo();
-    } catch (error: any) {
-      store.notify(error.message || "更新失败", "error");
-    } finally {
-      updateBusy.value = false;
     }
   }
   function toggleLevel(level: string) {
@@ -1263,6 +1363,7 @@ export function useSettingsController(props: {
     saving,
     pageLoading,
     saveError,
+    fieldErrors,
     configurationFeedback,
     queueChange,
     cancelQueueChange,
@@ -1294,6 +1395,7 @@ export function useSettingsController(props: {
     activeAccountFacts,
     filteredLogs,
     fieldValue,
+    fieldDirty,
     setFieldValue,
     fieldEnabled,
     toggleField,
@@ -1321,7 +1423,6 @@ export function useSettingsController(props: {
     copyLogs,
     checkUpdate,
     diagnoseUpdate,
-    applyUpdate,
     toggleLevel,
   };
 }

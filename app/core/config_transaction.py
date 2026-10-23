@@ -5,6 +5,7 @@ import asyncio
 from contextlib import contextmanager, asynccontextmanager
 from contextvars import ContextVar
 import json
+import logging
 import os
 from pathlib import Path
 import time
@@ -15,6 +16,7 @@ from sqlalchemy import select, create_engine, text
 from app.core import env_config
 
 _configuration_lease = ContextVar("configuration_lease", default=False)
+logger = logging.getLogger(__name__)
 
 
 def journal_path() -> Path:
@@ -109,27 +111,37 @@ def recover_config_change() -> None:
         args = {"connect_timeout": 5} if entry["database_url"].startswith(("postgresql", "mysql")) else {}
         engine = create_engine(entry["database_url"], connect_args=args)
         try:
-            with engine.connect() as connection:
-                committed = connection.execute(text("SELECT value FROM system_config WHERE key=:key"),
-                                               {"key": "config-change:" + entry["id"]}).scalar()
+            committed = entry.get("state") == "committed"
+            if not committed:
+                with engine.connect() as connection:
+                    committed = connection.execute(text("SELECT value FROM system_config WHERE key=:key"),
+                                                   {"key": "config-change:" + entry["id"]}).scalar()
             if not committed:
                 _restore(entry)
-            path.unlink()
+            else:
+                entry["state"] = "committed"
+                atomic_json(path, entry)
             env_config.notify_config_changed()
+            path.unlink()
         finally:
             engine.dispose()
 
 
-async def commit_configuration(db, updates: dict) -> None:
-    """外层必须完成所有数据库变更；本方法统一提交，失败不发布配置版本。"""
+async def commit_configuration(db, updates: dict) -> dict:
+    """持久化结果和后续发布结果分开；已提交的配置不会再次报保存失败。"""
+    async with configuration_session():
+        return await _commit_configuration(db, updates)
+
+
+async def _commit_configuration(db, updates: dict) -> dict:
     from app.core.config import settings
     from app.models.models import SystemConfig
-    lock = configuration_lock()
-    await asyncio.to_thread(lock.__enter__)
     path = journal_path()
     committed = False
     entry = None
     transition = None
+    transition_phase = None
+    transition_entered = False
     try:
         if path.exists():
             raise RuntimeError("存在未恢复的配置变更，请先恢复后再保存")
@@ -140,7 +152,8 @@ async def commit_configuration(db, updates: dict) -> None:
         from app.core.queue_configuration import queue_transition
         candidate = Settings.model_validate({**settings.snapshot().model_dump(), **updates})
         transition = queue_transition(candidate)
-        await asyncio.to_thread(transition.__enter__)
+        transition_phase = await asyncio.to_thread(transition.__enter__)
+        transition_entered = True
         entry = {
             "id": uuid4().hex, "state": "prepared", "created_at": time.time(),
             "database_url": settings.snapshot().effective_database_url,
@@ -155,30 +168,49 @@ async def commit_configuration(db, updates: dict) -> None:
         await asyncio.to_thread(env_config.write_env_updates, updates, coordinated=True)
         await db.commit()
         committed = True
-        # 清日志即发布：其他进程在 prepared 状态始终读取旧文件值。
-        path.unlink()
-        await asyncio.to_thread(env_config.notify_config_changed)
-        await asyncio.to_thread(transition.__exit__, None, None, None)
-        transition = None
     except BaseException:
         await db.rollback()
-        if entry and not committed:
+        if entry:
             # commit 连接中断的结果可能不确定；重新读取持久化标记后才能补偿。
             try:
                 marker = await db.scalar(select(SystemConfig.value).where(
                     SystemConfig.key == "config-change:" + entry["id"]))
-                if marker != "committed":
+                if marker == "committed":
+                    committed = True
+                else:
                     await asyncio.to_thread(_restore, entry)
-                if path.exists():
-                    path.unlink()
-                await asyncio.to_thread(env_config.notify_config_changed)
+                    await asyncio.to_thread(env_config.notify_config_changed)
+                    if path.exists():
+                        path.unlink()
             except Exception:
                 # 保留日志，启动恢复会依据持久化标记决定提交或补偿；不能猜测提交结果。
                 pass
-        raise
+        if not committed:
+            if transition_entered:
+                try:
+                    await asyncio.to_thread(transition.__exit__, RuntimeError, RuntimeError("配置未提交"), None)
+                except Exception:
+                    logger.warning("未提交配置的后台进程恢复待重试", exc_info=False)
+            raise
+    # 提交证明独立传给进程协调器；发布清单失败也不能走未提交的旧配置恢复。
+    transition_phase["committed"] = True
+    outcome = {"configuration_state": "applied"}
+    try:
+        # committed 是持久化的提交证明；清单仍保留到发布和协调全部完成。
+        entry["state"] = "committed"
+        await asyncio.to_thread(atomic_json, path, entry)
+        await asyncio.to_thread(env_config.notify_config_changed)
+        active_transition, transition = transition, None
+        await asyncio.to_thread(active_transition.__exit__, None, None, None)
+        path.unlink()
+    except Exception as exc:
+        outcome["configuration_state"] = "recovering"
+        logger.warning("配置已提交，发布协调待自动恢复（%s）", type(exc).__name__)
     finally:
         try:
-            if transition is not None:
-                await asyncio.to_thread(transition.__exit__, RuntimeError, RuntimeError("配置未完整生效"), None)
-        finally:
-            await asyncio.to_thread(lock.__exit__, None, None, None)
+            if transition_entered and transition is not None:
+                await asyncio.to_thread(transition.__exit__, RuntimeError, RuntimeError("配置已提交，发布待恢复"), None)
+        except Exception:
+            outcome["configuration_state"] = "recovering"
+            logger.warning("已提交配置的后台进程恢复待重试", exc_info=False)
+    return outcome

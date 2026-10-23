@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from uuid import uuid4
 
 from app.core.queue_configuration import DynamicQueueTask
 from sqlalchemy import event, select, update
 
 from app.models.models import DownloadTask, XDownloadTask, PlatformDownloadTask
+
+logger = logging.getLogger(__name__)
 
 
 class StaleDownloadAttempt(RuntimeError):
@@ -34,6 +37,9 @@ def prepare_download_retry(task, *, allow_completed: bool = False) -> None:
 def lock_download_attempt(db, task_id: int, token: str, model=DownloadTask) -> None:
     if db.info.get("download_attempt_locked") == (model, task_id, token):
         return
+    if model is DownloadTask:
+        from app.services.download_state_lock import lock_task_graph_sync
+        lock_task_graph_sync(db, task_id, refresh=False)
     with db.no_autoflush:
         row = db.execute(select(model.status, model.celery_task_id)
                          .where(model.id == task_id).with_for_update()).first()
@@ -89,17 +95,23 @@ class FencedDownloadTask(DynamicQueueTask):
                 db.commit()
                 return self._publish(args, kwargs, {**options, "task_id": token})
             except Exception:
-                db.rollback()
+                # Redis 登记失败时数据库仍持有本次 reservation 的行锁。
+                # 先在原事务保存故障，否则 rollback 会撤销 token，后续匹配不到记录。
+                if not db.is_active:
+                    db.rollback()
                 db.execute(update(model).where(
                     model.id == task_id, model.status == "pending",
                     model.celery_task_id == token,
-                ).values(status="failed", error_message="任务队列不可用，请重试",
+                ).values(status="failed", error_message="CoordinationUnavailable: 任务队列暂不可用，等待自动恢复",
                          completed_at=datetime.now()))
                 db.commit()
-                if model is DownloadTask:
-                    redis_client.invalidate_download_attempt(task_id, token)
-                elif platform:
-                    redis_client.clear_external_attempt(platform, task_id, token)
+                try:
+                    if model is DownloadTask:
+                        redis_client.invalidate_download_attempt(task_id, token)
+                    elif platform:
+                        redis_client.clear_external_attempt(platform, task_id, token)
+                except Exception:
+                    logger.warning("投递失败后的执行键清理暂未完成: %s:%s", model.__tablename__, task_id)
                 raise
         finally:
             db.close()

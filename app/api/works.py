@@ -33,6 +33,7 @@ from app.core.runtime_config import get_runtime_config
 from app.services.douyin_account import get_request_context
 from app.services.douyin_source import build_douyin_source
 from app.services.work_cover_cache import find_cached_work_cover
+from app.services.download_state_lock import lock_works
 
 router = APIRouter(prefix="/works", tags=["作品管理"])
 
@@ -161,6 +162,7 @@ async def batch_delete_works(
         .where(Work.id.in_(work_ids))
     )
     works = result.scalars().all()
+    await lock_works(db, [work.id for work in works])
 
     deleted = 0
     removed_files = 0
@@ -202,6 +204,7 @@ async def delete_work_file(
 async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)):
     """重新下载作品：清除排除标记，重建缺失任务并分发（已完成文件保留）。"""
     work = await _load_work_with_tasks(db, work_id)
+    await lock_works(db, [work.id])
     archive_rules = await get_archive_rules(db)
     matches, reason = work_matches_archive_rules(work, archive_rules)
     if not matches:
@@ -250,6 +253,7 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
 async def retry_work_failed(work_id: int, db: AsyncSession = Depends(get_async_db)):
     """重试该作品下所有失败/取消的任务。"""
     work = await _load_work_with_tasks(db, work_id)
+    await lock_works(db, [work.id])
 
     failed_tasks = (await db.scalars(select(DownloadTask).where(
         DownloadTask.work_id == work.id, DownloadTask.status.in_(["failed", "cancelled"]),
@@ -262,6 +266,8 @@ async def retry_work_failed(work_id: int, db: AsyncSession = Depends(get_async_d
     for task in failed_tasks:
         from app.services.download_lifecycle import prepare_download_retry
         prepare_download_retry(task)
+    await work_manager.refresh_work_download_state(db, work)
+    await work_manager.recalc_author_counts(db, work.author)
 
     await db.commit()
 

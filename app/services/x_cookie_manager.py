@@ -8,7 +8,6 @@ from typing import Optional
 
 from sqlalchemy import select
 
-from app.core import redis_client
 from app.core.config import settings
 from app.models.models import SystemConfig
 from app.services.x_downloader import convert_cookie_header_to_netscape
@@ -18,19 +17,14 @@ X_COOKIE_CONFIG_KEY = "x_cookie"
 
 def get_x_cookie_value(db) -> Optional[str]:
     """读取 X Cookie，网页值优先，其次才使用环境配置。"""
-    cached_cookie = redis_client.get_x_cookie()
-    if cached_cookie and cached_cookie.strip():
-        return cached_cookie.strip()
-
     config = db.execute(
-        select(SystemConfig).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
-    ).scalar_one_or_none()
-    if not config or not config.value or not config.value.strip():
+        select(SystemConfig.value).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
+    ).one_or_none()
+    if config is None:
         return settings.X_COOKIE.strip() if settings.X_COOKIE and settings.X_COOKIE.strip() else None
 
-    cookie = config.value.strip()
-    redis_client.set_x_cookie(cookie)
-    return cookie
+    cookie = (config[0] or "").strip()
+    return cookie or None
 
 
 def materialize_x_cookie_file(db, task_id: int | None = None) -> tuple[Optional[str], bool]:

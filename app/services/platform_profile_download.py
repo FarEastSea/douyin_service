@@ -386,6 +386,7 @@ class GalleryDlProfileDownloadEngine:
         cookie_file: Optional[str] = None,
         on_line: Optional[Callable[[str], None]] = None,
         on_process: Optional[Callable[[int], None]] = None,
+        check_running: Optional[Callable[[], None]] = None,
     ) -> ProfileDownloadResult:
         if importlib.util.find_spec("gallery_dl") is None:
             return ProfileDownloadResult(
@@ -431,9 +432,9 @@ class GalleryDlProfileDownloadEngine:
             )
             if on_process:
                 on_process(process.pid)
-            if process.stdout:
-                for line in process.stdout:
-                    log(line.rstrip())
+            from app.services.child_process import iter_download_output
+            for line in iter_download_output(process, check_running):
+                log(line.rstrip())
             return_code = process.wait()
             files = list_media_files(user_folder)
             if return_code == 0:
@@ -445,6 +446,11 @@ class GalleryDlProfileDownloadEngine:
                 error_code=code, error_message=message,
             )
         except Exception as exc:
+            from app.core.traffic_control import CoordinationUnavailable
+            from app.services.download_lifecycle import StaleDownloadAttempt
+            from redis.exceptions import RedisError
+            if isinstance(exc, (CoordinationUnavailable, StaleDownloadAttempt, RedisError)):
+                raise
             return ProfileDownloadResult(
                 False, 0, -1, error_code="engine_exception",
                 error_message=f"{type(exc).__name__}: {exc}",
@@ -468,6 +474,7 @@ class YtDlpProfileDownloadEngine:
         cookie_file: Optional[str] = None,
         on_line: Optional[Callable[[str], None]] = None,
         on_process: Optional[Callable[[int], None]] = None,
+        check_running: Optional[Callable[[], None]] = None,
     ) -> ProfileDownloadResult:
         if importlib.util.find_spec("yt_dlp") is None:
             return ProfileDownloadResult(
@@ -526,9 +533,9 @@ class YtDlpProfileDownloadEngine:
             )
             if on_process:
                 on_process(process.pid)
-            if process.stdout:
-                for line in process.stdout:
-                    log(line.rstrip())
+            from app.services.child_process import iter_download_output
+            for line in iter_download_output(process, check_running):
+                log(line.rstrip())
             return_code = process.wait()
             files = list_media_files(user_folder)
             if return_code == 0:
@@ -540,6 +547,11 @@ class YtDlpProfileDownloadEngine:
                 error_code=code, error_message=message,
             )
         except Exception as exc:
+            from app.core.traffic_control import CoordinationUnavailable
+            from app.services.download_lifecycle import StaleDownloadAttempt
+            from redis.exceptions import RedisError
+            if isinstance(exc, (CoordinationUnavailable, StaleDownloadAttempt, RedisError)):
+                raise
             return ProfileDownloadResult(
                 False, 0, -1, error_code="engine_exception",
                 error_message=f"{type(exc).__name__}: {exc}",

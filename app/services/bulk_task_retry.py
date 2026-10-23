@@ -17,6 +17,7 @@ from app.core.error_handling import sanitize_text
 from app.models.database import create_isolated_async_engine
 from app.models.models import DownloadTask, PlatformDownloadTask, XDownloadTask
 from app.services.unified_task_operations import TaskOperationError, operate_task, parse_task_key
+from app.services.download_state_lock import lock_task_graph
 
 
 PREFIX = "operations:failed-retry:"
@@ -149,7 +150,11 @@ async def run_job(job_id: str, token: str) -> dict:
                     conditions = [model.id == task_id]
                     if model == PlatformDownloadTask:
                         conditions.append(model.platform == platform)
-                    task_status = await db.scalar(select(model.status).where(*conditions).with_for_update())
+                    if model is DownloadTask:
+                        task = await lock_task_graph(db, task_id)
+                        task_status = task.status if task is not None else None
+                    else:
+                        task_status = await db.scalar(select(model.status).where(*conditions).with_for_update())
                     if task_status != "failed":
                         state["skipped"] += 1
                         await db.rollback()

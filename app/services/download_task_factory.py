@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models.models import DownloadTask
 from app.services.download_lifecycle import prepare_download_retry
+from app.services.download_state_lock import lock_works_sync, lock_works
 
 
 TaskAction = Literal["created", "reused", "existing"]
@@ -51,6 +52,8 @@ def ensure_download_task_sync(
     *, reuse_failed: bool = True,
 ) -> Tuple[DownloadTask, TaskAction]:
     """Celery 同步会话中的原子 get-or-create。"""
+    # 调用方可能刚更新当前作品元数据；仅加锁，不丢弃本事务输入。
+    lock_works_sync(db, [work_id], refresh=False)
     if db.bind.dialect.name == "postgresql":
         inserted_id = db.execute(
             postgresql_insert(DownloadTask)
@@ -102,6 +105,7 @@ async def ensure_download_task_async(
     archive_rule_snapshot: str | None = None,
 ) -> Tuple[DownloadTask, TaskAction]:
     """FastAPI 异步会话中的原子 get-or-create。"""
+    await lock_works(db, [work_id], refresh=False)
     if db.bind.dialect.name == "postgresql":
         inserted_id = (await db.execute(
             postgresql_insert(DownloadTask)

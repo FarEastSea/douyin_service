@@ -1,7 +1,7 @@
 """
 运行期配置管理。
 
-这些配置保存在 system_config 表中，避免覆盖部署时影响 .env 或已有数据。
+网页持久化的 .env 为权威来源；system_config 保留兼容旧数据及事务记录。
 """
 
 from typing import Any, Dict, Optional
@@ -214,12 +214,21 @@ def get_cached_runtime_config() -> Dict[str, Any]:
     return get_runtime_defaults()
 
 
+def _legacy_runtime_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    from app.core.env_config import read_env_file
+    persisted = read_env_file()
+    # 数据库切换或并发旧查询不能用另一份历史行覆盖网页已保存的值。
+    # 空字符串同样是已保存状态，由 Settings 按默认值解释。
+    return {key: value for key, value in values.items()
+            if RUNTIME_CONFIG_ENV_KEYS.get(key) not in persisted}
+
+
 async def get_runtime_config(db: AsyncSession) -> Dict[str, Any]:
     result = await db.execute(
         select(SystemConfig).where(SystemConfig.key.in_([CONFIG_PREFIX + key for key in RUNTIME_CONFIG_SCHEMA]))
     )
     values = {row.key.removeprefix(CONFIG_PREFIX): row.value for row in result.scalars().all()}
-    config = normalize_runtime_config(values)
+    config = normalize_runtime_config(_legacy_runtime_values(values))
     try:
         from app.core import redis_client
 
@@ -238,7 +247,7 @@ def get_runtime_config_sync(db: Optional[Session] = None) -> Dict[str, Any]:
             select(SystemConfig).where(SystemConfig.key.in_([CONFIG_PREFIX + key for key in RUNTIME_CONFIG_SCHEMA]))
         ).scalars().all()
         values = {row.key.removeprefix(CONFIG_PREFIX): row.value for row in rows}
-        config = normalize_runtime_config(values)
+        config = normalize_runtime_config(_legacy_runtime_values(values))
         try:
             from app.core import redis_client
 

@@ -14,6 +14,7 @@ import FilterToolbar from "../components/FilterToolbar.vue";
 import Pager from "../components/Pager.vue";
 import IssueDetail from "../components/IssueDetail.vue";
 import AuthorAvatar from "../components/AuthorAvatar.vue";
+import SubscriptionNavigation from "../components/SubscriptionNavigation.vue";
 import type { Author, XAuthor, PageData } from "../types";
 type AuthorRecord = Partial<Author & XAuthor> & {
   id: number;
@@ -338,8 +339,8 @@ onBeforeUnmount(() => {
 <template>
   <section class="workspace-page authors-page">
     <PageHeader
-      title="作者"
-      description="管理订阅、最近检查与已保存的内容。"
+      title="订阅"
+      description="关注作者，持续收集值得留下的内容。"
       :busy="loading"
       :updated-at="updatedAt"
       refreshable
@@ -356,10 +357,7 @@ onBeforeUnmount(() => {
         <Plus :size="15" />订阅作者
       </button></PageHeader
     >
-    <nav class="view-tabs" aria-label="作者平台">
-      <RouterLink to="/authors/douyin">抖音</RouterLink
-      ><RouterLink to="/authors/x">X / Twitter</RouterLink>
-    </nav>
+    <SubscriptionNavigation />
     <div v-if="error && authors.length" class="load-error-banner" role="alert">
       <IssueDetail :message="error" impact="显示上次读取的数据。" /><button
         class="text-button"
@@ -610,8 +608,9 @@ onBeforeUnmount(() => {
             v-if="!isX"
             class="btn"
             :to="`/authors/douyin/${detail.id}/works`"
-            >浏览全部作品</RouterLink
+          >浏览全部作品</RouterLink
           >
+          <RouterLink class="btn ghost" :to="{path:'/library',query:{platform:props.platform,author:name(detail)}}">查看已保存媒体</RouterLink>
           <div v-if="automation?.history?.length" class="result-list">
             <h3>最近检查轨迹</h3>
             <article v-for="item in automation.history" :key="item.report_id">

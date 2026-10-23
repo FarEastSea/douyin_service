@@ -1,47 +1,52 @@
 # Web 框架
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-gunicorn==21.2.0
-python-multipart==0.0.6
+fastapi==0.159.1
+uvicorn[standard]==0.54.0
+uvicorn-worker==0.4.0
+gunicorn==26.2.0
+python-multipart==0.0.32
 
 # 任务队列
-celery[redis]==5.3.4
-redis==4.6.0
+celery[redis]==5.6.3
+# Kombu 5.6 的 Redis transport 要求 redis<6.5。
+redis==6.4.0
 
 # 数据库
-sqlalchemy==2.0.25
+sqlalchemy==2.0.55
 
 # PostgreSQL 驱动
-asyncpg==0.30.0
-psycopg2-binary==2.9.9
+asyncpg==0.32.0
+psycopg2-binary==2.9.13
 
 # MySQL 驱动（可选）
-aiomysql==0.2.0
-pymysql==1.1.0
+aiomysql==0.3.2
+pymysql==1.2.3
 
 # HTTP 请求
-requests==2.31.0
-httpx==0.26.0
+requests==2.34.2
+httpx==0.28.1
 
 # 数据验证
-pydantic==2.5.3
-pydantic-settings==2.1.0
+pydantic==2.14.1
+pydantic-settings==2.16.1
 
 # 工具
-python-dotenv==1.0.0
+python-dotenv==1.2.4
 # 下载取消时回收本次执行的子进程，避免残留 FFmpeg。
-psutil>=6.1,<8
+psutil==7.2.2
 # 与宝塔统一环境中的 pyOpenSSL 26.x / service-identity 兼容。
-cryptography>=49,<50
-gallery-dl>=1.30,<2.0
+cryptography==49.0.0
+gallery-dl==1.32.17
 # 抖音 Web API a_bogus 签名使用；算法实现来源见 THIRD_PARTY_NOTICES.md。
-gmssl>=3.2.2,<4.0
+gmssl==3.2.2
 # 微博 HLS 视频解析与 B站下载使用该媒体引擎。
-yt-dlp>=2026.8.19,<2027
+yt-dlp==2026.10.21
 
 # 版本更新（纯 Python git，规避受限环境无法执行 shell 的问题）
-dulwich>=1.0,<2.0
+dulwich==1.2.19
 
 # WebSocket (可选，用于实时进度推送)
-websockets==12.0
+websockets==17.3
+
+# 本地图片缩略图，保持已维护的 12.x 系列。
+Pillow==12.3.0
 

@@ -234,19 +234,21 @@ async def migrate_download_paths(
 
 
 def resolve_media_path(stored_path: str, download_root: str) -> Path:
-    """仅允许解析网页当前下载根目录内的媒体文件。"""
-    path = Path(stored_path).expanduser().resolve()
+    """只解析当前根目录内的明确路径，绝不凭同名文件推测历史媒体。"""
     root = Path(download_root).expanduser().resolve()
-    try:
-        path.relative_to(root)
-        return path
-    except ValueError:
-        candidate = (root / path.parent.name / path.name).resolve()
-        candidate.relative_to(root)
-        if candidate.is_file():
-            return candidate
-        direct_candidate = (root / path.name).resolve()
-        direct_candidate.relative_to(root)
-        if direct_candidate.is_file():
-            return direct_candidate
-        raise
+    if not str(stored_path or "").strip():
+        raise ValueError("媒体路径为空")
+    path = Path(stored_path).expanduser()
+    if not path.is_absolute():
+        # 历史下载器可保存相对工作目录的完整路径；仅接受仍在当前根内
+        # 的明确路径，不截断目录、不按存在性尝试同名替代品。
+        absolute = path.resolve()
+        try:
+            absolute.relative_to(root)
+        except ValueError:
+            path = root / path
+        else:
+            path = absolute
+    path = path.resolve()
+    path.relative_to(root)
+    return path

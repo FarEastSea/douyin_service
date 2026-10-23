@@ -173,6 +173,7 @@ export interface UnifiedTask {
   published_at?: string;
   media_type?: "image" | "video";
   cover_url?: string;
+  thumbnail_endpoint?: string;
   status: string;
   phase?: string;
   progress_percent: number;
@@ -237,6 +238,30 @@ export interface MediaItem {
   url: string;
   type: "image" | "video";
   title?: string;
+}
+
+export interface LibraryMedia {
+  key: string;
+  platform: string;
+  id: number;
+  task_key: string;
+  work_id?: number;
+  author_id?: number;
+  author_name?: string;
+  title?: string;
+  filename: string;
+  media_type: string;
+  file_size: number;
+  created_at: string;
+  completed_at?: string;
+  published_at?: string;
+  preview_endpoint: string;
+  download_endpoint?: string;
+  thumbnail_endpoint?: string;
+  available?: boolean;
+  width?: number;
+  height?: number;
+  duration_ms?: number;
 }
 
 export interface TaskDetail extends UnifiedTask {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MediaThumbnail from "../components/MediaThumbnail.vue";
 import {
   computed,
   nextTick,
@@ -31,7 +32,7 @@ import StatusIndicator from "../components/StatusIndicator.vue";
 import StateView from "../components/StateView.vue";
 import TaskInspector from "../components/TaskInspector.vue";
 import { confirmAction, dateTime, useContextActions } from "../workspace";
-import { openMedia } from "../media";
+import { mediaPreviewType, openMedia } from "../media";
 import { focusFirst, restoreFocus, trapFocus } from "../focus";
 import { useAppStore } from "../stores/app";
 import type {
@@ -113,6 +114,7 @@ const actionFailures = ref<
 let searchTimer: number | undefined;
 let pollTimer: number | undefined;
 let loadSequence = 0;
+let loadController: AbortController | undefined;
 let pollInFlight = false;
 type TaskAction =
   | "retry"
@@ -186,10 +188,14 @@ const cancellableSelected = computed(() =>
 const summaryTotal = computed(() =>
   Object.values(statusSummary.value).reduce((sum, count) => sum + count, 0),
 );
+const layout = ref(localStorage.getItem('tasks-layout') === 'table' ? 'table' : 'media');
+function setLayout(value: string) { layout.value = value; localStorage.setItem('tasks-layout',value); }
 async function load(silent = false) {
   if (silent && pollInFlight) return;
   if (silent) pollInFlight = true;
   const sequence = ++loadSequence;
+  loadController?.abort();
+  loadController = new AbortController();
   if (!silent) loading.value = true;
   const params = new URLSearchParams({
     page: String(page.value),
@@ -200,7 +206,7 @@ async function load(silent = false) {
   if (search.value.trim()) params.set("q", search.value.trim());
   params.set("sort_by", sort.value);
   try {
-    const data = await api<UnifiedTaskPage>(`/operations/tasks?${params}`);
+    const data = await api<UnifiedTaskPage>(`/operations/tasks?${params}`, {signal:loadController.signal});
     if (sequence !== loadSequence) return;
     if (page.value > Math.max(1, data.pages)) {
       page.value = Math.max(1, data.pages);
@@ -450,18 +456,22 @@ async function preview(task: UnifiedTask) {
       return openMedia([
         {
           url: `/api${task.preview_endpoint}`,
-          type: task.media_type === "image" ? "image" : "video",
+          type: mediaPreviewType(task.media_type),
           title: task.source_label,
         },
       ]);
     if (!task.media_endpoint) return;
-    const assets = await api<any[]>(task.media_endpoint);
-    const items: MediaItem[] = assets.map((item) => ({
+    const resources = await api<{items:any[]; total:number}>(`${task.media_endpoint}?page=1&page_size=60`);
+    const items: MediaItem[] = resources.items.map((item) => ({
       url: item.preview_url,
-      type: item.media_type === "video" ? "video" : "image",
+      type: mediaPreviewType(item.media_type),
       title: item.title || item.filename,
     }));
-    if (items.length) openMedia(items);
+    if (items.length) {
+      openMedia(items);
+      if (resources.total > items.length)
+        store.notify(`当前预览前 ${items.length} 个文件，其余内容可在任务详情中继续加载。`, "info");
+    }
     else store.notify("该任务没有可预览资源", "info");
   } catch (error: any) {
     store.notify(error.message || "预览失败", "error");
@@ -500,6 +510,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("app:tasks-changed", tasksChanged);
   loadSequence++;
+  loadController?.abort();
   retryJobSequence++;
   deleteJobSequence++;
   window.clearInterval(pollTimer);
@@ -594,8 +605,8 @@ watch(
 <template>
   <section class="workspace-page unified-workspace">
     <PageHeader
-      title="下载任务"
-      description="跨平台管理队列、结果与失败记录。"
+      title="任务"
+      description="查看下载进度、失败原因与已保存文件。"
       :busy="loading"
       :updated-at="updatedAt"
       refreshable
@@ -846,6 +857,11 @@ watch(
         </li>
       </ul>
     </details>
+    <div class="task-list-toolbar">
+      <label class="task-select-all"><input type="checkbox" aria-label="选择当前页全部任务" :checked="allPageSelected" @change="togglePage" /><span>选择本页</span></label>
+      <span class="muted">{{summaryLoaded ? total.toLocaleString()+' 个任务' : '正在读取'}}</span>
+      <div class="segmented-control" aria-label="任务显示方式"><button :aria-pressed="layout === 'media'" @click="setLayout('media')">媒体列表</button><button :aria-pressed="layout === 'table'" @click="setLayout('table')">表格</button></div>
+    </div>
     <StateView
       v-if="!tasks.length"
       :loading="loading"
@@ -854,6 +870,16 @@ watch(
       description="调整筛选条件，或新建一个下载任务。"
       @retry="load()"
     />
+    <div v-else-if="layout === 'media'" class="task-media-list" :aria-busy="loading">
+      <div class="task-list-column-labels" aria-hidden="true"><span>任务与来源</span><span>状态与文件</span><span>操作</span></div>
+      <article v-for="task in tasks" :key="task.key" class="task-media-row" :class="{selected:selectedKeys.includes(task.key) || inspectedKey === task.key}">
+        <label class="selection-hit"><input type="checkbox" :aria-label="'选择任务 '+task.key" :checked="selectedKeys.includes(task.key)" @change="toggleTask(task.key)" /></label>
+        <button class="task-media-cover" :aria-label="'查看 '+(task.source_label || '任务 '+task.id)" @click="openTask(task)"><MediaThumbnail :src="task.thumbnail_endpoint || task.cover_url" :type="task.media_type" /></button>
+        <div class="task-media-copy"><button class="record-link" :title="task.source_label" @click="openTask(task)">{{task.source_label || '任务 #'+task.id}}</button><div class="task-media-meta"><span>{{platformNames[task.platform]}}</span><span>{{task.author_name || (task.source_type === 'profile' ? '作者主页' : '单条作品')}}</span><time>{{dateTime(task.created_at)}}</time></div><button v-if="task.error_message" class="task-error-summary" :title="task.error_message" @click="openTask(task)">{{task.error_message}}</button><span v-else-if="task.status === 'downloading'" class="transfer-progress" role="progressbar" :aria-valuenow="Math.round(task.progress_percent || 0)" aria-valuemin="0" aria-valuemax="100" :aria-label="'任务 '+task.id+' 下载进度'"><span :style="{width:Math.min(100,Math.max(0,task.progress_percent || 0))+'%'}" /></span></div>
+        <div class="task-media-status"><StatusIndicator :status="task.status" /><small>{{task.status === 'downloading' ? Number(task.progress_percent || 0).toFixed(1)+'%' : task.file_count+' 个文件'}}</small></div>
+        <div class="task-media-actions"><button v-if="['failed','cancelled'].includes(task.status)" class="btn compact" :disabled="actionBusy" @click="action(task,'retry')">重试</button><button v-else-if="task.preview_count" class="btn compact ghost" @click="preview(task)">预览</button><MoreActions :label="'任务 '+task.id"><button @click="openTask(task)">查看详情</button><button v-if="task.preview_count" @click="preview(task)">预览文件</button><button v-if="task.platform === 'douyin' && ['pending','downloading'].includes(task.status)" :disabled="actionBusy" @click="action(task,'pause')">暂停</button><button v-if="task.platform === 'douyin' && task.status === 'paused'" :disabled="actionBusy" @click="action(task,'resume')">恢复</button><button v-if="task.platform === 'douyin' && ['failed','cancelled'].includes(task.status)" :disabled="actionBusy || store.risk.active" @click="action(task,'refresh_retry')">刷新链接后重试</button><button v-if="['pending','downloading','paused'].includes(task.status)" :disabled="actionBusy" @click="action(task,'cancel')">取消任务</button><button v-if="task.error_message" @click="copyFailure(task)">复制失败信息</button><button v-if="['failed','cancelled'].includes(task.status)" class="danger" :disabled="actionBusy" @click="action(task,'delete')">删除任务记录</button></MoreActions></div>
+      </article>
+    </div>
     <div v-else class="table-shell">
       <table class="data-table unified-table">
         <thead>

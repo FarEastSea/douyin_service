@@ -12,7 +12,8 @@ from sqlalchemy import func, select, update
 from app.core import redis_client
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
-from app.core.traffic_control import global_download_slot
+from app.core.traffic_control import global_download_slot, CoordinationUnavailable
+from redis.exceptions import RedisError
 from app.models.database import get_sync_db
 from app.models.models import (
     PlatformAuthor,
@@ -39,6 +40,7 @@ from app.services.platform_metadata import (
 from app.services.x_downloader import is_media_download_line
 from app.tasks.celery_app import celery_app
 from app.services.download_lifecycle import FencedPlatformTask, StaleDownloadAttempt, bind_download_attempt, lock_download_attempt
+from app.services.external_download_coordination import check_external_execution, defer_external_download, register_external_process
 
 logger = logging.getLogger(__name__)
 
@@ -226,8 +228,7 @@ def download_platform_profile(self, task_id: int):
 
         def on_line(line: str) -> None:
             nonlocal downloaded
-            if not redis_client.external_attempt_current(platform_id, task_id, self.request.id):
-                raise StaleDownloadAttempt("平台执行已被取消或替换")
+            check_external_execution(platform_id, task_id, self.request.id)
             log_lines.append(line)
             redis_client.append_platform_task_log(platform_id, task_id, line)
             if is_media_download_line(line):
@@ -293,9 +294,11 @@ def download_platform_profile(self, task_id: int):
                 destination=download_destination,
                 cookie_file=cookie_path,
                 on_line=on_line,
-                on_process=lambda pid: redis_client.set_external_attempt_pid(platform_id, task_id, self.request.id, pid),
+                on_process=lambda pid: register_external_process(platform_id, task_id, self.request.id, pid),
+                check_running=lambda: check_external_execution(platform_id, task_id, self.request.id),
                 **engine_options,
             )
+            check_external_execution(platform_id, task_id, self.request.id)
 
         lock_download_attempt(db, task_id, self.request.id, PlatformDownloadTask)
         db.refresh(task)
@@ -395,6 +398,9 @@ def download_platform_profile(self, task_id: int):
             "discovered_works": len(discovered_works) if isinstance(discovered_works, list) else 0,
             "queued_downloads": dispatched_children,
         }
+    except (CoordinationUnavailable, RedisError):
+        db.rollback()
+        return defer_external_download(PlatformDownloadTask, task_id, self.request.id, download_platform_profile)
     except StaleDownloadAttempt:
         db.rollback()
         return {"success": False, "superseded": True}

@@ -18,6 +18,7 @@ from sqlalchemy import case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.media_library import router as media_library_router
 from app.core import redis_client
 from app.core.config import settings
 from app.core.revision import runtime_revision
@@ -50,9 +51,11 @@ from app.services.bulk_task_retry import create_job, failed_task_keys, get_job, 
 from app.services.unified_task_operations import TaskOperationError, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
+from app.services.media_library import douyin_media_type
 
 
 router = APIRouter(prefix="/operations", tags=["统一运维"])
+router.include_router(media_library_router)
 logger = logging.getLogger(__name__)
 
 
@@ -374,13 +377,14 @@ def _serialize_douyin_task(task: DownloadTask) -> dict[str, Any]:
         "source_type": "work", "source_label": work.title or work.aweme_id,
         "author_name": work.author.nickname if work.author else None,
         "published_at": work.published_at,
-        "media_type": "image" if work.work_type == "images" else "video",
+        "media_type": douyin_media_type(work.work_type, task.file_path, task.file_name),
         "cover_url": work.cover_url, "status": task.status, "phase": None,
         "progress_percent": task.progress_percent,
         "file_count": 1 if task.status == "completed" and task.file_path else 0,
         "error_message": task.error_message, "error_code": None,
         "preview_count": 1 if task.status == "completed" and task.file_path else 0,
         "preview_endpoint": f"/tasks/{task.id}/preview",
+        "thumbnail_endpoint": f"/operations/media/douyin/{task.id}/thumbnail" if task.status == "completed" and task.file_path else None,
         "has_stats": has_stats,
         "stats_endpoint": f"/operations/tasks/douyin/{task.id}/stats" if has_stats else None,
         "retry_endpoint": f"/tasks/{task.id}/retry",
@@ -395,8 +399,8 @@ def _first_media_asset(task: Any) -> Any | None:
     return min(assets, key=lambda item: int(item.id or 0)) if assets else None
 
 
-def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
-    asset = _first_media_asset(task)
+def _serialize_x_task(task: XDownloadTask, media_summary=None) -> dict[str, Any]:
+    asset, media_count = media_summary if media_summary is not None else (_first_media_asset(task), len(task.media_assets))
     has_stats = bool(asset and any(getattr(asset, name, None) is not None for name in (
         "view_count", "like_count", "comment_count", "share_count",
     )))
@@ -414,7 +418,8 @@ def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
         "status": task.status, "phase": task.phase,
         "progress_percent": task.progress_percent, "file_count": task.file_count,
         "error_message": task.error_message, "error_code": task.error_code,
-        "preview_count": len(task.media_assets), "media_endpoint": f"/x/tasks/{task.id}/media",
+        "preview_count": media_count, "media_endpoint": f"/x/tasks/{task.id}/media",
+        "thumbnail_endpoint": f"/operations/media/x/{asset.id}/thumbnail" if asset else None,
         "has_stats": has_stats,
         "stats_endpoint": f"/operations/tasks/x/{task.id}/stats" if has_stats else None,
         "retry_endpoint": f"/x/tasks/{task.id}/retry",
@@ -424,8 +429,8 @@ def _serialize_x_task(task: XDownloadTask) -> dict[str, Any]:
     }
 
 
-def _serialize_platform_task(task: PlatformDownloadTask) -> dict[str, Any]:
-    asset = _first_media_asset(task)
+def _serialize_platform_task(task: PlatformDownloadTask, media_summary=None) -> dict[str, Any]:
+    asset, media_count = media_summary if media_summary is not None else (_first_media_asset(task), len(task.media_assets))
     has_stats = bool(asset and any(getattr(asset, name, None) is not None for name in (
         "view_count", "like_count", "comment_count", "share_count",
     )))
@@ -440,7 +445,8 @@ def _serialize_platform_task(task: PlatformDownloadTask) -> dict[str, Any]:
         "status": task.status, "phase": task.phase,
         "progress_percent": task.progress_percent, "file_count": task.file_count,
         "error_message": task.error_message, "error_code": task.error_code,
-        "preview_count": len(task.media_assets),
+        "preview_count": media_count,
+        "thumbnail_endpoint": f"/operations/media/{task.platform}/{asset.id}/thumbnail" if asset else None,
         "has_stats": has_stats,
         "stats_endpoint": (
             f"/operations/tasks/{task.platform}/{task.id}/stats" if has_stats else None
@@ -451,6 +457,20 @@ def _serialize_platform_task(task: PlatformDownloadTask) -> dict[str, Any]:
         "created_at": task.created_at, "started_at": task.started_at,
         "completed_at": task.completed_at,
     }
+
+
+async def _media_summaries(db: AsyncSession, model, task_ids: list[int]) -> dict[int, tuple]:
+    """One asset per task, independent of the number of files in a profile download."""
+    if not task_ids:
+        return {}
+    groups = (await db.execute(select(
+        model.task_id, func.min(model.id).label("first_id"), func.count(model.id).label("media_count"),
+    ).where(model.task_id.in_(task_ids)).group_by(model.task_id))).all()
+    if not groups:
+        return {}
+    assets = (await db.execute(select(model).where(model.id.in_([row.first_id for row in groups])))).scalars().all()
+    by_id = {item.id: item for item in assets}
+    return {row.task_id: (by_id.get(row.first_id), int(row.media_count)) for row in groups}
 
 
 def _snapshot_values(snapshot: Any, *, douyin: bool = False) -> dict[str, Any]:
@@ -501,12 +521,12 @@ async def unified_task_stats(
         }
     elif platform_id == "x":
         task = (await db.execute(
-            select(XDownloadTask).options(selectinload(XDownloadTask.media_assets))
+            select(XDownloadTask)
             .where(XDownloadTask.id == task_id)
         )).scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-        asset = _first_media_asset(task)
+        asset = (await _media_summaries(db, XMediaAsset, [task.id])).get(task.id, (None, 0))[0]
         label = asset.title if asset and asset.title else f"@{task.username}"
         if asset:
             rows = (await db.execute(
@@ -531,7 +551,7 @@ async def unified_task_stats(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="平台不存在") from exc
         task = (await db.execute(
-            select(PlatformDownloadTask).options(selectinload(PlatformDownloadTask.media_assets))
+            select(PlatformDownloadTask)
             .where(
                 PlatformDownloadTask.id == task_id,
                 PlatformDownloadTask.platform == platform_id,
@@ -539,7 +559,7 @@ async def unified_task_stats(
         )).scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-        asset = _first_media_asset(task)
+        asset = (await _media_summaries(db, PlatformMediaAsset, [task.id])).get(task.id, (None, 0))[0]
         label = asset.title if asset and asset.title else task.source_key
         if asset:
             rows = (await db.execute(
@@ -718,19 +738,21 @@ async def unified_tasks(
     if ids_by_platform.get("x"):
         rows = (await db.execute(
             select(XDownloadTask)
-            .options(selectinload(XDownloadTask.x_author), selectinload(XDownloadTask.media_assets))
+            .options(selectinload(XDownloadTask.x_author))
             .where(XDownloadTask.id.in_(ids_by_platform["x"]))
         )).scalars().all()
-        serialized.update({("x", task.id): _serialize_x_task(task) for task in rows})
+        summaries = await _media_summaries(db, XMediaAsset, ids_by_platform["x"])
+        serialized.update({("x", task.id): _serialize_x_task(task, summaries.get(task.id, (None, 0))) for task in rows})
     generic_task_ids = [
         task_id for item_platform, task_id in ordered_keys if item_platform not in {"douyin", "x"}
     ]
     if generic_task_ids:
         rows = (await db.execute(
-            select(PlatformDownloadTask).options(selectinload(PlatformDownloadTask.media_assets))
+            select(PlatformDownloadTask)
             .where(PlatformDownloadTask.id.in_(generic_task_ids))
         )).scalars().all()
-        serialized.update({(task.platform, task.id): _serialize_platform_task(task) for task in rows})
+        summaries = await _media_summaries(db, PlatformMediaAsset, generic_task_ids)
+        serialized.update({(task.platform, task.id): _serialize_platform_task(task, summaries.get(task.id, (None, 0))) for task in rows})
 
     items = [serialized[key] for key in ordered_keys if key in serialized]
     return {
@@ -1119,23 +1141,24 @@ async def unified_task_detail(platform: str, task_id: int, db: AsyncSession = De
         )
     elif platform == "x":
         task = (await db.execute(select(XDownloadTask).options(
-            selectinload(XDownloadTask.x_author), selectinload(XDownloadTask.media_assets),
+            selectinload(XDownloadTask.x_author),
         ).where(XDownloadTask.id == task_id))).scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-        payload = _serialize_x_task(task)
+        summary = (await _media_summaries(db, XMediaAsset, [task.id])).get(task.id, (None, 0))
+        payload = _serialize_x_task(task, summary)
         payload.update(source_url=task.profile_url, log_endpoint=f"/x/tasks/{task.id}/log")
     else:
         try:
             platform_registry.get(platform)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="平台不存在") from exc
-        task = (await db.execute(select(PlatformDownloadTask).options(
-            selectinload(PlatformDownloadTask.media_assets),
-        ).where(PlatformDownloadTask.id == task_id, PlatformDownloadTask.platform == platform))).scalar_one_or_none()
+        task = (await db.execute(select(PlatformDownloadTask)
+            .where(PlatformDownloadTask.id == task_id, PlatformDownloadTask.platform == platform))).scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-        payload = _serialize_platform_task(task)
+        summary = (await _media_summaries(db, PlatformMediaAsset, [task.id])).get(task.id, (None, 0))
+        payload = _serialize_platform_task(task, summary)
         payload.update(source_url=task.source_url, engine_name=task.engine_name,
                        log_endpoint=f"/platform-downloads/{platform}/tasks/{task.id}/log")
     return payload

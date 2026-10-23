@@ -242,7 +242,11 @@ async def save_account_profile(
     profile.last_failure_code = None
     await db.commit()
     await db.refresh(profile)
-    await asyncio.to_thread(redis_client.clear_douyin_risk_state)
+    try:
+        await asyncio.to_thread(redis_client.clear_douyin_risk_state)
+    except Exception:
+        # 账号档案已经提交；共享缓存恢复后按最新档案继续请求。
+        pass
     return _profile_payload(profile)
 
 

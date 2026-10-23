@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 生产同构启动脚本：Gunicorn 托管单个 Uvicorn worker，Celery Worker/Beat
-# 继续由 FastAPI lifespan 自动管理。路径从脚本位置推导，不写入部署目标信息。
+# 由项目级持久状态托管，跨 Web 重载接管。路径从脚本位置推导。
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
 if [ ! -x "${VENV_DIR}/bin/gunicorn" ] && [ -x "${VENV_DIR}/gunicorn" ] && [ -x "${VENV_DIR}/python" ]; then
@@ -41,6 +41,12 @@ EXISTING_PID=""
 if [ -f "$PID_FILE" ]; then
     EXISTING_PID="$(tr -dc '0-9' < "$PID_FILE")"
     if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+        EXISTING_COMMAND="$(tr '\0' ' ' < "/proc/$EXISTING_PID/cmdline" 2>/dev/null || true)"
+        EXISTING_CWD="$(readlink -f "/proc/$EXISTING_PID/cwd" 2>/dev/null || true)"
+        if [[ "$EXISTING_COMMAND" != *"gunicorn"*"main:app"* ]] || [ "$EXISTING_CWD" != "$PROJECT_DIR" ]; then
+            echo "Start failed: gunicorn.pid does not identify this project's server." >&2
+            exit 1
+        fi
         SERVICE_ALREADY_RUNNING=1
     else
         rm -f "$PID_FILE"
@@ -147,11 +153,14 @@ start_xhs_engine() {
     return 1
 }
 
-if "$VENV_DIR/bin/python" -c 'from app.core.config import settings; raise SystemExit(not settings.XHS_SERVICE_ENABLED)'; then
-    start_xhs_engine || echo "Optional Xiaohongshu service unavailable; main service will still start." >&2
-else
-    echo "Xiaohongshu isolated service is disabled."
+if [ "${1:-}" = "--xhs-start-once" ]; then
+    start_xhs_engine
+    exit $?
 fi
+
+# 独立协调器跨 Web 重载持续读取网页开关；即使关闭也保留轻量协调进程。
+nohup "$VENV_DIR/bin/python" -m app.core.optional_services \
+    < /dev/null >> "$LOG_DIR/optional-services.log" 2>&1 &
 
 if [ "$SERVICE_ALREADY_RUNNING" -eq 1 ]; then
     echo "Service is already running (PID=${EXISTING_PID})."
@@ -163,7 +172,7 @@ nohup env PYTHONUNBUFFERED=1 "$GUNICORN_BIN" main:app \
     --bind "0.0.0.0:${APP_PORT}" \
     --workers 1 \
     --threads 1 \
-    --worker-class uvicorn.workers.UvicornWorker \
+    --worker-class uvicorn_worker.UvicornWorker \
     --chdir "$PROJECT_DIR" \
     --pid "$PID_FILE" \
     "${GUNICORN_USER_ARGS[@]}" \

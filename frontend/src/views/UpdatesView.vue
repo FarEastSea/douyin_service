@@ -11,6 +11,7 @@ import InspectorPanel from "../components/InspectorPanel.vue";
 import MoreActions from "../components/MoreActions.vue";
 import Pager from "../components/Pager.vue";
 import IssueDetail from "../components/IssueDetail.vue";
+import SubscriptionNavigation from "../components/SubscriptionNavigation.vue";
 import {
   confirmAction,
   dateTime,
@@ -193,7 +194,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="workspace-page automation-page">
     <PageHeader
-      title="自动化"
+      title="运行记录"
       description="监督订阅检查，定位异常，再继续未完成的工作。"
       :busy="loading"
       :updated-at="updatedAt"
@@ -217,6 +218,7 @@ onBeforeUnmount(() => {
         <Zap :size="15" />{{ busy ? "提交中…" : "检查全部" }}
       </button>
     </PageHeader>
+    <SubscriptionNavigation />
     <div v-if="loadError && loaded" class="load-error-banner" role="alert">
       <IssueDetail
         :message="loadError"

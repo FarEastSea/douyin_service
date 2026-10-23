@@ -16,7 +16,7 @@ import re
 import os
 import time
 import logging
-import shutil
+from app.core.traffic_control import CoordinationUnavailable, assert_download_coordination
 from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
@@ -1002,9 +1002,9 @@ class DouyinDownloader:
             # Only a previously paused attempt may provide this path; do not share writers.
             if (Path(resume_path).resolve().parent == Path(temp_path).resolve().parent
                     and resume_path.endswith(".downloading") and not Path(resume_path).is_symlink()):
-                shutil.copyfile(resume_path, temp_path)
+                os.replace(resume_path, temp_path)
                 if os.path.isfile(resume_path + ".json"):
-                    shutil.copyfile(resume_path + ".json", metadata_path)
+                    os.replace(resume_path + ".json", metadata_path)
         resume_metadata = {}
         try:
             with open(metadata_path, encoding="utf-8") as handle:
@@ -1128,6 +1128,7 @@ class DouyinDownloader:
                     )
                     if should_check_pause:
                         last_pause_check_time = current_time
+                        assert_download_coordination()
                     if should_check_pause and check_pause():
                         # 保存进度并退出
                         if task_id:
@@ -1256,6 +1257,8 @@ class DouyinDownloader:
                 'temp_path': temp_path if os.path.exists(temp_path) else None
             }
         except Exception as e:
+            if isinstance(e, CoordinationUnavailable):
+                raise
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"下载失败: {error_msg}, 资源: {resource}")
             return {

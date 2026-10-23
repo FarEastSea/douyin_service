@@ -99,6 +99,12 @@ async function load() {
       api<PageData<Work>>(`/authors/${id.value}/works?${params}`),
     ]);
     if (current !== sequence) return;
+    if (page.value > Math.max(1, data.pages)) {
+      page.value = Math.max(1, data.pages);
+      syncQuery();
+      void load();
+      return;
+    }
     loaded.value = true;
     author.value = authorData;
     works.value = data.items;
@@ -398,7 +404,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="workspace-page works-workspace">
     <RouterLink class="back-link" to="/authors/douyin"
-      ><ArrowLeft :size="14" />作者</RouterLink
+      ><ArrowLeft :size="14" />订阅</RouterLink
     ><PageHeader
       :title="author?.nickname || '作者作品'"
       :description="

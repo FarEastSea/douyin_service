@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount, onMounted } from "vue";
 import { api } from "../api";
-import { openMedia } from "../media";
+import { mediaPreviewType, openMedia } from "../media";
 import { useAppStore } from "../stores/app";
 import { bytes, confirmAction, dateTime, platformNames } from "../workspace";
 import type { TaskDetail } from "../types";
@@ -27,6 +27,9 @@ const store = useAppStore(),
   error = ref(""),
   tab = ref("overview"),
   files = ref<any[]>([]),
+  filesPage = ref(1),
+  filesPages = ref(1),
+  filesTotal = ref(0),
   logs = ref<string[]>([]),
   resourceBusy = ref(false),
   resourceError = ref("");
@@ -34,19 +37,26 @@ let sequence = 0,
   resourceSequence = 0;
 let pollTimer: number | undefined,
   pollInFlight = false;
+let detailController: AbortController | undefined, resourceController: AbortController | undefined, refreshController: AbortController | undefined;
 async function refresh() {
   if (!props.taskKey || pollInFlight) return;
   pollInFlight = true;
+  refreshController = new AbortController();
   const current = sequence,
     key = props.taskKey;
   const [platform, id] = key.split(":");
   try {
     const data = await api<TaskDetail>(
       `/operations/tasks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`,
+      {signal:refreshController.signal},
     );
     if (current === sequence && key === props.taskKey) {
+      const previousStatus = task.value?.status;
+      const previousCount = task.value?.preview_count;
       task.value = data;
       error.value = "";
+      if (tab.value === 'logs' || (tab.value === 'files' && (previousStatus !== data.status || previousCount !== data.preview_count)))
+        await loadResource(true);
     }
   } catch (e: any) {
     if (current === sequence) error.value = e.message || "任务状态未确认";
@@ -56,10 +66,15 @@ async function refresh() {
 }
 async function load() {
   const current = ++sequence;
+  detailController?.abort(); resourceController?.abort(); refreshController?.abort();
+  detailController = new AbortController();
   task.value = undefined;
   error.value = "";
   tab.value = "overview";
   files.value = [];
+  filesPage.value = 1;
+  filesPages.value = 1;
+  filesTotal.value = 0;
   logs.value = [];
   ++resourceSequence;
   if (!props.taskKey) return;
@@ -68,6 +83,7 @@ async function load() {
   try {
     const data = await api<TaskDetail>(
       `/operations/tasks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`,
+      {signal:detailController.signal},
     );
     if (current === sequence) task.value = data;
   } catch (e: any) {
@@ -76,17 +92,27 @@ async function load() {
     if (current === sequence) loading.value = false;
   }
 }
-async function loadResource() {
+async function loadResource(silent: boolean | Event = false, append = false) {
   const current = ++resourceSequence;
+  resourceController?.abort(); resourceController = new AbortController();
+  const signal = resourceController.signal;
   resourceError.value = "";
-  resourceBusy.value = true;
+  if (silent !== true) resourceBusy.value = true;
   try {
     if (tab.value === "files" && task.value?.media_endpoint) {
-      const data = await api<any[]>(task.value.media_endpoint);
-      if (current === resourceSequence) files.value = data;
+      const lastPage = append ? filesPage.value + 1 : silent === true ? filesPage.value : 1;
+      const requestedPages = append ? [lastPage] : Array.from({length:lastPage},(_,index) => index+1);
+      const results = await Promise.all(requestedPages.map(page => api<any>(`${task.value!.media_endpoint}?page=${page}&page_size=60`,{signal})));
+      if (current === resourceSequence) {
+        const rows = results.flatMap(result => result.items || []);
+        files.value = append ? [...files.value,...rows] : rows;
+        filesPage.value = lastPage;
+        filesPages.value = results.at(-1)?.pages || 1;
+        filesTotal.value = results.at(-1)?.total || 0;
+      }
     }
     if (tab.value === "logs" && task.value?.log_endpoint) {
-      const data = await api<any>(task.value.log_endpoint + "?start=0");
+      const data = await api<any>(task.value.log_endpoint + "?start=0",{signal});
       if (current === resourceSequence) logs.value = data.lines || [];
     }
   } catch (e: any) {
@@ -99,7 +125,7 @@ function previewFile(file: any) {
   openMedia([
     {
       url: file.preview_url,
-      type: file.media_type === "video" ? "video" : "image",
+      type: mediaPreviewType(file.media_type),
       title: file.filename,
     },
   ]);
@@ -109,7 +135,7 @@ function previewTask() {
     openMedia([
       {
         url: "/api" + task.value.preview_endpoint,
-        type: task.value.media_type === "image" ? "image" : "video",
+        type: mediaPreviewType(task.value.media_type),
         title: task.value.source_label,
       },
     ]);
@@ -175,11 +201,12 @@ onMounted(() => {
   }, 5000);
 });
 watch(() => props.taskKey, load, { immediate: true });
-watch(tab, loadResource);
+watch(tab, () => loadResource());
 onBeforeUnmount(() => {
   clearInterval(pollTimer);
   sequence++;
   resourceSequence++;
+  detailController?.abort(); resourceController?.abort(); refreshController?.abort();
 });
 </script>
 <template>
@@ -305,7 +332,7 @@ onBeforeUnmount(() => {
               >下载</a
             >
           </article>
-        </div></template
+        </div><div v-if="filesTotal" class="file-pagination"><span class="muted">已显示 {{files.length}} / {{filesTotal}} 个文件</span><button v-if="filesPage < filesPages" class="btn ghost" :disabled="resourceBusy" @click="loadResource(false,true)">{{resourceBusy ? '正在读取…' : '继续加载文件'}}</button></div></template
       ><template v-else-if="tab === 'logs'"
         ><StateView
           v-if="resourceBusy || resourceError || !logs.length"

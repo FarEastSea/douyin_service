@@ -39,7 +39,6 @@ from app.models.schemas import (
 from app.services.media_paths import resolve_media_path
 from app.services.platform_credentials import (
     get_platform_credential_status,
-    save_platform_cookie,
 )
 from app.services.platform_profile_download import (
     get_profile_platform_spec,
@@ -191,8 +190,11 @@ async def list_tasks(
     )
 
 
-@router.get("/{platform}/tasks/{task_id}/media", response_model=list[PlatformMediaAssetResponse])
-async def list_media(platform: str, task_id: int, db: AsyncSession = Depends(get_async_db)):
+@router.get("/{platform}/tasks/{task_id}/media")
+async def list_media(
+    platform: str, task_id: int, page: int | None = Query(None, ge=1),
+    page_size: int = Query(60, ge=1, le=100), db: AsyncSession = Depends(get_async_db),
+):
     spec = _require_platform(platform)
     task = (await db.execute(select(PlatformDownloadTask).where(
         PlatformDownloadTask.id == task_id,
@@ -200,12 +202,15 @@ async def list_media(platform: str, task_id: int, db: AsyncSession = Depends(get
     ))).scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    assets = (await db.execute(
+    statement = (
         select(PlatformMediaAsset)
         .where(PlatformMediaAsset.task_id == task.id)
         .order_by(PlatformMediaAsset.created_at, PlatformMediaAsset.id)
-    )).scalars().all()
-    return [PlatformMediaAssetResponse(
+    )
+    if page is not None:
+        statement = statement.offset((page - 1) * page_size).limit(page_size)
+    assets = (await db.execute(statement)).scalars().all()
+    items = [PlatformMediaAssetResponse(
         id=item.id,
         task_id=item.task_id,
         media_type=item.media_type,
@@ -227,6 +232,11 @@ async def list_media(platform: str, task_id: int, db: AsyncSession = Depends(get
         download_url=f"/api/platform-downloads/{spec.id}/media/{item.id}/download",
         created_at=item.created_at,
     ) for item in assets]
+    if page is None:
+        return items
+    total = int(await db.scalar(select(func.count(PlatformMediaAsset.id)).where(PlatformMediaAsset.task_id == task_id)) or 0)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size)}
 
 
 async def _load_media(platform: str, asset_id: int, db: AsyncSession):
@@ -340,8 +350,9 @@ async def save_cookie(
 ):
     spec = _require_platform(platform)
     cookie = request.cookie.strip()
+    from app.core.configuration_service import save_platform_credential
     try:
-        status = await save_platform_cookie(db, spec.id, cookie)
+        status = await save_platform_credential(db, spec.id, cookie)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return MessageResponse(

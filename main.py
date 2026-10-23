@@ -24,151 +24,92 @@ from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware
 
 
 from app.core.config_transaction import recover_config_change, journal_path
-if journal_path().exists():
-    recover_config_change()
 from app.core.queue_configuration import recover_queue_change
-recover_queue_change()
-BOOTSTRAP_STATUS = validate_env()
-BOOTSTRAP_MODE = not BOOTSTRAP_STATUS["ready"]
-settings = None
+from app.core.config import settings
+from app.core.process_manager import process_manager
+import importlib
 
-if not BOOTSTRAP_MODE:
+
+async def activate_runtime(app: FastAPI) -> bool:
+    """初始化和故障修复使用同一入口，修复后自动开放业务路由。"""
+    status = await asyncio.to_thread(validate_env)
+    app.state.bootstrap_status = status
+    if status.get("missing"):
+        app.state.degraded_mode = True
+        return False
     try:
+        if journal_path().exists():
+            await asyncio.to_thread(recover_config_change)
+        await asyncio.to_thread(recover_queue_change)
         from app.models.database import init_db
-        from app.core.config import settings, ensure_download_dir
-        from app.core.process_manager import process_manager
-        from app.api import (
-            authors,
-            operations,
-            platform_downloads,
-            platforms,
-            system,
-            tasks,
-            works,
-            x_tasks,
-        )
-        from app.services.douyin_account import (
-            migrate_legacy_account_sync,
-            recover_legacy_signature_isolation_sync,
-        )
-        config_errors = get_runtime_errors()
-        if config_errors:
-            BOOTSTRAP_MODE = True
-            BOOTSTRAP_STATUS = {
-                **BOOTSTRAP_STATUS,
-                "ready": False,
-                "errors": [
-                    *BOOTSTRAP_STATUS.get("errors", []),
-                    *config_errors,
-                ],
-            }
-    except Exception as e:
-        BOOTSTRAP_MODE = True
-        BOOTSTRAP_STATUS = {
-            **BOOTSTRAP_STATUS,
-            "ready": False,
-            "errors": [
-                *BOOTSTRAP_STATUS.get("errors", []),
-                {
-                    "key": "APP_STARTUP",
-                    "label": "应用启动",
-                    "group": "应用",
-                    "message": f"{type(e).__name__}: {str(e)[:300]}",
-                },
-            ],
-        }
+        from app.core.config import ensure_download_dir
+        from app.core import redis_client
+        await init_db()
+        await asyncio.to_thread(ensure_download_dir)
+        if not await asyncio.to_thread(redis_client.check_connection):
+            raise RuntimeError("Redis 尚未恢复")
+        from app.services.download_publication import recover_media_publications
+        from app.services.media_deletion import recover_media_deletions
+        from app.services.douyin_account import migrate_legacy_account_sync, recover_legacy_signature_isolation_sync
+        await asyncio.to_thread(recover_media_publications)
+        await asyncio.to_thread(recover_media_deletions)
+        await asyncio.to_thread(migrate_legacy_account_sync)
+        await asyncio.to_thread(recover_legacy_signature_isolation_sync)
+        if not getattr(app.state, "runtime_routes_loaded", False):
+            for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "platform_downloads", "operations"):
+                module = importlib.import_module("app.api." + name)
+                app.include_router(module.router, prefix="/api")
+            app.state.runtime_routes_loaded = True
+            app.openapi_schema = None
+        await asyncio.to_thread(process_manager.reconcile)
+        app.state.degraded_mode = False
+        app.state.bootstrap_status = {**status, "ready": True, "missing": [], "errors": []}
+        from pathlib import Path
+        initialized = Path(__file__).resolve().parent / ".runtime" / "initialized"
+        initialized.parent.mkdir(parents=True, exist_ok=True)
+        initialized.touch(exist_ok=True)
+        return True
+    except Exception as exc:
+        from app.core.error_handling import sanitize_text
+        app.state.degraded_mode = True
+        app.state.bootstrap_status = {**status, "ready": False, "errors": [{
+            "key": "APP_STARTUP", "label": "运行环境", "group": "应用",
+            "message": sanitize_text(str(exc), limit=300),
+        }]}
+        return False
+
+
+async def supervise_runtime(app: FastAPI) -> None:
+    while True:
+        try:
+            if app.state.degraded_mode:
+                await activate_runtime(app)
+            else:
+                await asyncio.to_thread(process_manager.reconcile)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 受管状态保留；短暂故障不终止后续恢复周期。
+            pass
+        await asyncio.sleep(5)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    if BOOTSTRAP_MODE:
-        missing = ", ".join(item["key"] for item in BOOTSTRAP_STATUS["missing"])
-        print(f"配置未完成，进入初始化模式。缺失配置: {missing}")
-        yield
-        return
-
-    # 启动时执行
-    print("🚀 启动媒体下载管理系统...")
-    
-    # 初始化数据库
+    app.state.degraded_mode = True
+    app.state.runtime_routes_loaded = False
+    await activate_runtime(app)
+    from app.core.queue_configuration import resume_pending_changes
+    runtime_supervisor = asyncio.create_task(supervise_runtime(app))
+    queue_supervisor = asyncio.create_task(resume_pending_changes())
     try:
-        await init_db()
-        from app.services.download_publication import recover_media_publications
-        await asyncio.to_thread(recover_media_publications)
-        migrated_account = await asyncio.to_thread(migrate_legacy_account_sync)
-        recovered_signature_state = await asyncio.to_thread(
-            recover_legacy_signature_isolation_sync
-        )
-        print("✅ 数据库初始化完成")
-        if migrated_account:
-            print("✅ 旧抖音 Cookie 已迁移到加密账号档案")
-        if recovered_signature_state:
-            print("✅ 已解除旧版签名错误造成的抖音账号隔离状态")
-    except Exception as e:
-        BOOTSTRAP_STATUS["ready"] = False
-        BOOTSTRAP_STATUS.setdefault("errors", []).append({
-            "key": "DATABASE_INIT",
-            "label": "数据库初始化",
-            "group": "数据库",
-            "message": f"{type(e).__name__}: {str(e)[:300]}",
-        })
-        app.state.degraded_mode = True
-        app.state.bootstrap_status = BOOTSTRAP_STATUS
-        print(f"❌ 数据库初始化失败，进入配置维护模式: {e}")
         yield
-        return
-    
-    # 下载目录属于可在维护页修复的配置。权限或路径错误不能让 Web
-    # worker 退出，否则用户将失去再次进入维护模式的机会。
-    try:
-        download_dir = ensure_download_dir()
-        # 存储维护在自己的操作锁内先恢复日志，再开始新操作。
-        # 共享盘上的历史清单不可读，不能让下载和 Web 服务无法启动。
-        print(f"✅ 下载目录: {download_dir}")
-    except Exception as e:
-        BOOTSTRAP_STATUS["ready"] = False
-        BOOTSTRAP_STATUS.setdefault("errors", []).append({
-            "key": "DOWNLOAD_DIRECTORY",
-            "label": "下载目录",
-            "group": "下载目录",
-            "message": f"{type(e).__name__}: {str(e)[:300]}",
-        })
-        app.state.degraded_mode = True
-        app.state.bootstrap_status = BOOTSTRAP_STATUS
-        print(f"❌ 下载目录初始化失败，进入配置维护模式: {e}")
-        yield
-        return
-    
-    # 检查 Redis 连接
-    from app.core import redis_client as rc
-    if rc.check_connection():
-        print("✅ Redis 连接正常")
-        rc.append_activity_log("info", "system", "系统启动", f"下载目录={download_dir}")
-    else:
-        print("❌ Redis 连接失败！活动日志和进度追踪将不可用")
-    
-    # 自动启动 Celery Worker 和 Beat
-    concurrency = settings.MAX_CONCURRENT_DOWNLOADS
-    worker_result = process_manager.start_worker(concurrency)
-    print(f"✅ {worker_result['message']}")
-    from app.core.queue_configuration import pending_path, resume_pending_changes
-    if not pending_path().exists():
-        beat_result = process_manager.start_beat()
-        print(f"✅ {beat_result['message']}")
-    config_supervisor = asyncio.create_task(resume_pending_changes())
-    
-    yield
-    
-    # 关闭时执行
-    config_supervisor.cancel()
-    try:
-        await config_supervisor
-    except asyncio.CancelledError:
-        pass
-    print("👋 关闭媒体下载管理系统...")
-    process_manager.shutdown_all()
-    print("✅ Celery 进程已停止")
+    finally:
+        for task in (runtime_supervisor, queue_supervisor):
+            task.cancel()
+        await asyncio.gather(runtime_supervisor, queue_supervisor, return_exceptions=True)
+        # Celery 属于项目而不是某一代 Web worker。重载由新 Web 接管；
+        # 项目停止/部署通过 stop.sh 显式停止并核验这些进程。
 
 
 # 创建 FastAPI 应用
@@ -199,12 +140,17 @@ app = FastAPI(
     redoc_url=None,
 )
 
-app.state.bootstrap_status = BOOTSTRAP_STATUS
-app.state.degraded_mode = BOOTSTRAP_MODE
+app.state.bootstrap_status = {"ready": False, "missing": [], "errors": []}
+app.state.degraded_mode = True
 register_exception_handlers(app)
 # 禁用 API 响应缓存，避免页面显示过时数据
 @app.middleware("http")
 async def no_cache_api_responses(request: Request, call_next):
+    from pathlib import Path
+    maintenance = Path(__file__).resolve().parent / ".runtime" / "deployment-maintenance"
+    if maintenance.exists() and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        return JSONResponse(status_code=503, content={"success": False, "detail": "系统正在发布，请稍后重试"},
+                            headers={"Retry-After": "10"})
     response = await call_next(request)
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -237,18 +183,6 @@ async def public_readiness():
     return JSONResponse(status_code=200 if payload["ready"] else 503, content=payload)
 
 app.include_router(bootstrap.router, prefix="/api")
-
-if not BOOTSTRAP_MODE:
-    # 注册 API 路由
-    app.include_router(tasks.router, prefix="/api")
-    app.include_router(authors.router, prefix="/api")
-    app.include_router(system.router, prefix="/api")
-    app.include_router(x_tasks.router, prefix="/api")
-    app.include_router(works.router, prefix="/api")
-    app.include_router(platforms.router, prefix="/api")
-    app.include_router(platform_downloads.router, prefix="/api")
-    app.include_router(operations.router, prefix="/api")
-
 
 # 静态文件服务（前端页面）
 static_dir = os.path.join(os.path.dirname(__file__), "static")

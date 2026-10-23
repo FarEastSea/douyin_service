@@ -52,6 +52,7 @@ from app.services.media_paths import migrate_download_paths
 from app.services.notifications import send_notification
 from app.services.archive_rules import get_archive_rules, save_archive_rules
 from app.core.queue_configuration import QueueDrainRequired, resuming_change, stage_queue_change
+from app.core.configuration_service import save_archive_configuration, save_douyin_account, record_configuration_activity
 
 router = APIRouter(tags=["系统管理"])
 
@@ -125,12 +126,12 @@ async def update_archive_rules(
     db: AsyncSession = Depends(get_async_db),
 ):
     try:
-        rules = await save_archive_rules(db, request.model_dump())
+        rules = await save_archive_configuration(db, request.model_dump())
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    redis_client.append_activity_log(
-        "info", "system", "归档规则已更新",
+    await record_configuration_activity(
+        "归档规则已更新",
         f"directory={rules['directory_template']}, metadata={','.join(rules['metadata_formats']) or 'none'}",
     )
     return {"success": True, "message": "归档规则已保存；仅影响新建任务", "rules": rules}
@@ -145,7 +146,7 @@ async def update_cookie(
 ):
     """更新抖音 Cookie"""
     try:
-        status = await save_account_profile(
+        status = await save_douyin_account(
             db, cookie=request.cookie, user_agent=None,
             proxy_enabled=None, proxy_url=None,
         )
@@ -180,7 +181,7 @@ async def update_douyin_account(
     db: AsyncSession = Depends(get_async_db),
 ):
     try:
-        status = await save_account_profile(
+        status = await save_douyin_account(
             db,
             cookie=request.cookie,
             user_agent=request.user_agent,
@@ -189,9 +190,8 @@ async def update_douyin_account(
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    await asyncio.to_thread(
-        redis_client.append_activity_log,
-        "info", "system", "抖音账号请求上下文已更新",
+    await record_configuration_activity(
+        "抖音账号请求上下文已更新",
         f"proxy_enabled={status.get('proxy_enabled')}, status={status.get('status')}",
     )
     return MessageResponse(
@@ -254,18 +254,21 @@ async def update_runtime_settings(
 ):
     """更新运行期配置，保存到 system_config、.env 并同步缓存"""
     try:
-        config = await persist_runtime_config(db, request.model_dump(exclude_unset=True))
+        from app.core.configuration_service import save_configuration
+        updates = request.model_dump(exclude_unset=True)
+        config = await get_runtime_config(db)
+        saved = await save_configuration(db, {RUNTIME_CONFIG_ENV_KEYS[key]: value for key, value in updates.items()
+                                      if key in RUNTIME_CONFIG_ENV_KEYS and value is not None})
+        config.update({key: value for key, value in updates.items() if value is not None})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    await asyncio.to_thread(
-        redis_client.append_activity_log,
-        "info",
-        "system",
+    await record_configuration_activity(
         "运行配置已更新",
         ", ".join(sorted(request.model_dump(exclude_unset=True).keys())) or "无变化",
     )
-    return MessageResponse(success=True, message="运行配置已保存并同步到 .env", data={"config": config})
+    return MessageResponse(success=True, message=saved.message,
+                           data={"config": config, "configuration_state": (saved.data or {}).get("configuration_state", "applied")})
 
 
 @router.get("/config/all")
@@ -292,263 +295,10 @@ async def save_complete_settings(
     db: AsyncSession = Depends(get_async_db),
     preview: bool = Query(False),
 ):
-    from app.core.config_transaction import configuration_session
-    async with configuration_session():
-        return await _save_complete_settings(request, db, preview=preview is True)
+    from app.core.configuration_service import save_configuration
+    return await save_configuration(db, request.values, preview=preview is True)
 
 
-async def _save_complete_settings(request: CompleteConfigUpdate, db: AsyncSession, *, preview: bool = False):
-    """统一保存全部网页配置，并同步运行时配置与平台 Cookie。"""
-    updates = {key: value for key, value in request.values.items() if key in FIELD_MAP
-               and not (FIELD_MAP[key].secret and (value is None or str(value).strip() in {"", "********"}))}
-    if not updates:
-        raise HTTPException(status_code=400, detail="没有可保存的配置")
-    if preview and any(key != "DOWNLOAD_ROOT" and not key.endswith("_DOWNLOAD_SUBDIR") for key in updates):
-        raise HTTPException(status_code=400, detail="预演仅支持下载目录配置")
-    douyin_cookie_update = updates.get("DOUYIN_COOKIE")
-    if douyin_cookie_update not in {None, "", "********"}:
-        try:
-            require_douyin_uifid(str(douyin_cookie_update).strip())
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-
-    current = await asyncio.to_thread(read_env_file)
-    credential_keys = {"DOUYIN_COOKIE", *GENERIC_PLATFORM_COOKIE_KEYS}
-    supplied_credentials = set(updates) & credential_keys
-    if supplied_credentials:
-        if len(updates) != 1:
-            raise HTTPException(status_code=400, detail="平台凭据请在对应账号页面单独保存，不能与其他设置混合提交")
-        key = next(iter(supplied_credentials))
-        if key == "DOUYIN_COOKIE":
-            await save_account_profile(db, cookie=str(updates[key]).strip(), user_agent=None,
-                                       proxy_enabled=None, proxy_url=None)
-        else:
-            platform = next(p for p, (_, _, cookie_key) in GENERIC_PLATFORM_CONFIG.items() if cookie_key == key)
-            await save_platform_cookie(db, platform, str(updates[key]).strip())
-        return MessageResponse(success=True, message="平台凭据已更新")
-    for key, value in updates.items():
-        from app.core.env_config import _validate_env_value
-        try:
-            _validate_env_value(key, "" if value is None else str(value))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    from app.core.env_config import _check_database, _check_redis
-    connection_values = {**(await asyncio.to_thread(settings.snapshot)).model_dump(), **updates}
-    if set(updates) & {"DB_TYPE", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"}:
-        error = await asyncio.to_thread(_check_database, connection_values, require_schema=True)
-        if error:
-            raise HTTPException(status_code=400, detail="目标数据库连接或结构验证失败，配置未保存；目标必须具有当前应用表结构，本操作不会搬迁数据")
-    if set(updates) & {"REDIS_URL", "REDIS_PASSWORD"}:
-        error = await asyncio.to_thread(_check_redis, connection_values)
-        if error:
-            raise HTTPException(status_code=400, detail="目标 Redis 连接验证失败，配置未保存")
-    platform_subdir_keys = tuple(
-        item[0] for item in GENERIC_PLATFORM_CONFIG.values()
-    )
-    for key in ("DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", *platform_subdir_keys):
-        if key not in updates:
-            continue
-        subdir = Path(str(updates[key]).strip())
-        if subdir.is_absolute() or ".." in subdir.parts or not str(subdir).strip("./\\"):
-            raise HTTPException(status_code=400, detail=f"{FIELD_MAP[key].label}必须是根目录下的相对子目录")
-    for key, value in updates.items():
-        field = FIELD_MAP[key]
-        if field.required and not str(value if value is not None else "").strip():
-            raise HTTPException(status_code=400, detail=f"{field.label}不能为空")
-
-    download_error = await asyncio.to_thread(
-        check_download_directory,
-        {**current, **updates},
-    )
-    if download_error:
-        raise HTTPException(status_code=400, detail=download_error["message"])
-
-    runtime_by_env = {env_key: runtime_key for runtime_key, env_key in RUNTIME_CONFIG_ENV_KEYS.items()}
-    runtime_updates = {
-        runtime_by_env[key]: value
-        for key, value in updates.items()
-        if key in runtime_by_env
-    }
-
-    requested_admin_token = updates.get("ADMIN_TOKEN")
-    requested_admin_token_text = str(requested_admin_token).strip() if requested_admin_token is not None else ""
-    new_admin_token = (
-        requested_admin_token_text
-        if requested_admin_token_text not in {"", "********"}
-        else None
-    )
-
-    try:
-        runtime_environment = {}
-        if runtime_updates:
-            runtime_environment = await persist_runtime_config(db, runtime_updates, commit=False)
-
-        environment_updates = {
-            key: value for key, value in updates.items()
-            if key not in runtime_by_env
-            and key not in {"DOUYIN_COOKIE", *GENERIC_PLATFORM_COOKIE_KEYS}
-        }
-        legacy_douyin = current.get("DOWNLOAD_DIR")
-        old_root = current.get("DOWNLOAD_ROOT") or (str(Path(legacy_douyin).parent) if legacy_douyin else "/downloads")
-        old_douyin = legacy_douyin or str(Path(old_root) / current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))
-        old_x = current.get("X_DOWNLOAD_DIR") or str(Path(old_root) / current.get("X_DOWNLOAD_SUBDIR", "X"))
-        new_root = str(updates.get("DOWNLOAD_ROOT", old_root))
-        new_douyin = str(Path(new_root) / str(updates.get("DOUYIN_DOWNLOAD_SUBDIR", current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))))
-        new_x = str(Path(new_root) / str(updates.get("X_DOWNLOAD_SUBDIR", current.get("X_DOWNLOAD_SUBDIR", "X"))))
-        platform_download_dirs = {
-            platform: (
-                str(Path(old_root) / current.get(subdir_key, default_subdir)),
-                str(Path(new_root) / str(updates.get(
-                    subdir_key, current.get(subdir_key, default_subdir)
-                ))),
-            )
-            for platform, (subdir_key, default_subdir, _) in GENERIC_PLATFORM_CONFIG.items()
-        }
-        path_changes = {
-            "tasks": 0,
-            "history": 0,
-            "x_tasks": 0,
-            "x_media": 0,
-            "platform_tasks": 0,
-            "platform_media": 0,
-            "unresolved": {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0},
-            "unresolved_total": 0,
-        }
-        if (
-            old_douyin != new_douyin
-            or old_x != new_x
-            or any(old != new for old, new in platform_download_dirs.values())
-        ):
-            path_changes = await migrate_download_paths(
-                db,
-                old_download_dir=old_douyin,
-                new_download_dir=new_douyin,
-                old_x_download_dir=old_x,
-                new_x_download_dir=new_x,
-                platform_download_dirs=platform_download_dirs,
-            )
-            if path_changes.get("unresolved_total"):
-                raise ValueError("目标目录尚未包含全部已有文件，目录变更未保存；不会搬移文件或盲目改写记录")
-
-        if preview:
-            await db.rollback()
-            return MessageResponse(success=True, message="目录预演通过；只更新已确认存在的文件关联，不搬移文件", data={"migrated_paths": path_changes})
-
-        cookie_keys = {"X_COOKIE": "x_cookie"}
-        for env_key, config_key in cookie_keys.items():
-            value = updates.get(env_key)
-            if value == "********":
-                value = current.get(env_key, "")
-            if value is None or not str(value).strip():
-                continue
-            result = await db.execute(select(SystemConfig).where(SystemConfig.key == config_key))
-            config_row = result.scalar_one_or_none()
-            if config_row:
-                config_row.value = str(value).strip()
-            else:
-                db.add(SystemConfig(key=config_key, value=str(value).strip()))
-
-        from app.core.config_transaction import commit_configuration
-        await commit_configuration(db, {**environment_updates, **runtime_environment})
-    except QueueDrainRequired:
-        await db.rollback()
-        if resuming_change.get():
-            raise
-        try:
-            await asyncio.to_thread(stage_queue_change, updates)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return MessageResponse(success=True, message="连接变更已保存待生效：旧队列排空后将自动切换并重启后台服务", data={"configuration_state": "draining"})
-    except ValueError as e:
-        await db.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        await db.rollback()
-        raise
-
-    douyin_cookie = updates.get("DOUYIN_COOKIE")
-    if douyin_cookie and douyin_cookie != "********":
-        await save_account_profile(
-            db, cookie=str(douyin_cookie).strip(), user_agent=None,
-            proxy_enabled=None, proxy_url=None,
-        )
-    x_cookie = updates.get("X_COOKIE")
-    if x_cookie and x_cookie != "********":
-        await asyncio.to_thread(redis_client.set_x_cookie, str(x_cookie).strip())
-    for platform, (_, _, cookie_key) in GENERIC_PLATFORM_CONFIG.items():
-        cookie = updates.get(cookie_key)
-        if cookie and cookie != "********":
-            await save_platform_cookie(db, platform, str(cookie).strip())
-
-    await asyncio.to_thread(
-        redis_client.append_activity_log,
-        "info",
-        "system",
-        "设置中心配置已更新",
-        ", ".join(sorted(updates)),
-    )
-    hot_reload_keys = {
-        "DEBUG",
-        "DOWNLOAD_ROOT",
-        "DOUYIN_DOWNLOAD_SUBDIR",
-        "X_DOWNLOAD_SUBDIR",
-        "TIKTOK_DOWNLOAD_SUBDIR",
-        "WEIBO_DOWNLOAD_SUBDIR",
-        "BILIBILI_DOWNLOAD_SUBDIR",
-        "DB_TYPE",
-        "DB_HOST",
-        "DB_PORT",
-        "DB_USER",
-        "DB_PASSWORD",
-        "DB_NAME",
-        "REDIS_URL",
-        "REDIS_PASSWORD",
-        "DOWNLOAD_CHUNK_SIZE",
-        "MIN_CHECK_INTERVAL",
-        "X_DOWNLOAD_ENGINE",
-        "X_COOKIE_FILE",
-        "TIKTOK_DOWNLOAD_ENGINE",
-        "TIKTOK_COOKIE_FILE",
-        "WEIBO_DOWNLOAD_ENGINE",
-        "WEIBO_COOKIE_FILE",
-        "BILIBILI_DOWNLOAD_ENGINE",
-        "BILIBILI_COOKIE_FILE",
-        "X_TASK_LOG_MAX_LINES",
-        "X_TASK_LOG_TTL_SECONDS",
-        "X_TASK_STATE_TTL_SECONDS",
-        "CELERY_CONNECTION_MODE", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
-        "MAX_CONCURRENT_DOWNLOADS", "APP_NAME",
-    }
-    restart_keys = sorted(
-        key for key in updates
-        if key not in RUNTIME_CONFIG_ENV_KEYS.values()
-        and key not in {
-            "DOUYIN_COOKIE",
-            "X_COOKIE",
-            *GENERIC_PLATFORM_COOKIE_KEYS,
-            "ADMIN_TOKEN",
-            "CORS_ALLOWED_ORIGINS",
-            *hot_reload_keys,
-        }
-    )
-    message = "配置已保存并生效"
-    unresolved_paths = int(path_changes.get("unresolved_total", 0))
-    if unresolved_paths:
-        message += f"；有 {unresolved_paths} 行媒体路径未能重定位，请检查目录内容"
-    if restart_keys:
-        message += "；部分基础配置需重启 Web、Worker 和 Beat 后生效"
-    return MessageResponse(
-        success=True,
-        message=message,
-        data={
-            "restart_required": bool(restart_keys),
-            "restart_keys": restart_keys,
-            "migrated_paths": path_changes,
-            "admin_token": new_admin_token,
-        },
-    )
-
-# ============ 下载历史 ============
 
 @router.get("/history", response_model=List[DownloadHistoryResponse])
 async def list_download_history(
@@ -918,83 +668,6 @@ async def get_active_progress():
 
 # ============ 数据库配置 ============
 
-class DatabaseConfig(BaseModel):
-    db_type: str = "postgresql"
-    db_host: str = ""
-    db_port: int = 0
-    db_user: str = ""
-    db_password: str = ""
-    db_name: str = ""
-
-
-@router.get("/config/database")
-async def get_database_config():
-    """获取当前数据库配置（密码脱敏）"""
-    current = await asyncio.to_thread(settings.snapshot)
-    env_status = await asyncio.to_thread(validate_env)
-    return {
-        "db_type": current.DB_TYPE,
-        "db_host": current.DB_HOST,
-        "db_port": current.DB_PORT,
-        "db_user": current.DB_USER,
-        "db_name": current.DB_NAME,
-        "db_password_set": bool(current.DB_PASSWORD),
-        "env": env_status,
-    }
-
-@router.post("/config/database/test")
-async def test_database_connection(cfg: DatabaseConfig):
-    """测试数据库连接"""
-    try:
-        effective_port = cfg.db_port or (3306 if cfg.db_type == "mysql" else 5432)
-        await asyncio.to_thread(validate_database_test_target, cfg.db_host, effective_port)
-        current = await asyncio.to_thread(read_env_file)
-        db_password = cfg.db_password or current.get("DB_PASSWORD", "")
-        from app.core.env_config import _build_database_url
-        url, _ = _build_database_url({"DB_TYPE": cfg.db_type, "DB_HOST": cfg.db_host,
-                                    "DB_PORT": str(effective_port), "DB_USER": cfg.db_user,
-                                    "DB_PASSWORD": db_password, "DB_NAME": cfg.db_name})
-
-        def _test_connection():
-            engine = create_engine(
-                url,
-                pool_pre_ping=True,
-                connect_args={"connect_timeout": 3},
-            )
-            try:
-                with engine.connect() as conn:
-                    conn.execute(text("SELECT 1"))
-            finally:
-                engine.dispose()
-
-        await asyncio.to_thread(_test_connection)
-        return {"success": True, "message": "连接成功"}
-    except Exception as e:
-        return {"success": False, "message": f"连接失败: {str(e)[:300]}"}
-
-
-@router.post("/config/database")
-async def save_database_config(cfg: DatabaseConfig, db: AsyncSession = Depends(get_async_db)):
-    """保存数据库配置到 .env 文件"""
-    try:
-        current = await asyncio.to_thread(read_env_file)
-        updates = {
-            "DB_TYPE": cfg.db_type,
-            "DB_HOST": cfg.db_host,
-            "DB_PORT": str(cfg.db_port or (5432 if cfg.db_type == "postgresql" else 3306)),
-            "DB_USER": cfg.db_user,
-            "DB_PASSWORD": cfg.db_password or current.get("DB_PASSWORD", ""),
-            "DB_NAME": cfg.db_name,
-        }
-        tested = await test_database_connection(cfg)
-        if not tested["success"]:
-            raise ValueError(tested["message"])
-        return await save_complete_settings(CompleteConfigUpdate(values=updates), db)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}")
-
 # ============ 工具函数 ============
 
 def format_size(size_bytes: int) -> str:
@@ -1110,8 +783,12 @@ async def cancel_queue_change():
     from app.core.config_transaction import configuration_session, atomic_json
     from app.core.queue_configuration import pending_path, state_path
     async with configuration_session():
+        from app.core.configuration_service import _require_writable_configuration
+        _require_writable_configuration()
         pending_path().unlink(missing_ok=True)
-        result = await asyncio.to_thread(process_manager.start_beat)
+        status = await asyncio.to_thread(process_manager.get_status)
+        result = (await asyncio.to_thread(process_manager.start_beat)
+                  if status.get("beat", {}).get("desired", True) else {"success": True})
         if not result.get("success"):
             await asyncio.to_thread(atomic_json, state_path(), {"state": "failed", "message": "变更已撤回，但调度未恢复，请在运行维护查看进程状态"})
             raise HTTPException(status_code=503, detail="变更已撤回，但调度启动失败")
@@ -1139,7 +816,8 @@ async def get_update_info():
     """读取当前版本信息（不联网，仅基于本地仓库状态）"""
     import asyncio
     try:
-        return await asyncio.to_thread(updater.check_update, False)
+        result = await asyncio.to_thread(updater.check_update, False)
+        return {**result, "deployment_mode": "guarded", "can_apply": False}
     except updater.GitUpdateError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1151,7 +829,8 @@ async def check_update():
     """检查远程仓库是否有可用更新（会执行 git fetch 联网比较）"""
     import asyncio
     try:
-        return await asyncio.to_thread(updater.check_update, True)
+        result = await asyncio.to_thread(updater.check_update, True)
+        return {**result, "deployment_mode": "guarded", "can_apply": False}
     except updater.GitUpdateError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1170,96 +849,9 @@ async def diagnose_update():
 
 @router.post("/update/apply")
 async def apply_update():
-    """拉取远程仓库最新代码（git pull --ff-only），成功后重启 Worker/Beat 以加载新代码"""
-    import asyncio
-    try:
-        result = await asyncio.to_thread(updater.apply_update)
-    except updater.GitUpdateError as e:
-        await asyncio.to_thread(
-            redis_client.append_activity_log, "error", "system", "❌ 版本更新失败", str(e)[:300]
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"更新出错：{str(e)[:300]}")
-
-    restart_msgs = []
-    if result.get("updated"):
-        before_short = (result.get("before") or {}).get("short", "")
-        after_short = (result.get("after") or {}).get("short", "")
-        await asyncio.to_thread(
-            redis_client.append_activity_log,
-            "info", "system", "✅ 已拉取远程更新", f"{before_short} → {after_short}",
-        )
-        # 重启后台进程以加载新代码
-        try:
-            worker_result = await asyncio.to_thread(process_manager.restart_worker)
-            restart_msgs.append(worker_result.get("message", ""))
-        except Exception as e:
-            restart_msgs.append(f"Worker 重启失败: {str(e)[:150]}")
-        try:
-            await asyncio.to_thread(process_manager.stop_beat)
-            beat_result = await asyncio.to_thread(process_manager.start_beat)
-            restart_msgs.append(beat_result.get("message", ""))
-        except Exception as e:
-            restart_msgs.append(f"Beat 重启失败: {str(e)[:150]}")
-
-    result["restart"] = [m for m in restart_msgs if m]
-    result["restart_note"] = (
-        "后台 Worker/Beat 已重启。前端页面刷新即可生效；若更新涉及 Web/接口代码，"
-        "请点击「重启 Web 服务」或在宝塔面板重启本项目以完全生效。"
-    )
-    return result
-
-
-def _read_proc_cmdline(pid: int) -> str:
-    """读取 /proc/<pid>/cmdline（仅 Linux），失败返回空串。"""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            return f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    except Exception:
-        return ""
-
-
-@router.post("/service/restart")
-async def restart_web_service():
-    """
-    热重启 Web 服务（gunicorn）。
-
-    通过向 gunicorn 主进程（当前进程的父进程）发送 SIGHUP 触发优雅重载：
-    gunicorn 会以最新代码启动新 worker 并平滑替换旧 worker。
-    仅在确认父进程确为 gunicorn 时才发送信号，避免误伤其它托管方式。
-    """
-    import os
-    import signal
-
-    ppid = os.getppid()
-    cmdline = _read_proc_cmdline(ppid)
-
-    if "gunicorn" not in cmdline.lower():
-        return {
-            "success": False,
-            "reload_supported": False,
-            "message": (
-                "未检测到 gunicorn 主进程，无法自动热重载。"
-                f"（父进程: {cmdline[:120] or ppid}）请在宝塔面板手动重启本项目。"
-            ),
-        }
-
-    try:
-        os.kill(ppid, signal.SIGHUP)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"发送热重载信号失败：{str(e)[:200]}")
-
-    await asyncio.to_thread(
-        redis_client.append_activity_log,
-        "info", "system", "🔄 已向 gunicorn 发送热重载信号 (SIGHUP)", f"master_pid={ppid}",
-    )
-    return {
-        "success": True,
-        "reload_supported": True,
-        "master_pid": ppid,
-        "message": (
-            "已向 gunicorn 主进程发送热重载 (SIGHUP)，数秒内将以最新代码重启工作进程。"
-            "若配置了 --preload 则热重载不生效，需在宝塔面板重启本项目。"
-        ),
-    }
+    """版本检查保留；发布必须经过排空、备份和相同依赖制品验证。"""
+    raise HTTPException(status_code=409, detail={
+        "code": "GUARDED_DEPLOYMENT_REQUIRED",
+        "message": "请通过现有 Jenkins 发布流程更新；直接在线拉取代码已停用",
+        "action": "发布流程会先完成只读预检，再排空任务、备份数据库、切换代码并验证，失败时恢复备份。",
+    })

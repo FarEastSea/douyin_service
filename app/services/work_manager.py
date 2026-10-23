@@ -8,58 +8,19 @@
 4. 删除/重下后回写 Author.downloaded_works，保持统计一致
 """
 
-import os
 import asyncio
 from datetime import datetime
-from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core import redis_client
-from app.core.config import settings
 from app.models.models import Author, Work, DownloadTask, DownloadHistory
-
-
-def _safe_remove_file(path: Optional[str]) -> bool:
-    """删除单个文件，仅当其位于 DOWNLOAD_DIR 内且存在时执行。返回是否实际删除。"""
-    if not path:
-        return False
-    try:
-        target = Path(path).expanduser().resolve()
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-    try:
-        download_root = Path(settings.DOWNLOAD_DIR).expanduser().resolve()
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-    try:
-        target.relative_to(download_root)
-    except ValueError:
-        # 不在下载目录内，拒绝删除
-        return False
-
-    removed = False
-    candidates = (
-        target,
-        target.with_name(target.name + ".downloading"),
-        target.with_name(target.name + ".json"),
-        target.with_name(target.name + ".csv"),
-        target.with_name(target.name + ".json.tmp"),
-        target.with_name(target.name + ".csv.tmp"),
-    )
-    for candidate in candidates:
-        try:
-            if candidate.is_file():
-                candidate.unlink()
-                removed = True
-        except OSError:
-            pass
-    return removed
+from app.services.download_state_lock import lock_authors, lock_authors_sync, lock_works, lock_works_sync
+from app.services.media_deletion import stage_media_deletion
 
 
 def _collect_task_file_paths(task: DownloadTask) -> List[str]:
@@ -95,7 +56,24 @@ def _revoke_celery_task(celery_task_id: Optional[str]) -> bool:
 
 async def _purge_tasks(db: AsyncSession, tasks: Iterable[DownloadTask]) -> int:
     """删除给定任务及其磁盘文件与下载历史。返回删除的文件数。"""
-    removed_files = 0
+    tasks = list(tasks)
+    await lock_works(db, [task.work_id for task in tasks])
+    if tasks:
+        tasks = list((await db.scalars(select(DownloadTask).where(
+            DownloadTask.id.in_([task.id for task in tasks]),
+        ).order_by(DownloadTask.id).with_for_update().execution_options(populate_existing=True))).all())
+    paths = [path for task in tasks for path in _collect_task_file_paths(task)]
+    histories = list((await db.scalars(select(DownloadHistory).where(
+        DownloadHistory.task_id.in_([task.id for task in tasks]),
+    ))).all()) if tasks else []
+    paths.extend(path for history in histories for path in _collect_history_file_paths(history))
+    owner_rows = (await db.execute(select(Work.id, Work.author_id).where(
+        Work.id.in_([task.work_id for task in tasks]),
+    ))).all() if tasks else []
+    removed_files = await db.run_sync(lambda session: stage_media_deletion(
+        session, paths, author_ids=[row.author_id for row in owner_rows],
+        work_ids=[row.id for row in owner_rows], task_ids=[task.id for task in tasks],
+    ))
     for task in tasks:
         # 正在下载的任务，先暂停并清理进度缓存
         if task.status == "downloading":
@@ -108,15 +86,10 @@ async def _purge_tasks(db: AsyncSession, tasks: Iterable[DownloadTask]) -> int:
         except Exception:
             pass
 
-        for path in _collect_task_file_paths(task):
-            if _safe_remove_file(path):
-                removed_files += 1
-
         # 先删历史（无级联），再删任务
-        history_rows = await db.execute(
-            select(DownloadHistory).where(DownloadHistory.task_id == task.id)
-        )
-        for history in history_rows.scalars().all():
+        for history in histories:
+            if history.task_id != task.id:
+                continue
             await db.delete(history)
 
         await db.delete(task)
@@ -128,6 +101,7 @@ async def recalc_author_counts(db: AsyncSession, author: Author) -> None:
     """按未排除作品数与完整下载作品数回写作者计数。"""
     if author is None:
         return
+    await lock_authors(db, [author.id])
     # 会话关闭了 autoflush，先落实本次任务增删和作品排除状态，
     # 否则下面的聚合查询会读到事务内的旧值。
     await db.flush()
@@ -153,16 +127,21 @@ async def recalc_author_counts(db: AsyncSession, author: Author) -> None:
         )
     )
     author.total_works = int(total.scalar() or 0)
+    # 等待锁前的 ORM 快照可能已旧，即使计算结果与旧值相等也必须回写。
+    flag_modified(author, "downloaded_works")
+    flag_modified(author, "total_works")
 
 
 async def refresh_work_download_state(db: AsyncSession, work: Work) -> bool:
     if work is None:
         return False
+    await lock_works(db, [work.id], refresh=False)
     await db.flush()
     task_count = int(await db.scalar(select(func.count(DownloadTask.id)).where(DownloadTask.work_id == work.id)) or 0)
     incomplete = int(await db.scalar(select(func.count(DownloadTask.id)).where(
         DownloadTask.work_id == work.id, or_(DownloadTask.status != "completed", DownloadTask.status.is_(None)))) or 0)
     work.is_downloaded = task_count > 0 and incomplete == 0
+    flag_modified(work, "is_downloaded")
     return work.is_downloaded
 
 
@@ -170,6 +149,7 @@ def refresh_work_download_state_sync(db: Session, work: Work) -> bool:
     """在同步任务中按所有文件任务状态重算作品下载完成标记。"""
     if work is None:
         return False
+    lock_works_sync(db, [work.id], refresh=False)
     db.flush()
     task_count = int(db.execute(
         select(func.count(DownloadTask.id)).where(DownloadTask.work_id == work.id)
@@ -181,6 +161,7 @@ def refresh_work_download_state_sync(db: Session, work: Work) -> bool:
         )
     ).scalar() or 0)
     work.is_downloaded = task_count > 0 and incomplete_count == 0
+    flag_modified(work, "is_downloaded")
     return bool(work.is_downloaded)
 
 
@@ -188,6 +169,7 @@ def recalc_author_counts_sync(db: Session, author: Author) -> None:
     """Celery 同步会话使用的作者计数重算。"""
     if author is None:
         return
+    lock_authors_sync(db, [author.id])
     db.flush()
     author.downloaded_works = int(db.execute(
         select(func.count(Work.id)).where(
@@ -206,6 +188,8 @@ def recalc_author_counts_sync(db: Session, author: Author) -> None:
             Work.is_excluded == False,  # noqa: E712
         )
     ).scalar() or 0)
+    flag_modified(author, "downloaded_works")
+    flag_modified(author, "total_works")
 
 
 async def delete_work(db: AsyncSession, work: Work) -> dict:
@@ -213,7 +197,8 @@ async def delete_work(db: AsyncSession, work: Work) -> dict:
 
     调用方负责 commit。
     """
-    tasks = list(work.download_tasks or [])
+    await lock_works(db, [work.id])
+    tasks = list((await db.scalars(select(DownloadTask).where(DownloadTask.work_id == work.id))).all())
     removed_files = await _purge_tasks(db, tasks)
 
     work.is_excluded = True
@@ -238,7 +223,10 @@ async def delete_work_file(db: AsyncSession, work: Work, file_index: int) -> dic
 
     调用方负责 commit。
     """
-    matched = [t for t in (work.download_tasks or []) if (t.file_index or 0) == file_index]
+    await lock_works(db, [work.id])
+    matched = list((await db.scalars(select(DownloadTask).where(
+        DownloadTask.work_id == work.id, DownloadTask.file_index == file_index,
+    ))).all())
     removed_files = await _purge_tasks(db, matched)
 
     excluded = set(work.excluded_file_indices)
@@ -272,6 +260,7 @@ async def delete_author_hard(db: AsyncSession, author_id: int) -> dict:
 
     task_ids: List[int] = []
     try:
+        await lock_authors(db, [author_id])
         result = await db.execute(
             select(Author)
             .options(selectinload(Author.works).selectinload(Work.download_tasks))
@@ -285,6 +274,10 @@ async def delete_author_hard(db: AsyncSession, author_id: int) -> dict:
         tasks = [task for work in works for task in (work.download_tasks or [])]
         task_ids = [task.id for task in tasks]
         work_ids = [work.id for work in works]
+        await lock_works(db, work_ids)
+        if task_ids:
+            tasks = list((await db.scalars(select(DownloadTask).where(DownloadTask.id.in_(task_ids))
+                .order_by(DownloadTask.id).with_for_update().execution_options(populate_existing=True))).all())
 
         histories: List[DownloadHistory] = []
         if work_ids:
@@ -317,9 +310,9 @@ async def delete_author_hard(db: AsyncSession, author_id: int) -> dict:
         for history in histories:
             file_paths.update(_collect_history_file_paths(history))
 
-        for path in file_paths:
-            if _safe_remove_file(path):
-                removed_files += 1
+        removed_files = await db.run_sync(lambda session: stage_media_deletion(
+            session, file_paths, author_ids=[author_id], work_ids=work_ids, task_ids=task_ids,
+        ))
 
         for history in histories:
             await db.delete(history)

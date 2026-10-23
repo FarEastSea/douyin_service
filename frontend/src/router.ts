@@ -5,6 +5,7 @@ const UpdatesView = () => import("./views/UpdatesView.vue");
 const SettingsView = () => import("./views/SettingsView.vue");
 const UnifiedTasksView = () => import("./views/UnifiedTasksView.vue");
 const DashboardView = () => import("./views/DashboardView.vue");
+const MediaLibraryView = () => import("./views/MediaLibraryView.vue");
 
 const legacySections: Record<string, string> = {
   general: "/settings/application",
@@ -45,9 +46,16 @@ function legacyMaintenanceRedirect(query: Record<string, unknown>) {
 
 export const router = createRouter({
   history: createWebHashHistory(),
+  scrollBehavior(to, from, savedPosition) {
+    if (savedPosition) return savedPosition;
+    if (to.path !== from.path) return { top: 0 };
+    return false;
+  },
   routes: [
     { path: "/", redirect: "/dashboard" },
     { path: "/dashboard", component: DashboardView },
+    { path: "/library", component: MediaLibraryView },
+    { path: "/subscriptions", redirect: "/authors/douyin" },
     { path: "/operations/tasks", component: UnifiedTasksView },
     {
       path: "/operations/maintenance",

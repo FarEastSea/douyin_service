@@ -29,6 +29,8 @@ const {
   platformCookieValues,
   platformCredentialStatus,
   resourceState,
+  fieldErrors,
+  fieldDirty,
   notificationTestBusy,
   notificationTestChannel,
   notificationTestResult,
@@ -73,7 +75,7 @@ const {
             <span class="setting-copy">
               <strong
                 >{{ field.label
-                }}<i v-if="field.required" aria-label="必填">必填</i></strong
+                }}<i v-if="field.required" aria-label="必填">必填</i><span v-if="fieldDirty(field)" class="field-dirty">已修改</span></strong
               >
               <small>{{ field.help || field.key }}</small>
             </span>
@@ -85,6 +87,8 @@ const {
                 type="button"
                 role="switch"
                 :aria-checked="fieldEnabled(field)"
+                :id="'setting-'+field.key"
+                :aria-describedby="fieldErrors[field.key] ? 'setting-error-'+field.key : undefined"
                 @click.prevent="toggleField(field)"
               >
                 <span class="switch-track"><i /></span>
@@ -92,6 +96,9 @@ const {
               </button>
               <input
                 v-else
+                :id="'setting-'+field.key"
+                :aria-invalid="Boolean(fieldErrors[field.key]) || undefined"
+                :aria-describedby="fieldErrors[field.key] ? 'setting-error-'+field.key : undefined"
                 :type="field.secret ? 'password' : field.kind"
                 :value="fieldValue(field)"
                 :min="field.min"
@@ -105,6 +112,7 @@ const {
                   )
                 "
               />
+              <span v-if="fieldErrors[field.key]" :id="'setting-error-'+field.key" class="field-error">{{fieldErrors[field.key]}}</span>
             </span>
           </label>
         </div>
@@ -244,20 +252,20 @@ const {
               ><strong>抖音 Cookie</strong
               ><small>粘贴浏览器请求头中的完整 Cookie 字符串。</small></span
             ><span class="setting-control">
-              <textarea
+              <textarea id="setting-cookie" :aria-invalid="Boolean(fieldErrors.cookie) || undefined" :aria-describedby="fieldErrors.cookie ? 'setting-error-cookie' : undefined" @input="delete fieldErrors.cookie"
                 v-model="douyinCookieValue"
                 rows="4"
                 placeholder="留空保持当前 Cookie"
-              /></span
+              /><span v-if="fieldErrors.cookie" id="setting-error-cookie" class="field-error">{{fieldErrors.cookie}}</span></span
           ></label>
           <label class="setting-row"
             ><span class="setting-copy"
               ><strong>User-Agent</strong
               ><small>应与获取 Cookie 的浏览器保持一致。</small></span
             ><span class="setting-control"
-              ><input
+              ><input id="setting-user_agent" :aria-invalid="Boolean(fieldErrors.user_agent) || undefined" :aria-describedby="fieldErrors.user_agent ? 'setting-error-user_agent' : undefined" @input="delete fieldErrors.user_agent"
                 v-model="douyinAccount.user_agent"
-                autocomplete="off" /></span
+                autocomplete="off" /><span v-if="fieldErrors.user_agent" id="setting-error-user_agent" class="field-error">{{fieldErrors.user_agent}}</span></span
           ></label>
           <div class="setting-row">
             <span class="setting-copy"
@@ -288,11 +296,11 @@ const {
               ><strong>代理地址</strong
               ><small>留空保持当前加密代理地址。</small></span
             ><span class="setting-control"
-              ><input
+              ><input id="setting-proxy_url" :aria-invalid="Boolean(fieldErrors.proxy_url) || undefined" :aria-describedby="fieldErrors.proxy_url ? 'setting-error-proxy_url' : undefined" @input="delete fieldErrors.proxy_url"
                 v-model="douyinProxyValue"
                 type="password"
                 autocomplete="new-password"
-                placeholder="留空保持当前值" /></span
+                placeholder="留空保持当前值" /><span v-if="fieldErrors.proxy_url" id="setting-error-proxy_url" class="field-error">{{fieldErrors.proxy_url}}</span></span
           ></label>
         </div>
       </section>
@@ -376,7 +384,7 @@ const {
             <span class="setting-copy"
               ><strong
                 >{{ field.label
-                }}<i v-if="field.required" aria-label="必填">必填</i></strong
+                }}<i v-if="field.required" aria-label="必填">必填</i><span v-if="fieldDirty(field)" class="field-dirty">已修改</span></strong
               ><small>{{ field.help || field.key }}</small></span
             >
             <span class="setting-control">
@@ -395,6 +403,9 @@ const {
               <input
                 v-else
                 :type="field.secret ? 'password' : field.kind"
+                :id="'setting-'+field.key"
+                :aria-invalid="Boolean(fieldErrors[field.key]) || undefined"
+                :aria-describedby="fieldErrors[field.key] ? 'setting-error-'+field.key : undefined"
                 :value="fieldValue(field)"
                 :min="field.min"
                 :max="field.max"
@@ -407,6 +418,7 @@ const {
                   )
                 "
               />
+              <span v-if="fieldErrors[field.key]" :id="'setting-error-'+field.key" class="field-error">{{fieldErrors[field.key]}}</span>
             </span>
           </label>
         </div>
@@ -431,17 +443,17 @@ const {
               ></span
             >
             <span class="setting-control">
-              <textarea
+              <textarea id="setting-cookie" :aria-invalid="Boolean(fieldErrors.cookie) || undefined" :aria-describedby="fieldErrors.cookie ? 'setting-error-cookie' : undefined" @input="delete fieldErrors.cookie"
                 v-if="activePage.id === 'account-x'"
                 v-model="xCookieValue"
                 rows="5"
                 placeholder="留空保持当前 Cookie"
-              /><textarea
+              /><span v-if="fieldErrors.cookie" id="setting-error-cookie" class="field-error">{{fieldErrors.cookie}}</span><textarea id="setting-cookie" :aria-invalid="Boolean(fieldErrors.cookie) || undefined" :aria-describedby="fieldErrors.cookie ? 'setting-error-cookie' : undefined" @input="delete fieldErrors.cookie"
                 v-else
                 v-model="platformCookieValues[activePlatform!.id]"
                 rows="5"
                 placeholder="留空保持当前 Cookie"
-              />
+              /><span v-if="fieldErrors.cookie" id="setting-error-cookie" class="field-error">{{fieldErrors.cookie}}</span>
             </span>
           </label>
         </div>
@@ -485,14 +497,14 @@ const {
                 {work_type}</small
               ></span
             ><span class="setting-control"
-              ><input v-model="archiveRules.directory_template" /></span
+              ><input id="setting-directory_template" :aria-invalid="Boolean(fieldErrors.directory_template) || undefined" :aria-describedby="fieldErrors.directory_template ? 'setting-error-directory_template' : undefined" @input="delete fieldErrors.directory_template" v-model="archiveRules.directory_template" /><span v-if="fieldErrors.directory_template" id="setting-error-directory_template" class="field-error">{{fieldErrors.directory_template}}</span></span
           ></label>
           <label class="setting-row"
             ><span class="setting-copy"
               ><strong>文件名模板</strong
               ><small>必须包含作品 ID、序号后缀和扩展名变量。</small></span
             ><span class="setting-control"
-              ><input v-model="archiveRules.filename_template" /></span
+              ><input id="setting-filename_template" :aria-invalid="Boolean(fieldErrors.filename_template) || undefined" :aria-describedby="fieldErrors.filename_template ? 'setting-error-filename_template' : undefined" @input="delete fieldErrors.filename_template" v-model="archiveRules.filename_template" /><span v-if="fieldErrors.filename_template" id="setting-error-filename_template" class="field-error">{{fieldErrors.filename_template}}</span></span
           ></label>
         </div>
       </section>
@@ -529,32 +541,32 @@ const {
             <span class="setting-copy"
               ><strong>发布时间</strong><small>留空表示不限制。</small></span
             ><span class="setting-control paired-control"
-              ><input
+              ><input id="setting-published_from" :aria-invalid="Boolean(fieldErrors.published_from) || undefined" :aria-describedby="fieldErrors.published_from ? 'setting-error-published_from' : undefined" @input="delete fieldErrors.published_from"
                 v-model="archiveRules.published_from"
                 type="date"
-                aria-label="发布时间起" /><input
+                aria-label="发布时间起" /><span v-if="fieldErrors.published_from" id="setting-error-published_from" class="field-error">{{fieldErrors.published_from}}</span><input id="setting-published_to" :aria-invalid="Boolean(fieldErrors.published_to) || undefined" :aria-describedby="fieldErrors.published_to ? 'setting-error-published_to' : undefined" @input="delete fieldErrors.published_to"
                 v-model="archiveRules.published_to"
                 type="date"
                 aria-label="发布时间止"
-            /></span>
+            /><span v-if="fieldErrors.published_to" id="setting-error-published_to" class="field-error">{{fieldErrors.published_to}}</span></span>
           </div>
           <div class="setting-row">
             <span class="setting-copy"
               ><strong>文件大小（MB）</strong
               ><small>0 表示不限制。</small></span
             ><span class="setting-control paired-control"
-              ><input
+              ><input id="setting-min_file_size_mb" :aria-invalid="Boolean(fieldErrors.min_file_size_mb) || undefined" :aria-describedby="fieldErrors.min_file_size_mb ? 'setting-error-min_file_size_mb' : undefined" @input="delete fieldErrors.min_file_size_mb"
                 v-model.number="archiveRules.min_file_size_mb"
                 type="number"
                 min="0"
                 step="0.1"
-                aria-label="最小文件大小" /><input
+                aria-label="最小文件大小" /><span v-if="fieldErrors.min_file_size_mb" id="setting-error-min_file_size_mb" class="field-error">{{fieldErrors.min_file_size_mb}}</span><input id="setting-max_file_size_mb" :aria-invalid="Boolean(fieldErrors.max_file_size_mb) || undefined" :aria-describedby="fieldErrors.max_file_size_mb ? 'setting-error-max_file_size_mb' : undefined" @input="delete fieldErrors.max_file_size_mb"
                 v-model.number="archiveRules.max_file_size_mb"
                 type="number"
                 min="0"
                 step="0.1"
                 aria-label="最大文件大小"
-            /></span>
+            /><span v-if="fieldErrors.max_file_size_mb" id="setting-error-max_file_size_mb" class="field-error">{{fieldErrors.max_file_size_mb}}</span></span>
           </div>
           <div class="setting-row">
             <span class="setting-copy"

@@ -82,10 +82,6 @@ class _RedisManager:
             if self._client is not None and self._key == key:
                 return self._client
             if self._failed_key == key and _time.monotonic() < self._retry_after:
-                if self._client is not None:
-                    return self._client
-                if self._failed_client is not None:
-                    return self._failed_client
                 raise redis.ConnectionError(str(self._failed_error or "Redis 连接不可用"))
 
             pool: Optional[redis.ConnectionPool] = None
@@ -110,15 +106,9 @@ class _RedisManager:
                 self._retry_after = _time.monotonic() + 1.0
                 if previous_failed_pool is not None and previous_failed_pool is not pool:
                     previous_failed_pool.disconnect()
-                if self._client is not None:
-                    if pool is not None:
-                        pool.disconnect()
-                    self._failed_client = None
-                    self._failed_pool = None
-                    return self._client
-                if candidate is not None:
-                    return candidate
-                raise
+                # 已保存的新连接是唯一权威来源。回退旧库会把配额、暂停信号
+                # 和风控锁分散到两个 Redis；缓存功能自行处理不可用，协调必须失败关闭。
+                raise redis.ConnectionError("当前 Redis 配置不可用") from exc
 
             if key != _redis_connection_key():
                 pool.disconnect()

@@ -74,7 +74,11 @@ async def _ping_workers() -> int:
     def ping() -> int:
         from app.tasks.celery_app import celery_app
 
-        result = celery_app.control.inspect(timeout=2.0).ping()
+        from app.core.config import settings
+        from app.core.process_manager import process_manager
+        with celery_app.connection_for_read(url=settings.effective_celery_broker) as connection:
+            result = celery_app.control.inspect(destination=[process_manager._worker_name()],
+                                               timeout=2.0, connection=connection).ping()
         return len(result or {})
 
     count = await asyncio.to_thread(ping)
@@ -134,8 +138,8 @@ async def build_readiness(*, degraded_mode: bool) -> dict[str, Any]:
         components["xhs_collector"] = xhs_collector
 
         process_value = process.get("value") if process.get("ok") else {}
-        worker_running = bool((process_value or {}).get("worker", {}).get("running"))
-        beat_running = bool((process_value or {}).get("beat", {}).get("running"))
+        worker_running = bool((process_value or {}).get("worker", {}).get("ready"))
+        beat_running = bool((process_value or {}).get("beat", {}).get("ready"))
 
         if worker_running and redis.get("ok"):
             worker = await _check(

@@ -62,7 +62,6 @@ const {
   copyLogs,
   checkUpdate,
   diagnoseUpdate,
-  applyUpdate,
   toggleLevel,
 } = componentProps.controller;
 </script>
@@ -611,19 +610,13 @@ const {
             :disabled="updateBusy"
             @click="checkUpdate"
           >
-            检查更新</button
-          ><button class="btn ghost" type="button" @click="diagnoseUpdate">
-            复制诊断</button
-          ><button
-            v-if="updateInfo.has_update"
-            class="btn primary"
-            type="button"
-            :disabled="updateBusy || !updateInfo.update_supported"
-            @click="applyUpdate"
-          >
-            安装更新
+            检查更新
+          </button>
+          <button class="btn ghost" type="button" @click="diagnoseUpdate">
+            复制诊断
           </button>
         </div>
+        <p class="inline-note">版本安装统一通过现有 Jenkins 发布流程执行，完成后刷新页面即可。发布会先排空任务、备份数据库，再切换版本。</p>
       </section>
       <section class="setting-section">
         <header>

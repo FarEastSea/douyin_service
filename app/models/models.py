@@ -282,8 +282,8 @@ class DownloadTask(Base):
     archive_rule_snapshot = Column(Text)
     
     # 进度追踪
-    total_bytes = Column(Integer, default=0)
-    downloaded_bytes = Column(Integer, default=0)
+    total_bytes = Column(BigInteger, default=0)
+    downloaded_bytes = Column(BigInteger, default=0)
     download_speed = Column(Float, default=0)  # 字节/秒
     
     # 文件路径
@@ -326,7 +326,7 @@ class DownloadHistory(Base):
     author_nickname = Column(String(255))
     work_title = Column(Text)
     file_path = Column(Text)
-    file_size = Column(Integer)
+    file_size = Column(BigInteger)
     download_duration = Column(Integer)  # 下载耗时(秒)
     
     completed_at = Column(DateTime, server_default=func.now())
@@ -410,7 +410,7 @@ class XMediaAsset(Base):
     media_type = Column(String(16), nullable=False)
     file_path = Column(Text, nullable=False, unique=True)
     filename = Column(Text, nullable=False)
-    size_bytes = Column(Integer, default=0)
+    size_bytes = Column(BigInteger, default=0)
     mime_type = Column(String(128))
     title = Column(Text)
     author_name = Column(String(255))
@@ -482,7 +482,7 @@ class PlatformMediaAsset(Base):
     media_type = Column(String(16), nullable=False)
     file_path = Column(Text, nullable=False)
     filename = Column(Text, nullable=False)
-    size_bytes = Column(Integer, default=0)
+    size_bytes = Column(BigInteger, default=0)
     mime_type = Column(String(128))
     title = Column(Text)
     author_name = Column(String(255))

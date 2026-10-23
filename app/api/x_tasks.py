@@ -34,7 +34,6 @@ from app.services.x_task_service import (
 )
 from app.core import redis_client
 from app.core.config import settings
-from app.core.env_config import write_env_updates
 from app.services.unified_task_operations import TaskOperationError, operate_task
 
 router = APIRouter(prefix="/x", tags=["X/Twitter 下载"])
@@ -168,16 +167,20 @@ async def get_x_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     return serialize_x_task(task, live_state)
 
 
-@router.get("/tasks/{task_id}/media", response_model=list[XMediaAssetResponse])
-async def list_x_task_media(task_id: int, db: AsyncSession = Depends(get_async_db)):
+@router.get("/tasks/{task_id}/media")
+async def list_x_task_media(
+    task_id: int, page: int | None = Query(None, ge=1),
+    page_size: int = Query(60, ge=1, le=100), db: AsyncSession = Depends(get_async_db),
+):
     """列出任务关联的每一个可预览资源。"""
     task = (await db.execute(select(XDownloadTask).where(XDownloadTask.id == task_id))).scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    assets = (await db.execute(
-        select(XMediaAsset).where(XMediaAsset.task_id == task.id).order_by(XMediaAsset.created_at, XMediaAsset.id)
-    )).scalars().all()
-    return [XMediaAssetResponse(
+    statement = select(XMediaAsset).where(XMediaAsset.task_id == task.id).order_by(XMediaAsset.created_at, XMediaAsset.id)
+    if page is not None:
+        statement = statement.offset((page - 1) * page_size).limit(page_size)
+    assets = (await db.execute(statement)).scalars().all()
+    items = [XMediaAssetResponse(
         id=item.id, task_id=item.task_id, media_type=item.media_type,
         filename=item.filename, size_bytes=item.size_bytes or 0, mime_type=item.mime_type,
         title=item.title, author_name=item.author_name, published_at=item.published_at,
@@ -188,6 +191,11 @@ async def list_x_task_media(task_id: int, db: AsyncSession = Depends(get_async_d
         preview_url=f"/api/x/media/{item.id}/preview",
         download_url=f"/api/x/media/{item.id}/download", created_at=item.created_at,
     ) for item in assets]
+    if page is None:
+        return items
+    total = int(await db.scalar(select(func.count(XMediaAsset.id)).where(XMediaAsset.task_id == task_id)) or 0)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size)}
 
 
 def _safe_x_media_path(asset: XMediaAsset):
@@ -456,41 +464,22 @@ async def save_x_cookie(
     if not cookie:
         raise HTTPException(status_code=400, detail="Cookie 内容不能为空")
 
-    result = await db.execute(
-        select(SystemConfig).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
-    )
-    config = result.scalar_one_or_none()
-    if config:
-        config.value = cookie
-    else:
-        db.add(SystemConfig(key=X_COOKIE_CONFIG_KEY, value=cookie))
+    from app.core.configuration_service import save_configuration
     try:
-        await db.flush()
-        await asyncio.to_thread(write_env_updates, {"X_COOKIE": cookie})
-        await db.commit()
+        return await save_configuration(db, {"X_COOKIE": cookie})
     except ValueError as e:
-        await db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        await db.rollback()
-        raise
-
-    await asyncio.to_thread(redis_client.set_x_cookie, cookie)
-
-    return MessageResponse(success=True, message="X Cookie 已保存并同步到 .env")
 
 
 @router.get("/config/cookie")
 async def check_x_cookie(db: AsyncSession = Depends(get_async_db)):
     """检查 X Cookie 配置状态"""
-    cookie = await asyncio.to_thread(redis_client.get_x_cookie)
-    if not cookie:
-        result = await db.execute(
-            select(SystemConfig).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
-        )
-        config = result.scalar_one_or_none()
-        cookie = config.value if config else None
-    if not cookie:
+    result = await db.execute(
+        select(SystemConfig).where(SystemConfig.key == X_COOKIE_CONFIG_KEY)
+    )
+    config = result.scalar_one_or_none()
+    cookie = config.value if config else None
+    if config is None:
         cookie = (await asyncio.to_thread(settings.snapshot)).X_COOKIE
 
     configured = bool(cookie and len(cookie.strip()) > 0)

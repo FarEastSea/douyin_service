@@ -11,6 +11,7 @@ from celery import Celery
 from celery.schedules import crontab
 from app.core.config import settings
 from app.core.queue_configuration import DynamicQueueTask
+from celery import bootsteps
 
 # 创建 Celery 应用
 celery_app = Celery(
@@ -83,6 +84,19 @@ celery_app.conf.update(
 celery_app.autodiscover_tasks(["app.tasks"])
 
 
+class InitializeManagedRuntime(bootsteps.StartStopStep):
+    """Consumer 前失败即退出；signal handler 的异常会被 Celery 捕获。"""
+    requires = {"celery.worker.components:Pool"}
+
+    def start(self, worker):
+        from app.models.database import init_db_sync
+        init_db_sync()
+        worker.app._managed_runtime_initialized = True
+
+
+celery_app.steps["worker"].add(InitializeManagedRuntime)
+
+
 # ============ 简单测试任务 ============
 # 用于验证 Worker 是否真的能消费队列中的任务
 
@@ -116,21 +130,8 @@ def on_worker_process_init(**kwargs):
     dispose_inherited_sync_engine()
 
 
-@worker_ready.connect
-def on_worker_ready(**kwargs):
-    """Worker 启动时只执行一次迁移，并记录已注册任务。"""
-    try:
-        from app.models.database import init_db_sync
-        init_db_sync()
-    except Exception as e:
-        try:
-            from app.core import redis_client
-            redis_client.append_activity_log("error", "system", "Celery Worker 数据库迁移失败", str(e)[:200])
-        except Exception:
-            pass
-        # 迁移异常必须进入 Worker 启动日志，不能静默带病继续。
-        raise RuntimeError("Celery Worker 数据库迁移失败") from e
-
+def _recover_worker_state():
+    """恢复投递不能阻塞 Consumer 就绪，也不能与配置切换的文件锁互等。"""
     # 部署可能在订阅检查执行中途停止旧 Worker。新 Worker 已就绪且本项目
     # 只有这一套受管 Worker，此时可安全收口旧报告、释放遗留锁并恢复断点。
     recovered_reports = 0
@@ -150,7 +151,6 @@ def on_worker_ready(**kwargs):
         )
         if recovered_reports:
             _reset_subscription_check_cooldown(recovery_db)
-            check_subscriptions.apply_async(countdown=5)
     except Exception as e:
         try:
             from app.core import redis_client
@@ -162,6 +162,20 @@ def on_worker_ready(**kwargs):
     finally:
         if recovery_db is not None:
             recovery_db.close()
+
+    from pathlib import Path
+    import time
+    marker = Path.cwd() / ".runtime" / "subscription-recovery-needed"
+    if recovered_reports:
+        marker.touch(exist_ok=True)
+    while marker.exists():
+        try:
+            check_subscriptions.apply_async(countdown=5)
+        except Exception:
+            # 维护/连接切换时保留恢复意图，放行后自动投递。
+            time.sleep(5)
+        else:
+            marker.unlink(missing_ok=True)
 
     # Redis 活动日志不影响迁移成功判定；Redis 短暂不可用时 Worker 仍可启动。
     try:
@@ -175,6 +189,24 @@ def on_worker_ready(**kwargs):
         )
     except Exception:
         pass
+
+@worker_ready.connect
+def on_worker_ready(**kwargs):
+    # ping 只证明控制通道可达；此标记证明本代进程完成了应用初始化。
+    if not getattr(celery_app, "_managed_runtime_initialized", False):
+        return
+    import os
+    import time
+    from pathlib import Path
+    from hashlib import sha256
+    from app.core.config_transaction import atomic_json
+    atomic_json(Path.cwd() / ".runtime" / "worker-ready.json", {
+        "pid": os.getpid(), "token": os.environ.get("MEDIA_PROCESS_TOKEN", ""),
+        "broker": sha256(settings.effective_celery_broker.encode()).hexdigest(),
+        "checked_at": time.time(),
+    })
+    import threading
+    threading.Thread(target=_recover_worker_state, name="worker-state-recovery", daemon=True).start()
 
 
 @worker_shutdown.connect

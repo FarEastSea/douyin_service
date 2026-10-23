@@ -93,6 +93,7 @@ class XhsApiDownloadEngine:
         cookie_file: Optional[str] = None,
         on_line: Optional[Callable[[str], None]] = None,
         on_process: Optional[Callable[[int], None]] = None,
+        check_running: Optional[Callable[[], None]] = None,
         known_work_ids: Iterable[str] = (),
         max_items: int = 100,
         max_scrolls: int = 40,
@@ -138,6 +139,8 @@ class XhsApiDownloadEngine:
             session.headers["Cookie"] = cookie
 
         try:
+            if check_running:
+                check_running()
             response = session.post(
                 f"{XHS_INTERNAL_API_URL}/xhs/detail",
                 json={"url": source_url, "download": False, "cookie": cookie or None},
@@ -169,6 +172,8 @@ class XhsApiDownloadEngine:
 
             stable_id = _safe_segment(str(work_id or source_key), "note")
             for position, item in enumerate(media, start=1):
+                if check_running:
+                    check_running()
                 if not isinstance(item, dict):
                     raise ValueError("媒体列表结构不符合解析服务契约")
                 index = int(item.get("序号") or position)
@@ -190,10 +195,14 @@ class XhsApiDownloadEngine:
                         raise ValueError("媒体地址返回了页面或 JSON，而不是媒体文件")
                     with temporary.open("wb") as output:
                         for chunk in media_response.iter_content(chunk_size=1024 * 1024):
+                            if check_running:
+                                check_running()
                             if chunk:
                                 output.write(chunk)
                 if not temporary.is_file() or temporary.stat().st_size == 0:
                     raise ValueError("媒体下载结果为空")
+                if check_running:
+                    check_running()
                 os.replace(temporary, target)
                 log(f"[{spec.name}] 已下载: {target.name}")
 

@@ -19,6 +19,19 @@ DOUYIN_REQUEST_PACE_KEY = "douyin:api:request_pace"
 DOWNLOAD_SLOT_LEASE_SECONDS = 300
 
 
+class CoordinationUnavailable(RuntimeError):
+    """共享协调不可用；调用方应等待恢复后重试，不能绕过限制。"""
+
+
+_active_slot = threading.local()
+
+
+def assert_download_coordination() -> None:
+    slot = getattr(_active_slot, "value", None)
+    if slot is not None and slot.lost.is_set():
+        raise CoordinationUnavailable("下载配额租约已失效，等待协调恢复后重试")
+
+
 _ACQUIRE_SLOT_SCRIPT = """
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
@@ -69,6 +82,7 @@ class _DownloadSlot:
         self.token = token
         self.lease_ms = lease_seconds * 1000
         self._stop = threading.Event()
+        self.lost = threading.Event()
         self._thread = threading.Thread(target=self._keep_alive, daemon=True)
 
     def start(self) -> None:
@@ -77,11 +91,16 @@ class _DownloadSlot:
     def _keep_alive(self) -> None:
         while not self._stop.wait(max(10.0, self.lease_ms / 3000)):
             try:
-                redis_client.redis_client.eval(
+                renewed = redis_client.redis_client.eval(
                     _RENEW_SLOT_SCRIPT, 1, DOWNLOAD_SLOTS_KEY, self.token, self.lease_ms
                 )
+                if not renewed:
+                    self.lost.set()
+                    return
             except Exception as exc:
+                self.lost.set()
                 logger.warning("续租全局下载配额失败: %s", exc)
+                return
 
     def release(self) -> None:
         self._stop.set()
@@ -97,7 +116,6 @@ def global_download_slot(task_id: int | str):
     token = f"{task_id}:{uuid4().hex}"
     slot = _DownloadSlot(token, DOWNLOAD_SLOT_LEASE_SECONDS)
     acquired = False
-    redis_available = True
     while not acquired:
         limit = max(1, min(int(settings.snapshot().MAX_CONCURRENT_DOWNLOADS), 20))
         try:
@@ -110,20 +128,18 @@ def global_download_slot(task_id: int | str):
                 DOWNLOAD_SLOT_LEASE_SECONDS * 1000,
             ))
         except Exception as exc:
-            # Redis 故障时仍保留 Celery 本地并发上限，避免整个下载链路停摆。
-            logger.warning("全局下载配额不可用，退回 Worker 本地并发限制: %s", exc)
-            redis_available = False
-            acquired = True
+            raise CoordinationUnavailable("全局下载配额暂不可用，请等待 Redis 恢复") from exc
         if not acquired:
             time.sleep(0.25)
 
-    if redis_available:
-        slot.start()
+    slot.start()
+    previous = getattr(_active_slot, "value", None)
+    _active_slot.value = slot
     try:
         yield
     finally:
-        if redis_available:
-            slot.release()
+        _active_slot.value = previous
+        slot.release()
 
 
 def wait_for_douyin_request_slot(min_interval_seconds: float, *, deadline: float | None = None) -> None:
@@ -132,14 +148,14 @@ def wait_for_douyin_request_slot(min_interval_seconds: float, *, deadline: float
     if interval_ms <= 0:
         return
     while True:
+        assert_download_coordination()
         remaining_timeout(deadline, 5)
         try:
             wait_ms = int(redis_client.redis_client.eval(
                 _PACE_REQUEST_SCRIPT, 1, DOUYIN_REQUEST_PACE_KEY, interval_ms
             ))
         except Exception as exc:
-            logger.warning("抖音 API 全局节流不可用: %s", exc)
-            return
+            raise CoordinationUnavailable("抖音请求协调暂不可用，请等待 Redis 恢复") from exc
         if wait_ms <= 0:
             return
         budget_sleep(min(wait_ms / 1000, 5.0), deadline)

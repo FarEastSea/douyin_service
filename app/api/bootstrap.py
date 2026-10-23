@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
 from app.core.diagnostics import get_runtime_errors
-from app.core.env_config import _build_database_url, check_download_directory, read_env_file, validate_env, write_env_updates
+from app.core.env_config import ENV_FIELDS, FIELD_MAP, ENV_PATH, _build_database_url, _check_database, _check_redis, check_download_directory, read_env_file, validate_env, write_env_updates
 from app.core.network_security import validate_database_test_target
 
 
@@ -27,10 +27,10 @@ def _effective_bootstrap_status(request: Request):
             status["errors"].extend(item for item in startup_errors if item.get("key") not in existing)
         elif not status["errors"] and not status.get("missing"):
             status["errors"].append({
-                "key": "RESTART_REQUIRED",
-                "label": "需要重启服务",
+                "key": "RECOVERY_PENDING",
+                "label": "正在恢复服务",
                 "group": "应用",
-                "message": "配置已保存，请重启 Web 服务后再使用正常功能。",
+                "message": "配置已保存，系统正在验证并自动恢复完整功能。",
             })
     return status
 
@@ -45,25 +45,69 @@ async def save_bootstrap_config(request: Request, payload: dict = Body(...)):
     values = payload.get("values", payload)
     if not isinstance(values, dict):
         raise HTTPException(status_code=400, detail="配置内容格式不正确")
+    return await _save_configuration_values(request, values)
+
+
+INITIALIZATION_KEYS = {
+    "ADMIN_TOKEN", "CORS_ALLOWED_ORIGINS", "DOWNLOAD_ROOT", "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR",
+    "DB_TYPE", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "REDIS_URL", "REDIS_PASSWORD",
+}
+
+
+async def _save_configuration_values(request: Request, values: dict):
+    """已有数据库统一走业务事务；缺库初始化只允许必要字段。"""
+    if any(key not in FIELD_MAP for key in values):
+        raise HTTPException(status_code=400, detail="包含未知配置字段")
+    degraded = bool(getattr(request.app.state, "degraded_mode", True))
+    if degraded and not set(values) <= INITIALIZATION_KEYS:
+        raise HTTPException(status_code=400, detail="维护模式仅允许修复初始化所需配置")
+    from app.core.config_transaction import configuration_session
+    from app.models.database import get_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy import inspect
     current = await asyncio.to_thread(read_env_file)
-    candidate = {**current, **values}
-    download_error = await asyncio.to_thread(check_download_directory, candidate)
-    if download_error:
-        raise HTTPException(status_code=400, detail=download_error["message"])
-    try:
-        persisted = await asyncio.to_thread(write_env_updates, values)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)[:300]}")
-    status = await asyncio.to_thread(_effective_bootstrap_status, request)
-    return {
-        "success": True,
-        "message": "配置已保存；维护模式下请重启 Web 服务进入完整功能。",
-        "persisted_keys": sorted(persisted),
-        "admin_token": persisted.get("ADMIN_TOKEN"),
-        **status,
-    }
+    existing = not degraded
+    old_unavailable = False
+    if degraded:
+        try:
+            engine = await get_async_engine()
+            async with engine.connect() as connection:
+                existing = await connection.run_sync(lambda conn: inspect(conn).has_table("download_tasks"))
+        except Exception:
+            old_unavailable = True
+    if existing:
+        from app.core.configuration_service import save_configuration
+        async with async_sessionmaker(await get_async_engine(), expire_on_commit=False)() as db:
+            return await save_configuration(db, values)
+    async with configuration_session():
+        from app.core.configuration_service import _require_writable_configuration, field_error
+        _require_writable_configuration()
+        initialized = (ENV_PATH.parent / ".runtime" / "initialized").exists()
+        changed = {key: value for key, value in values.items() if str(value) != str(current.get(key, ""))}
+        if initialized or (old_unavailable and current.get("DB_NAME") and current.get("ADMIN_TOKEN")):
+            path_keys = {key for key in changed if key == "DOWNLOAD_ROOT" or key.endswith("_DOWNLOAD_SUBDIR")}
+            if path_keys:
+                raise HTTPException(status_code=409, detail="已有数据库暂不可用，请先恢复连接，再变更下载目录")
+        candidate = {**current, **values}
+        for field in ENV_FIELDS:
+            if field.required and not str(candidate.get(field.key, field.default)).strip():
+                raise field_error(field.key, f"{field.label}不能为空")
+        error = await asyncio.to_thread(check_download_directory, candidate)
+        if not error:
+            error = await asyncio.to_thread(_check_database, candidate, require_schema=initialized)
+        if not error:
+            error = await asyncio.to_thread(_check_redis, candidate)
+        if error:
+            key = {"DATABASE_CONNECTION": "DB_HOST", "REDIS_CONNECTION": "REDIS_URL",
+                   "DOWNLOAD_ROOT_ACCESS": "DOWNLOAD_ROOT"}.get(error["key"], error["key"])
+            raise field_error(key, error["message"])
+        try:
+            persisted = await asyncio.to_thread(write_env_updates, values)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "message": "配置已保存，系统将自动验证并恢复完整功能",
+            "persisted_keys": sorted(persisted), "admin_token": persisted.get("ADMIN_TOKEN"),
+            "values": {key: value for key, value in persisted.items() if not FIELD_MAP[key].secret}}
 
 
 class DatabaseConfig(BaseModel):
@@ -122,9 +166,9 @@ async def test_database_connection(cfg: DatabaseConfig):
 
 
 @router.post("/config/database")
-async def save_database_config(cfg: DatabaseConfig):
+async def save_database_config(request: Request, cfg: DatabaseConfig):
     if cfg.db_type not in {"postgresql", "mysql"}:
-        return {"success": False, "message": f"不支持的数据库类型: {cfg.db_type}"}
+        raise HTTPException(status_code=400, detail=f"不支持的数据库类型: {cfg.db_type}")
     try:
         current = await asyncio.to_thread(read_env_file)
         updates = {
@@ -135,8 +179,9 @@ async def save_database_config(cfg: DatabaseConfig):
             "DB_PASSWORD": cfg.db_password or current.get("DB_PASSWORD", ""),
             "DB_NAME": cfg.db_name,
         }
-        await asyncio.to_thread(write_env_updates, updates)
-        return {"success": True, "message": "数据库配置已保存，下一次请求将自动使用新连接"}
+        return await _save_configuration_values(request, updates)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

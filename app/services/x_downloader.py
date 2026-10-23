@@ -32,7 +32,8 @@ class XDownloadEngine(Protocol):
                          cookie_file: Optional[str] = None,
                          on_line: Optional[Callable[[str], None]] = None,
                          task_id: Optional[int] = None,
-                         on_process: Optional[Callable[[int], None]] = None) -> XDownloadRunResult: ...
+                         on_process: Optional[Callable[[int], None]] = None,
+                         check_running: Optional[Callable[[], None]] = None) -> XDownloadRunResult: ...
 
 
 def convert_cookie_header_to_netscape(raw_cookie: str, domain: str = ".x.com") -> str:
@@ -62,7 +63,8 @@ class GalleryDlXDownloadEngine:
                          cookie_file: Optional[str] = None,
                          on_line: Optional[Callable[[str], None]] = None,
                          task_id: Optional[int] = None,
-                         on_process: Optional[Callable[[int], None]] = None) -> XDownloadRunResult:
+                         on_process: Optional[Callable[[int], None]] = None,
+                         check_running: Optional[Callable[[], None]] = None) -> XDownloadRunResult:
         if importlib.util.find_spec("gallery_dl") is None:
             return XDownloadRunResult(False, 0, -1, error_code="engine_unavailable",
                                       error_message="gallery-dl 未安装，请重新安装 requirements.txt 依赖")
@@ -108,9 +110,9 @@ class GalleryDlXDownloadEngine:
                     redis_client.set_x_task_pid(task_id, process.pid)
                 except Exception:
                     pass
-            if process.stdout:
-                for line in process.stdout:
-                    log(line.rstrip())
+            from app.services.child_process import iter_download_output
+            for line in iter_download_output(process, check_running):
+                log(line.rstrip())
             return_code = process.wait()
             files = list_media_files(user_folder)
             if return_code == 0:
@@ -120,6 +122,11 @@ class GalleryDlXDownloadEngine:
             return XDownloadRunResult(False, len(files), return_code, files=files,
                                       error_code=code, error_message=message)
         except Exception as exc:
+            from app.core.traffic_control import CoordinationUnavailable
+            from app.services.download_lifecycle import StaleDownloadAttempt
+            from redis.exceptions import RedisError
+            if isinstance(exc, (CoordinationUnavailable, StaleDownloadAttempt, RedisError)):
+                raise
             return XDownloadRunResult(False, 0, -1, error_code="engine_exception",
                                       error_message=f"{type(exc).__name__}: {exc}")
         finally:

@@ -45,10 +45,11 @@ from app.services.archive_rules import (
     serialize_archive_rules,
     work_matches_archive_rules,
 )
-from app.services.work_manager import recalc_author_counts
+from app.services.work_manager import recalc_author_counts, refresh_work_download_state
 from app.services.work_metadata import apply_work_payload
 from app.services.work_factory import ensure_work_async
-from app.services.unified_task_operations import TaskOperationError, operate_task
+from app.services.unified_task_operations import TaskOperationError, operate_task, delete_douyin_tasks
+from app.services.download_state_lock import lock_works
 from app.services.download_lifecycle import prepare_download_retry
 from app.services.douyin_account import get_request_context
 from app.services.douyin_errors import (
@@ -152,13 +153,18 @@ def _build_task_preview_data(
             "local_preview_available": False,
         }
 
+    if task.status == "completed" and task.file_path:
+        # 实况图集的已落盘资源可以是 MP4。列表不读取整份远端 URL JSON，
+        # 媒体类型以实际本地资源为准，避免把视频交给 <img>。
+        suffix = Path(task.file_path).suffix.lower()
+        video = work.work_type == "video" or suffix in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".ts", ".m2ts", ".flv"}
+        return {
+            "preview_media_type": "video" if video else "image",
+            "preview_url": f"/api/tasks/{task.id}/preview",
+            "local_preview_available": True,
+        }
+
     if work.work_type == "video":
-        if task.status == "completed" and task.file_path:
-            return {
-                "preview_media_type": "video",
-                "preview_url": f"/api/tasks/{task.id}/preview",
-                "local_preview_available": True,
-            }
         return {
             "preview_media_type": "video",
             "preview_url": None,
@@ -736,25 +742,10 @@ async def force_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db
 @router.delete("/{task_id}", response_model=MessageResponse)
 async def delete_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
     """删除下载任务"""
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    # 如果任务正在下载，先暂停
-    if task.status == "downloading":
-        await asyncio.to_thread(
-            _update_task_runtime, [task_id], pause=True, clear_progress=True
-        )
-    else:
-        await asyncio.to_thread(redis_client.delete_progress, task_id)
-
-    # 删除任务记录
-    await db.delete(task)
-    await db.commit()
+    try:
+        await operate_task(db, f"douyin:{task_id}", "delete")
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     return MessageResponse(success=True, message="任务已删除")
 
@@ -784,10 +775,12 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
             data={"count": 0, "skipped": "risk_cooldown", "retry_after": state.get("retry_after", 0)},
         )
     # 查询所有失败的任务
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.status.in_(["failed", "cancelled"]))
-        .with_for_update().execution_options(populate_existing=True)
-    )
+    await lock_works(db, list((await db.scalars(select(DownloadTask.work_id).where(
+        DownloadTask.status.in_(["failed", "cancelled"]),
+    ))).all()))
+    result = await db.execute(select(DownloadTask).where(
+        DownloadTask.status.in_(["failed", "cancelled"]),
+    ).order_by(DownloadTask.id).with_for_update().execution_options(populate_existing=True))
     failed_tasks = result.scalars().all()
 
     if not failed_tasks:
@@ -798,6 +791,14 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
     for task in failed_tasks:
         prepare_download_retry(task)
         count += 1
+    owner_ids = set()
+    for work_id in sorted({task.work_id for task in failed_tasks}):
+        work = await db.get(Work, work_id)
+        if work:
+            await refresh_work_download_state(db, work)
+            owner_ids.add(work.author_id)
+    for owner_id in sorted(owner_ids):
+        await recalc_author_counts(db, await db.get(Author, owner_id))
 
     await db.commit()
 
@@ -849,14 +850,11 @@ async def batch_delete_tasks(
     if not tasks:
         return MessageResponse(success=True, message="没有可删除的任务", data={"count": 0})
 
-    count = len(tasks)
-    await asyncio.to_thread(
-        _update_task_runtime, [task.id for task in tasks], clear_progress=True
-    )
-    for task in tasks:
-        await db.delete(task)
-
-    await db.commit()
+    try:
+        count = await delete_douyin_tasks(db, [task.id for task in tasks])
+    except TaskOperationError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     await asyncio.to_thread(
         redis_client.append_activity_log,

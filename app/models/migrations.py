@@ -435,6 +435,31 @@ def _widen_download_task_paths(connection: Connection) -> dict[str, Any]:
     return {"dialect": dialect, "columns": list(columns)}
 
 
+def _widen_media_sizes(connection: Connection) -> dict[str, Any]:
+    columns = {
+        "download_tasks": ("total_bytes", "downloaded_bytes"),
+        "download_history": ("file_size",),
+        "x_media_assets": ("size_bytes",),
+        "platform_media_assets": ("size_bytes",),
+    }
+    dialect = connection.dialect.name
+    for table, names in columns.items():
+        if dialect == "postgresql":
+            changes = ", ".join(f"ALTER COLUMN {name} TYPE BIGINT" for name in names)
+            connection.execute(text(f"ALTER TABLE {table} {changes}"))
+        elif dialect in {"mysql", "mariadb"}:
+            details = {item["name"]: item for item in inspect(connection).get_columns(table)}
+            changes = []
+            for name in names:
+                column = details[name]
+                nullable = "NULL" if column["nullable"] else "NOT NULL"
+                default = "" if column.get("default") is None else f" DEFAULT {column['default']}"
+                changes.append(f"MODIFY COLUMN {name} BIGINT {nullable}{default}")
+            connection.execute(text(f"ALTER TABLE {table} {', '.join(changes)}"))
+        # SQLite INTEGER already stores signed 64-bit values.
+    return {"dialect": dialect, "columns": columns}
+
+
 DATA_MIGRATIONS = [
     Migration(
         migration_id="0200_deduplicate_download_tasks",
@@ -467,6 +492,18 @@ DATA_MIGRATIONS = [
         migration_type="backfill",
         description="将下载任务文件名与路径列扩展为 TEXT",
         handler=_widen_download_task_paths,
+    ),
+    Migration(
+        migration_id="0401_widen_media_sizes",
+        migration_type="backfill",
+        description="将各平台媒体大小与下载进度扩展为 BIGINT",
+        handler=_widen_media_sizes,
+    ),
+    Migration(
+        migration_id="0402_reconcile_download_state",
+        migration_type="backfill",
+        description="修正旧版并发完成或任务删除留下的作品与作者计数",
+        batched_handler=_backfill_counters,
     ),
 ]
 

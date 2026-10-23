@@ -11,7 +11,8 @@ from sqlalchemy import func, select, update
 
 from app.core import redis_client
 from app.core.config import settings
-from app.core.traffic_control import global_download_slot
+from app.core.traffic_control import global_download_slot, CoordinationUnavailable
+from redis.exceptions import RedisError
 from app.models.database import get_sync_db
 from app.models.models import XAuthor, XDownloadTask, XMediaAsset
 from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_cookie_file
@@ -32,6 +33,7 @@ from app.services.x_task_service import (
 )
 from app.tasks.celery_app import celery_app
 from app.services.download_lifecycle import FencedXTask, StaleDownloadAttempt, bind_download_attempt, lock_download_attempt
+from app.services.external_download_coordination import check_external_execution, defer_external_download, register_external_process
 
 logs_dir = 'logs'
 if not os.path.exists(logs_dir):
@@ -110,8 +112,7 @@ def download_x_profile(self, task_id: int):
 
         def on_line(line: str):
             nonlocal downloaded_media_count
-            if not redis_client.external_attempt_current("x", task_id, self.request.id):
-                raise StaleDownloadAttempt("X 执行已被取消或替换")
+            check_external_execution("x", task_id, self.request.id)
             log_lines.append(line)
             redis_client.append_x_task_log(task_id, line)
             if is_media_download_line(line):
@@ -146,8 +147,10 @@ def download_x_profile(self, task_id: int):
                 cookie_file=cookie_path,
                 on_line=on_line,
                 task_id=task_id,
-                on_process=lambda pid: redis_client.set_external_attempt_pid("x", task_id, self.request.id, pid),
+                on_process=lambda pid: register_external_process("x", task_id, self.request.id, pid),
+                check_running=lambda: check_external_execution("x", task_id, self.request.id),
             )
+            check_external_execution("x", task_id, self.request.id)
 
         lock_download_attempt(db, task_id, self.request.id, XDownloadTask)
         db.refresh(task)
@@ -248,6 +251,9 @@ def download_x_profile(self, task_id: int):
             "return_code": result.return_code,
         }
 
+    except (CoordinationUnavailable, RedisError):
+        db.rollback()
+        return defer_external_download(XDownloadTask, task_id, self.request.id, download_x_profile)
     except StaleDownloadAttempt:
         db.rollback()
         return {"success": False, "superseded": True}
@@ -278,7 +284,10 @@ def download_x_profile(self, task_id: int):
     finally:
         try:
             cleanup_x_cookie_file(cookie_path, managed_cookie)
-            redis_client.clear_external_attempt("x", task_id, self.request.id)
+            try:
+                redis_client.clear_external_attempt("x", task_id, self.request.id)
+            except RedisError:
+                pass
         finally:
             db.close()
 

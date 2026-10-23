@@ -28,6 +28,7 @@ import {
   Search,
   Plus,
   ArrowLeft,
+  Images,
 } from "@lucide/vue";
 import { api, saveToken } from "./api";
 import MediaLightbox from "./components/MediaLightbox.vue";
@@ -56,7 +57,6 @@ const store = useAppStore(),
   router = useRouter();
 const initialized = ref(false),
   bootstrap = ref<any>({ ready: true });
-const collapsed = ref(localStorage.getItem("sidebar-collapsed") === "true");
 const commandOpen = ref(false);
 const authOpen = ref(false),
   token = ref("");
@@ -112,15 +112,17 @@ const pageTitle = computed(() =>
     ? "设置"
     : directoryMode.value === "maintenance"
       ? "系统"
+      : route.path === "/library"
+        ? "媒体库"
       : route.path.includes("/works")
-        ? "作者 / 作品"
+        ? "订阅 / 作品"
         : route.path.startsWith("/authors")
-          ? "作者"
+          ? "订阅"
           : route.path === "/automation"
-            ? "自动化"
+            ? "订阅 / 运行记录"
             : route.path === "/operations/tasks"
               ? "下载任务"
-              : "工作台",
+              : "总览",
 );
 const themeIcon = computed(() => (store.theme === "light" ? Sun : MoonStar));
 const mobileNavigationOpen = computed(
@@ -128,12 +130,7 @@ const mobileNavigationOpen = computed(
 );
 
 function toggleSidebar() {
-  if (mobileViewport.value) {
-    dismissSidebar();
-    return;
-  }
-  collapsed.value = !collapsed.value;
-  localStorage.setItem("sidebar-collapsed", String(collapsed.value));
+  dismissSidebar();
 }
 function closeSidebar() {
   store.sidebarOpen = false;
@@ -300,13 +297,31 @@ onBeforeUnmount(() => {
     v-else
     class="app-shell"
     :class="{
-      collapsed,
+      'directory-mode': directoryMode,
       'mobile-open': store.sidebarOpen,
       'has-capture-dock': !directoryMode,
     }"
     :inert="blocking"
   >
     <a class="skip-link" href="#main-content">跳转到主要内容</a>
+    <header class="workspace-masthead">
+      <div class="masthead-inner">
+        <button ref="mobileMenuButton" class="icon-btn mobile-menu" aria-label="打开导航" @click="openSidebar"><Menu :size="21" /></button>
+        <RouterLink class="workspace-brand" to="/dashboard" aria-label="媒体工作台总览"><Download :size="24" /><strong>媒体工作台</strong></RouterLink>
+        <nav class="workspace-navigation" aria-label="工作区">
+          <RouterLink to="/dashboard">总览</RouterLink>
+          <RouterLink to="/operations/tasks">任务</RouterLink>
+          <RouterLink to="/library">媒体库</RouterLink>
+          <RouterLink to="/authors/douyin" :class="{ 'router-link-active': route.path.startsWith('/authors') || route.path === '/automation' }">订阅</RouterLink>
+        </nav>
+        <div class="masthead-tools">
+          <button class="icon-btn masthead-command" aria-label="打开命令面板" title="命令面板 Ctrl / ⌘ K" @click="commandOpen = true"><Search :size="18" /></button>
+          <button class="icon-btn" :title="`主题：${store.theme}`" :aria-label="`切换主题，当前为${store.theme}`" @click="store.cycleTheme"><component :is="themeIcon" :size="18" /></button>
+          <button ref="newDownloadButton" class="icon-btn masthead-add" aria-label="新建下载" title="新建下载" @click="openNewDownload"><Plus :size="18" /></button>
+          <button class="icon-btn masthead-auth" aria-label="管理凭据" title="管理凭据" @click="openAuth"><UserRound :size="18" /></button>
+        </div>
+      </div>
+    </header>
     <aside
       ref="sidebarElement"
       class="sidebar"
@@ -322,14 +337,10 @@ onBeforeUnmount(() => {
         <div><strong>媒体工作台</strong></div>
         <button
           class="collapse-btn"
-          :aria-label="
-            mobileViewport ? '关闭导航' : collapsed ? '展开侧栏' : '收起侧栏'
-          "
+          aria-label="关闭导航"
           @click="toggleSidebar"
         >
-          <ChevronLeft v-if="mobileViewport || !collapsed" /><ChevronRight
-            v-else
-          />
+          <X />
         </button>
       </header>
       <template v-if="directoryMode">
@@ -351,24 +362,22 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <nav class="main-nav" aria-label="工作区">
-          <RouterLink to="/dashboard" title="工作台" @click="closeSidebar"
-            ><LayoutDashboard /><span>工作台</span></RouterLink
+          <RouterLink to="/dashboard" title="总览" @click="closeSidebar"
+            ><LayoutDashboard /><span>总览</span></RouterLink
           >
           <RouterLink
             to="/operations/tasks"
-            title="下载任务"
+            title="任务"
             @click="closeSidebar"
-            ><Layers3 /><span>下载任务</span></RouterLink
+            ><Layers3 /><span>任务</span></RouterLink
           >
+          <RouterLink to="/library" title="媒体库" @click="closeSidebar"><Images /><span>媒体库</span></RouterLink>
           <RouterLink
             to="/authors/douyin"
-            title="作者"
-            :class="{ 'router-link-active': route.path.startsWith('/authors') }"
+            title="订阅"
+            :class="{ 'router-link-active': route.path.startsWith('/authors') || route.path === '/automation' }"
             @click="closeSidebar"
-            ><Users /><span>作者</span></RouterLink
-          >
-          <RouterLink to="/automation" title="自动化" @click="closeSidebar"
-            ><Activity /><span>自动化</span></RouterLink
+            ><Users /><span>订阅</span></RouterLink
           >
         </nav>
         <nav class="main-nav utility-nav" aria-label="系统">
@@ -422,44 +431,13 @@ onBeforeUnmount(() => {
       :inert="mobileNavigationOpen"
       :aria-hidden="mobileNavigationOpen ? 'true' : undefined"
     >
-      <header class="topbar">
-        <button
-          ref="mobileMenuButton"
-          class="icon-btn mobile-menu"
-          aria-label="打开导航"
-          @click="openSidebar"
-        >
-          <Menu />
-        </button>
-        <div class="topbar-title">{{ pageTitle }}</div>
-        <div class="topbar-actions">
-          <button
-            class="command-trigger"
-            aria-label="打开命令面板"
-            @click="commandOpen = true"
-          >
-            <Search :size="15" /><span>命令</span><kbd>⌘ / Ctrl K</kbd></button
-          ><button
-            ref="newDownloadButton"
-            class="icon-btn topbar-add"
-            aria-label="新建下载"
-            title="新建下载"
-            @click="openNewDownload"
-          >
-            <Plus :size="18" /></button
-          ><button
-            class="icon-btn"
-            title="管理凭据"
-            aria-label="管理凭据"
-            @click="openAuth"
-          >
-            <UserRound :size="17" />
-          </button>
-        </div>
-      </header>
       <RiskBanner v-if="route.path !== '/dashboard'" />
       <RouterView />
     </main>
+    <footer class="workspace-utility-footer">
+      <RouterLink to="/operations/maintenance/services" class="service-state" :data-state="readiness"><i /><span>{{ readiness === 'ready' ? '服务就绪' : readiness === 'not_ready' ? '服务需检查' : '状态未确认' }}</span></RouterLink>
+      <nav aria-label="系统工具"><RouterLink to="/operations/maintenance/services"><HardDrive :size="16" />系统</RouterLink><RouterLink to="/settings/application"><Settings :size="16" />设置</RouterLink></nav>
+    </footer>
     <nav
       v-if="!directoryMode"
       class="mobile-capture-dock"

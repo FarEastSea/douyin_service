@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import shutil
 from typing import Any, Callable
 
@@ -22,6 +23,19 @@ from app.services.storage_maintenance import STORAGE_MISSING_ERROR, find_rebase_
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _storage_files(root: Path):
+    """Prune caches and recovery journals before descending into media folders."""
+    excluded = {".quarantine", ".thumbnails", "_work_covers", "_author_avatars"}
+    for directory, folders, names in os.walk(root, followlinks=False):
+        folders[:] = [name for name in folders
+                      if name not in excluded and not name.startswith(".media-deletion-")
+                      and not (Path(directory) / name).is_symlink()]
+        for name in names:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                yield path
 
 
 def _safe_stat(path_value: str | None) -> tuple[bool, int]:
@@ -49,16 +63,11 @@ def _scan_storage_files(
     orphan_count = 0
     if not root.is_dir():
         return partials, orphan_files, scanned_files, partial_count, orphan_count
-    for path in root.rglob("*"):
+    for path in _storage_files(root):
         if scanned_files >= max_files:
             break
         try:
             if not path.is_file():
-                continue
-            try:
-                if path.relative_to(root).parts[0] == ".quarantine":
-                    continue
-            except (IndexError, ValueError):
                 continue
             scanned_files += 1
             if progress and scanned_files % 1000 == 0:

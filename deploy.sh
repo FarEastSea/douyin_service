@@ -29,6 +29,10 @@ PREVIOUS_XHS_ENGINE=""
 XHS_ENGINE_SWITCHED=0
 DEPENDENCIES_CHANGED=0
 DEPENDENCY_BACKUP=""
+DATABASE_BACKUP=""
+DATABASE_MIGRATED=0
+MAINTENANCE_STARTED=0
+RUNTIME_PREVIOUS_BUILD=""
 
 validate_layout() {
     test -d "$SERVICE_ROOT/.git" || {
@@ -39,11 +43,23 @@ validate_layout() {
     command -v tar >/dev/null
     command -v pgrep >/dev/null
     command -v readlink >/dev/null
+    # 宝塔可返回环境根目录或其中的 bin 目录，统一后所有阶段使用同一解释器。
+    if [ -n "$RUNTIME_VENV" ] && [ ! -x "$RUNTIME_VENV/bin/python" ] && \
+       [ -x "$RUNTIME_VENV/python" ] && [ -x "$RUNTIME_VENV/gunicorn" ]; then
+        RUNTIME_VENV="$(cd "$RUNTIME_VENV/.." && pwd -P)"
+    fi
     if [ -z "$RUNTIME_VENV" ] || [ ! -x "$RUNTIME_VENV/bin/python" ] || [ ! -x "$RUNTIME_VENV/bin/gunicorn" ]; then
         echo "Deploy failed: REMOTE_PYTHON_ENV must point to the BT Panel environment containing bin/python and bin/gunicorn." >&2
         return 1
     fi
     RUNTIME_VENV="$(cd "$RUNTIME_VENV" && pwd -P)"
+    # 仅扩展本次发布进程的 PATH，不修改服务器的全局环境。
+    if ! command -v pg_dump >/dev/null || ! command -v pg_restore >/dev/null || ! command -v psql >/dev/null; then
+        if [ -x /www/server/pgsql/bin/pg_dump ] && [ -x /www/server/pgsql/bin/pg_restore ] && \
+           [ -x /www/server/pgsql/bin/psql ]; then
+            export PATH="/www/server/pgsql/bin:$PATH"
+        fi
+    fi
 }
 
 prepare_runtime_environment() {
@@ -55,7 +71,9 @@ prepare_runtime_environment() {
     fi
     echo "Installing project dependencies into the BT Panel environment..."
     DEPENDENCIES_CHANGED=1
-    "$python_bin" -m pip install -r "$requirements_file"
+    (cd "$CANDIDATE_DIR" && sha256sum --check wheelhouse.sha256)
+    "$python_bin" -m pip install --no-index --find-links "$CANDIDATE_DIR/.wheelhouse" \
+        -r "$CANDIDATE_DIR/resolved-requirements.txt"
     "$python_bin" -m pip check
     "$python_bin" - "$requirements_file" <<'PY'
 from importlib.metadata import PackageNotFoundError, version
@@ -93,10 +111,6 @@ PY
 }
 
 prepare_xhs_engine() {
-    if ! (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -c 'from app.core.config import settings; raise SystemExit(not settings.XHS_SERVICE_ENABLED)'); then
-        echo "Xiaohongshu isolated service disabled; skipping optional installation."
-        return 0
-    fi
     local lock_file="$CANDIDATE_DIR/xhs-engine.lock"
     local repository=""
     local revision=""
@@ -119,7 +133,7 @@ prepare_xhs_engine() {
         return 1
     fi
 
-    mkdir -p "$releases_root"
+    mkdir -p "$releases_root" || return 1
     XHS_ENGINE_CANDIDATE="$releases_root/$revision"
     if [ -x "$XHS_ENGINE_CANDIDATE/source/.venv/bin/xhs-api" ]; then
         echo "Pinned Xiaohongshu collector is already installed: $revision"
@@ -128,23 +142,23 @@ prepare_xhs_engine() {
 
     if [ -e "$XHS_ENGINE_CANDIDATE" ]; then
         incomplete="$releases_root/.${revision}.incomplete.$(date +%s)"
-        mv "$XHS_ENGINE_CANDIDATE" "$incomplete"
+        mv "$XHS_ENGINE_CANDIDATE" "$incomplete" || return 1
         echo "Moved an incomplete collector installation aside: $incomplete"
     fi
-    mkdir "$XHS_ENGINE_CANDIDATE"
+    mkdir "$XHS_ENGINE_CANDIDATE" || return 1
     echo "Installing pinned Xiaohongshu collector in an isolated environment..."
-    git init "$XHS_ENGINE_CANDIDATE/source"
-    git -C "$XHS_ENGINE_CANDIDATE/source" remote add origin "$repository"
-    git -C "$XHS_ENGINE_CANDIDATE/source" fetch --depth 1 origin "$revision"
-    git -C "$XHS_ENGINE_CANDIDATE/source" checkout --detach FETCH_HEAD
+    git init "$XHS_ENGINE_CANDIDATE/source" || return 1
+    git -C "$XHS_ENGINE_CANDIDATE/source" remote add origin "$repository" || return 1
+    git -C "$XHS_ENGINE_CANDIDATE/source" fetch --depth 1 origin "$revision" || return 1
+    git -C "$XHS_ENGINE_CANDIDATE/source" checkout --detach FETCH_HEAD || return 1
     test "$(git -C "$XHS_ENGINE_CANDIDATE/source" rev-parse HEAD)" = "$revision" || {
         echo "Deploy failed: Xiaohongshu collector revision mismatch." >&2
         return 1
     }
-    "$RUNTIME_VENV/bin/python" -m pip install "uv==$uv_version"
-    "$RUNTIME_VENV/bin/uv" sync --frozen --no-dev \
+    "$BUILD_VENV/bin/python" -m pip install "uv==$uv_version" || return 1
+    "$BUILD_VENV/bin/uv" sync --frozen --no-dev \
         --project "$XHS_ENGINE_CANDIDATE/source" --package xhs-api \
-        --python "$RUNTIME_VENV/bin/python"
+        --python "$RUNTIME_VENV/bin/python" || return 1
     test -x "$XHS_ENGINE_CANDIDATE/source/.venv/bin/xhs-api" || {
         echo "Deploy failed: isolated xhs-api executable was not created." >&2
         return 1
@@ -218,9 +232,15 @@ prepare_candidate() {
     ln -s "$SERVICE_ROOT/.env" "$CANDIDATE_DIR/.env"
     ln -s "$SERVICE_ROOT/logs" "$CANDIDATE_DIR/logs"
 
-    select_build_python
-    "$BUILD_VENV/bin/python" -m pip install --upgrade pip
-    "$BUILD_VENV/bin/python" -m pip install -r "$CANDIDATE_DIR/requirements.txt"
+    # 与生产使用相同解释器构建全新环境，避免缓存或 Python ABI 差异掩盖问题。
+    BUILD_VENV="$CANDIDATE_DIR/.validation-env"
+    "$RUNTIME_VENV/bin/python" -m venv "$BUILD_VENV"
+    mkdir -p "$CANDIDATE_DIR/.wheelhouse"
+    "$BUILD_VENV/bin/python" -m pip wheel --wheel-dir "$CANDIDATE_DIR/.wheelhouse" -r "$CANDIDATE_DIR/requirements.txt"
+    "$BUILD_VENV/bin/python" -m pip install --no-index --find-links "$CANDIDATE_DIR/.wheelhouse" -r "$CANDIDATE_DIR/requirements.txt"
+    "$BUILD_VENV/bin/python" -m pip check
+    "$BUILD_VENV/bin/python" -m pip freeze --exclude pip --exclude setuptools > "$CANDIDATE_DIR/resolved-requirements.txt"
+    (cd "$CANDIDATE_DIR" && sha256sum .wheelhouse/*.whl > wheelhouse.sha256)
 }
 
 preflight() {
@@ -295,8 +315,13 @@ if missing:
     raise SystemExit(f"Frontend preflight failed: missing assets: {missing}")
 print(f"Frontend asset integrity OK: {len(parser.assets)} referenced assets")
 PY
-        # 使用 Jenkins 预检环境执行向后兼容的数据库迁移；不启动 Web/Celery 进程。
-        "$BUILD_VENV/bin/python" -c 'from app.models.database import init_db_sync; init_db_sync(); print("Database migrations OK")'
+        # 预检保持只读。数据库迁移在所有旧入口停止、队列排空和备份验证之后执行。
+        command -v pg_dump >/dev/null
+        command -v pg_restore >/dev/null
+        command -v psql >/dev/null
+        "$BUILD_VENV/bin/python" -m app.core.deployment assert-recovery --root "$SERVICE_ROOT"
+        test ! -f "$SERVICE_ROOT/.runtime/queue-pending.json"
+        test ! -f "$SERVICE_ROOT/.runtime/config-change.json"
     )
 }
 
@@ -345,6 +370,17 @@ matches_service_process() {
     [ -n "$legacy_cwd" ] && [ "$process_cwd" = "$legacy_cwd" ]
 }
 
+assert_no_running_instances() {
+    local pid=""
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        if matches_service_process "$pid"; then
+            echo "Database operation blocked: an application process is running (PID=${pid}); maintenance and backups retained." >&2
+            return 1
+        fi
+    done < <(pgrep -f "gunicorn.*main:app|uvicorn.*main:app|main.py" 2>/dev/null || true)
+}
+
 stop_running_instances() {
     local pid=""
     local parent=""
@@ -389,6 +425,30 @@ stop_running_instances() {
     done
     echo "Deploy failed: a verified application process is still running (PID=${pid}); check Gunicorn shutdown or an external watchdog." >&2
     return 1
+}
+
+deployment_action() {
+    (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.deployment "$@" --root "$SERVICE_ROOT")
+}
+
+stop_optional_supervisor() {
+    local file="$SERVICE_ROOT/logs/optional-services.pid" pid="" command=""
+    [ -f "$file" ] || return 0
+    pid="$(tr -dc '0-9' < "$file")"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        command="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        if [[ "$command" != *"app.core.optional_services"* ]]; then
+            echo "Optional service supervisor PID identity mismatch." >&2
+            return 1
+        fi
+        kill -TERM "$pid"
+        for _ in $(seq 1 50); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 "$pid" 2>/dev/null; then return 1; fi
+    fi
+    rm -f "$file"
 }
 
 stop_managed_xhs_engine() {
@@ -467,12 +527,19 @@ token = settings.ADMIN_TOKEN
 headers = {"Authorization": f"Bearer {token}"} if token else {}
 xhs_api_url = "http://127.0.0.1:5556" if getattr(settings, "XHS_SERVICE_ENABLED", False) else None
 
-def get(path, auth=False):
-    request = urllib.request.Request(base + path, headers=headers if auth else {})
+def get(path, auth=False, *, range_probe=False):
+    request_headers = dict(headers if auth else {})
+    if range_probe:
+        request_headers["Range"] = "bytes=0-1023"
+    request = urllib.request.Request(base + path, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            if response.status != 200:
+            if response.status != (206 if range_probe else 200):
                 raise RuntimeError(f"{path} returned HTTP {response.status}")
+            if range_probe and not response.headers.get("Content-Range", "").startswith("bytes 0-"):
+                raise RuntimeError(f"{path} did not return a valid byte range")
+            if range_probe:
+                return response.read(1024)
             return response.read()
     except urllib.error.HTTPError as exc:
         # Preserve readiness's status/body handling while identifying the failing API.
@@ -533,7 +600,7 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
             storage = json.loads(get("/api/operations/storage-audit", True))
             previewable = next((item for item in tasks.get("items", []) if item.get("local_preview_available")), None)
             if previewable:
-                get(f"/api/tasks/{previewable.get('id')}/preview", True)
+                get(f"/api/tasks/{previewable.get('id')}/preview", True, range_probe=True)
             if not isinstance(authors.get("items"), list) or not isinstance(tasks.get("items"), list):
                 raise RuntimeError("management list payload is invalid")
             if not isinstance(unified.get("items"), list) or not isinstance(platforms.get("items"), list):
@@ -555,12 +622,12 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                     pending_platforms.append(platform_id)
                     continue
                 if item.get("preview_endpoint"):
-                    get("/api" + item["preview_endpoint"], True)
+                    get("/api" + item["preview_endpoint"], True, range_probe=True)
                 elif item.get("media_endpoint"):
                     assets = json.loads(get("/api" + item["media_endpoint"], True))
                     if not assets:
                         raise RuntimeError(f"{platform_id} completed task has no media assets")
-                    get(assets[0]["preview_url"], True)
+                    get(assets[0]["preview_url"], True, range_probe=True)
                 if item.get("stats_endpoint"):
                     json.loads(get("/api" + item["stats_endpoint"], True))
                 verified_platforms.append(platform_id)
@@ -659,14 +726,33 @@ reconcile_published_worktree_changes() {
 rollback() {
     local exit_code=$?
     trap - ERR
-    if [ "$ROLLING_BACK" -eq 1 ] || [ "$CODE_SWITCHED" -eq 0 ] || [ -z "$PREVIOUS_SHA" ]; then
+    if [ "$ROLLING_BACK" -eq 1 ] || [ "$MAINTENANCE_STARTED" -eq 0 ] || [ -z "$PREVIOUS_SHA" ]; then
+        cleanup_candidate
+        exit "$exit_code"
+    fi
+    if [ "$CODE_SWITCHED" -eq 0 ] && [ "$DATABASE_MIGRATED" -eq 0 ]; then
+        rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
+        deployment_action resume || true
         cleanup_candidate
         exit "$exit_code"
     fi
     ROLLING_BACK=1
     echo "Deploy failed; restoring root worktree to ${PREVIOUS_SHA}..." >&2
-    stop_running_instances || true
-    stop_managed_xhs_engine || true
+    # 验证期间允许的自动接管必须先关闭，避免停止后被 Web 生命周期重新拉起。
+    rm -f "$SERVICE_ROOT/.runtime/deployment-verifying"
+    if ! stop_running_instances || ! stop_optional_supervisor || ! stop_managed_xhs_engine || \
+       ! deployment_action shutdown || ! assert_no_running_instances; then
+        echo "Rollback blocked: project processes did not stop; maintenance and backups retained." >&2
+        exit "$exit_code"
+    fi
+    if [ "$DATABASE_MIGRATED" -eq 1 ]; then
+        # 在恢复前再次检查，不能把外部看门狗的重新启动当成成功停止。
+        assert_no_running_instances || exit "$exit_code"
+        deployment_action restore --path "$DATABASE_BACKUP" || {
+            echo "Database recovery failed; maintenance and backups retained." >&2
+            exit "$exit_code"
+        }
+    fi
     restore_xhs_engine
     git reset --hard "$PREVIOUS_SHA"
     if [ "$DEPENDENCIES_CHANGED" -eq 1 ]; then
@@ -687,10 +773,11 @@ PY
         "$RUNTIME_VENV/bin/python" -m pip install --no-index --find-links "$DEPENDENCY_BACKUP/wheels" -r "$DEPENDENCY_BACKUP/packages.txt"
         "$RUNTIME_VENV/bin/python" -m pip check
     fi
+    rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
     start_runtime
     smoke_check 1 30
     cleanup_candidate
-    echo "Code/dependency rollback completed. Database changes are not rolled back by Git." >&2
+    echo "Code, dependencies and the pre-migration database snapshot have been recovered." >&2
     exit "$exit_code"
 }
 
@@ -716,7 +803,14 @@ reconcile_published_worktree_changes "$PREVIOUS_SHA" "$TARGET_SHA"
 
 prepare_candidate
 preflight
-prepare_xhs_engine
+if ! prepare_xhs_engine; then
+    XHS_ENGINE_CANDIDATE=""
+    if (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -c 'from app.core.config import settings; raise SystemExit(not settings.XHS_SERVICE_ENABLED)'); then
+        echo "Enabled Xiaohongshu engine could not be prepared." >&2
+        exit 1
+    fi
+    echo "Optional Xiaohongshu preinstallation unavailable; main release remains usable." >&2
+fi
 
 if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     DEPENDENCY_BACKUP="$SERVICE_ROOT/.runtime/deploy-recovery/$(date -u +%Y%m%dT%H%M%SZ)-dependencies"
@@ -728,20 +822,33 @@ if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
         cp -p "$SERVICE_ROOT/.env" "$DEPENDENCY_BACKUP/runtime.env"
         chmod 600 "$DEPENDENCY_BACKUP/runtime.env"
     fi
+    touch "$SERVICE_ROOT/.runtime/deployment-maintenance"
+    MAINTENANCE_STARTED=1
+    deployment_action drain --timeout 300
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。
     CODE_SWITCHED=1
     stop_running_instances
+    stop_optional_supervisor
+    deployment_action shutdown
     stop_managed_xhs_engine
+    assert_no_running_instances
+    deployment_action assert-empty
+    DATABASE_BACKUP="$DEPENDENCY_BACKUP/database.dump"
+    deployment_action backup --path "$DATABASE_BACKUP"
+    DATABASE_MIGRATED=1
+    (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -c 'from app.models.database import init_db_sync; init_db_sync(); print("Database migrations OK")')
     RESTART_REQUIRED=1
     prepare_runtime_environment
     activate_xhs_engine
     git reset --hard "$TARGET_SHA"
+    touch "$SERVICE_ROOT/.runtime/deployment-verifying"
 fi
 
 if [ "$RESTART_REQUIRED" -eq 1 ]; then
     start_runtime
 fi
 smoke_check 0 30
+rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
 
 CODE_SWITCHED=0
 trap - ERR

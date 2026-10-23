@@ -17,11 +17,12 @@ const query = ref(""),
   input = ref<HTMLInputElement | null>(null);
 let origin: HTMLElement | null = null;
 const pages = [
-  ["工作台", "/dashboard"],
-  ["下载任务", "/operations/tasks"],
+  ["总览", "/dashboard"],
+  ["任务", "/operations/tasks"],
+  ["媒体库", "/library"],
   ["抖音作者", "/authors/douyin"],
   ["X 用户", "/authors/x"],
-  ["自动化运行", "/automation"],
+  ["订阅运行记录", "/automation"],
   ["系统状态", "/operations/maintenance/services"],
   ["设置", "/settings/application"],
 ];

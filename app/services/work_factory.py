@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.models.models import Work
+from app.services.download_state_lock import prepare_work_batch_sync
 
 
 def _identity(aweme_id: str, author_id: int) -> dict:
@@ -25,6 +26,7 @@ def _existing(aweme_id: str):
 
 def ensure_work_sync(db: Session, aweme_id: str, author_id: int) -> tuple[Work, bool]:
     values = _identity(aweme_id, author_id)
+    prepare_work_batch_sync(db, [values["aweme_id"]], [author_id])
     # 部分业务会话关闭了 autoflush；先保留上一条作品的元数据与快照。
     db.flush()
     existing = db.scalar(_existing(values["aweme_id"]))
@@ -54,6 +56,7 @@ def ensure_work_sync(db: Session, aweme_id: str, author_id: int) -> tuple[Work, 
 
 async def ensure_work_async(db: AsyncSession, aweme_id: str, author_id: int) -> tuple[Work, bool]:
     values = _identity(aweme_id, author_id)
+    await db.run_sync(lambda session: prepare_work_batch_sync(session, [values["aweme_id"]], [author_id]))
     await db.flush()
     existing = (await db.execute(_existing(values["aweme_id"]))).scalar_one_or_none()
     if existing is not None:
