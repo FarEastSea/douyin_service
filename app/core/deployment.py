@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 import logging
 import math
@@ -19,6 +20,162 @@ logger = logging.getLogger(__name__)
 SUBSCRIPTION_TASK = "app.tasks.download_tasks.check_subscriptions"
 # 单次存储修复允许运行两小时；发布不能把正常执行误判为挂死。
 DEFAULT_DRAIN_TIMEOUT = 125 * 60
+
+
+_APPLICATION_SCHEMA = "n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname <> 'information_schema'"
+_SCHEMA_QUERIES = {
+    "schemas": f"SELECT jsonb_build_array(n.nspname) AS item FROM pg_catalog.pg_namespace n WHERE {_APPLICATION_SCHEMA}",
+    "relations": f"""SELECT jsonb_build_array(n.nspname,c.relname,c.relkind,c.relrowsecurity,c.relforcerowsecurity,
+        c.relreplident,pg_catalog.pg_get_expr(c.relpartbound,c.oid)) AS item
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE {_APPLICATION_SCHEMA} AND c.relkind IN ('r','p','v','m','S','f')""",
+    "columns": f"""SELECT jsonb_build_array(n.nspname,c.relname,a.attname,
+        row_number() OVER (PARTITION BY c.oid ORDER BY a.attnum),
+        pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,
+        pg_catalog.pg_get_expr(d.adbin,d.adrelid),cn.nspname,coll.collname) AS item
+        FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
+        LEFT JOIN pg_catalog.pg_collation coll ON coll.oid=a.attcollation
+        LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid=coll.collnamespace
+        WHERE {_APPLICATION_SCHEMA} AND c.relkind IN ('r','p','v','m','f') AND a.attnum>0 AND NOT a.attisdropped""",
+    "constraints": f"""SELECT jsonb_build_array(n.nspname,c.conname,c.contype,
+        cls.relname,t.typname,pg_catalog.pg_get_constraintdef(c.oid,true)) AS item
+        FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace
+        LEFT JOIN pg_catalog.pg_class cls ON cls.oid=c.conrelid
+        LEFT JOIN pg_catalog.pg_type t ON t.oid=c.contypid WHERE {_APPLICATION_SCHEMA}""",
+    "indexes": f"""SELECT jsonb_build_array(n.nspname,c.relname,pg_catalog.pg_get_indexdef(i.indexrelid),
+        i.indisvalid,i.indisready) AS item FROM pg_catalog.pg_index i
+        JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE {_APPLICATION_SCHEMA}""",
+    "types": f"""SELECT jsonb_build_array(n.nspname,t.typname,t.typtype,t.typnotnull,
+        pg_catalog.format_type(t.typbasetype,t.typtypmod),t.typdefault,
+        (SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder) FROM pg_catalog.pg_enum e WHERE e.enumtypid=t.oid)) AS item
+        FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
+        WHERE {_APPLICATION_SCHEMA} AND t.typtype IN ('c','d','e','r','m')""",
+    "views": f"""SELECT jsonb_build_array(n.nspname,c.relname,pg_catalog.pg_get_viewdef(c.oid,true)) AS item
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE {_APPLICATION_SCHEMA} AND c.relkind IN ('v','m')""",
+    "functions": f"""SELECT jsonb_build_array(n.nspname,p.proname,pg_catalog.pg_get_functiondef(p.oid)) AS item
+        FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+        WHERE {_APPLICATION_SCHEMA} AND p.prokind IN ('f','p','w')""",
+    "triggers": f"""SELECT jsonb_build_array(n.nspname,c.relname,t.tgname,pg_catalog.pg_get_triggerdef(t.oid,true)) AS item
+        FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE {_APPLICATION_SCHEMA} AND NOT t.tgisinternal""",
+    "sequences": """SELECT jsonb_build_array(schemaname,sequencename,data_type,start_value,min_value,max_value,
+        increment_by,cycle,cache_size) AS item FROM pg_catalog.pg_sequences
+        WHERE schemaname NOT LIKE 'pg\\_%' ESCAPE '\\' AND schemaname <> 'information_schema'""",
+    "extensions": """SELECT jsonb_build_array(e.extname,e.extversion,n.nspname) AS item
+        FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace""",
+}
+
+
+def _fingerprint_sql(query: str) -> str:
+    return f"""SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+        COALESCE(jsonb_agg(item ORDER BY item::text COLLATE "C"),'[]'::jsonb)::text,'UTF8')),'hex')
+        FROM ({query}) AS fingerprint_rows"""
+
+
+def _quoted_name(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _schema_digest(schema: dict) -> str:
+    return hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _database_baseline(connection) -> dict:
+    """只保留结构摘要、迁移台账摘要和行数，不保存业务行内容。"""
+    from sqlalchemy import text
+    connection.execute(text("SET LOCAL search_path = ''; SET LOCAL DateStyle = 'ISO, YMD'; SET LOCAL TimeZone = 'UTC'"))
+    schema = {name: connection.execute(text(_fingerprint_sql(query))).scalar_one()
+              for name, query in _SCHEMA_QUERIES.items()}
+    relations = list(connection.execute(text(f"""SELECT n.nspname,c.relname,c.relkind
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE {_APPLICATION_SCHEMA} AND c.relkind IN ('r','p','S') ORDER BY n.nspname,c.relname""")))
+    rows, sequences, migrations = [], [], []
+    for namespace, name, kind in relations:
+        target = _quoted_name(namespace) + "." + _quoted_name(name)
+        if kind == "S":
+            last_value, is_called = connection.execute(text(f"SELECT last_value,is_called FROM {target}")).one()
+            sequences.append([namespace, name, last_value, is_called])
+        else:
+            rows.append([namespace, name, connection.execute(text(f"SELECT count(*) FROM {target}")).scalar_one()])
+            if name == "schema_migrations":
+                ledger = f"SELECT pg_catalog.to_jsonb(ledger) AS item FROM {target} ledger"
+                migrations.append([namespace, name, connection.execute(text(_fingerprint_sql(ledger))).scalar_one()])
+    return {"schema": schema, "schema_sha256": _schema_digest(schema), "rows": rows,
+            "sequences": sequences, "migrations": migrations}
+
+
+def _archive_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_path(path: Path) -> Path:
+    return path.with_name(path.name + ".manifest.json")
+
+
+def _read_snapshot_manifest(path: Path) -> dict:
+    """自动恢复不接纳没有基线证明的历史归档；原文件保留供明确的人工恢复。"""
+    try:
+        manifest = json.loads(_manifest_path(path).read_text(encoding="utf-8"))
+        baseline = manifest["baseline"]
+        valid_hash = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+        if (manifest["format"] != 1 or manifest["bytes"] != path.stat().st_size
+                or not valid_hash(manifest["sha256"]) or _archive_digest(path) != manifest["sha256"]
+                or set(baseline["schema"]) != set(_SCHEMA_QUERIES)
+                or any(not valid_hash(value) for value in baseline["schema"].values())
+                or baseline["schema_sha256"] != _schema_digest(baseline["schema"])):
+            raise ValueError
+        for group, size in (("rows", 3), ("sequences", 4), ("migrations", 3)):
+            entries = baseline[group]
+            if not isinstance(entries, list) or any(not isinstance(item, list) or len(item) != size
+                    or not all(isinstance(value, str) and value for value in item[:2]) for item in entries):
+                raise ValueError
+            if len({tuple(item[:2]) for item in entries}) != len(entries):
+                raise ValueError
+        if (any(type(count) is not int or count < 0 for _, _, count in baseline["rows"])
+                or any(type(value) is not int or type(called) is not bool
+                       for _, _, value, called in baseline["sequences"])
+                or any(not valid_hash(value) for _, _, value in baseline["migrations"])):
+            raise ValueError
+        return baseline
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise RuntimeError("恢复归档缺少有效基线清单或完整性验证失败，尚未修改数据库；维护模式和备份已保留") from exc
+
+
+def _snapshot_validation_sql(baseline: dict) -> str:
+    """在 psql 恢复事务提交前验证，任何不一致都会回滚整个恢复事务。"""
+    checks = []
+    for name, query in _SCHEMA_QUERIES.items():
+        checks.append(f"IF ({_fingerprint_sql(query)}) IS DISTINCT FROM {_sql_literal(baseline['schema'][name])} "
+                      "THEN RAISE EXCEPTION 'Restored schema fingerprint differs from backup'; END IF;")
+    for namespace, name, count in baseline["rows"]:
+        target = _quoted_name(namespace) + "." + _quoted_name(name)
+        checks.append(f"IF (SELECT count(*) FROM {target}) <> {count} THEN "
+                      "RAISE EXCEPTION 'Restored row count differs from backup'; END IF;")
+    for namespace, name, value, called in baseline["sequences"]:
+        target = _quoted_name(namespace) + "." + _quoted_name(name)
+        checks.append(f"IF NOT (SELECT last_value = {value} AND is_called = {str(called).upper()} FROM {target}) "
+                      "THEN RAISE EXCEPTION 'Restored sequence differs from backup'; END IF;")
+    for namespace, name, digest in baseline["migrations"]:
+        target = _quoted_name(namespace) + "." + _quoted_name(name)
+        query = _fingerprint_sql(f"SELECT pg_catalog.to_jsonb(ledger) AS item FROM {target} ledger")
+        checks.append(f"IF ({query}) IS DISTINCT FROM {_sql_literal(digest)} THEN "
+                      "RAISE EXCEPTION 'Restored migration ledger differs from backup'; END IF;")
+    block = "BEGIN\n" + "\n".join(checks) + "\nEND"
+    return ("SET LOCAL search_path = ''; SET LOCAL DateStyle = 'ISO, YMD'; SET LOCAL TimeZone = 'UTC';\n"
+            "SET LOCAL standard_conforming_strings = on;\nDO " + _sql_literal(block) + ";\n")
 
 
 def _broker_counts(client) -> tuple[int, int]:
@@ -212,19 +369,59 @@ def database_snapshot(path: Path, *, restore: bool = False) -> None:
               "--dbname", current.DB_NAME, "--no-password"]
     environment = {**os.environ, "PGPASSWORD": current.DB_PASSWORD, "PGCONNECT_TIMEOUT": "5"}
     if restore:
-        _restore_snapshot(path, current, executable, common, environment)
+        baseline = _read_snapshot_manifest(path)
+        _restore_snapshot(path, current, executable, common, environment, baseline)
         return
-    command = [executable, *common, "--format=custom", "--no-owner", "--no-privileges", "--file", str(path)]
-    completed = subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                               timeout=900, check=False)
-    if completed.returncode:
-        raise RuntimeError("数据库恢复失败；保留维护模式和备份等待恢复" if restore else "数据库备份失败，尚未开始迁移")
-    if not restore:
-        os.chmod(path, 0o600)
+    if path.exists() or _manifest_path(path).exists():
+        raise RuntimeError("数据库备份路径已存在，拒绝覆盖恢复依据")
+    from sqlalchemy import create_engine, text
+    engine = create_engine(current.effective_database_url, connect_args={"connect_timeout": 5},
+                           isolation_level="REPEATABLE READ")
+    temporary = []
+    try:
+        for suffix in (".dump", ".json"):
+            descriptor, name = tempfile.mkstemp(prefix=".backup-", suffix=suffix, dir=path.parent)
+            os.chmod(name, 0o600)
+            os.close(descriptor)
+            temporary.append(Path(name))
+        archive, manifest_path = temporary
+        with engine.connect() as connection, connection.begin():
+            connection.execute(text("SET TRANSACTION READ ONLY"))
+            snapshot = connection.execute(text("SELECT pg_export_snapshot()")).scalar_one()
+            baseline = _database_baseline(connection)
+            command = [executable, *common, "--format=custom", "--no-owner", "--no-privileges",
+                       "--snapshot", snapshot, "--file", str(archive)]
+            completed = subprocess.run(command, env=environment, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, timeout=900, check=False)
+            if completed.returncode:
+                raise RuntimeError("数据库备份失败，尚未开始迁移")
+            # 序列状态不受 MVCC 快照保护；备份过程中推进序列意味着排空/独占条件失效。
+            if _database_baseline(connection) != baseline:
+                raise RuntimeError("备份期间数据库状态发生变化，拒绝迁移；旧服务和数据保持可恢复")
         check = shutil.which("pg_restore")
-        if not check or subprocess.run([check, "--list", str(path)], stdout=subprocess.DEVNULL,
+        if not check or subprocess.run([check, "--list", str(archive)], stdout=subprocess.DEVNULL,
                                        stderr=subprocess.DEVNULL, timeout=30).returncode:
             raise RuntimeError("数据库备份完整性检查失败，尚未开始迁移")
+        with archive.open("r+b") as output:
+            os.fsync(output.fileno())
+        manifest = {"format": 1, "bytes": archive.stat().st_size,
+                    "sha256": _archive_digest(archive), "baseline": baseline}
+        with manifest_path.open("w", encoding="utf-8") as output:
+            json.dump(manifest, output, sort_keys=True, ensure_ascii=False)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(archive, path)
+        os.replace(manifest_path, _manifest_path(path))
+        if os.name != "nt":
+            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        engine.dispose()
+        for item in temporary:
+            item.unlink(missing_ok=True)
 
 
 def _recovery_schemas(current) -> list[str]:
@@ -249,7 +446,7 @@ def _recovery_schemas(current) -> list[str]:
         engine.dispose()
 
 
-def _restore_snapshot(path, current, pg_restore, common, environment) -> None:
+def _restore_snapshot(path, current, pg_restore, common, environment, baseline) -> None:
     """一次事务清理新迁移对象并恢复；--clean 不能处理备份外的新依赖。"""
     psql = shutil.which("psql")
     if not psql:
@@ -257,12 +454,12 @@ def _restore_snapshot(path, current, pg_restore, common, environment) -> None:
     schemas = _recovery_schemas(current)
     paths = []
     try:
-        for _ in range(4):
+        for _ in range(5):
             descriptor, name = tempfile.mkstemp(prefix=".restore-", suffix=".sql", dir=path.parent)
             os.chmod(name, 0o600)
             os.close(descriptor)
             paths.append(Path(name))
-        cleanup_sql, snapshot_sql, archive_toc, restore_toc = paths
+        cleanup_sql, snapshot_sql, archive_toc, restore_toc, validation_sql = paths
         quote = lambda name: '"' + name.replace('"', '""') + '"'
         with archive_toc.open("wb") as output:
             listed = subprocess.run([pg_restore, "--list", str(path)], env=environment, stdout=output,
@@ -278,6 +475,7 @@ def _restore_snapshot(path, current, pg_restore, common, environment) -> None:
         cleanup = [f"DROP SCHEMA IF EXISTS {quote(name)} CASCADE;" for name in schemas]
         cleanup.append('CREATE SCHEMA public;')
         cleanup_sql.write_text("\n".join(cleanup), encoding="utf-8")
+        validation_sql.write_text(_snapshot_validation_sql(baseline), encoding="utf-8")
         decoded = subprocess.run([pg_restore, "--no-owner", "--no-privileges", "--use-list", str(restore_toc),
                                   "--file", str(snapshot_sql), str(path)],
                                  env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -285,11 +483,20 @@ def _restore_snapshot(path, current, pg_restore, common, environment) -> None:
         if decoded.returncode:
             raise RuntimeError("备份解码失败，尚未修改现有数据库；维护模式和备份已保留")
         restored = subprocess.run([psql, *common, "--no-psqlrc", "--single-transaction", "--set=ON_ERROR_STOP=on",
-                                   "--file", str(cleanup_sql), "--file", str(snapshot_sql)],
+                                   "--file", str(cleanup_sql), "--file", str(snapshot_sql), "--file", str(validation_sql)],
                                   env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                   timeout=900, check=False)
         if restored.returncode:
-            raise RuntimeError("数据库恢复事务失败，已回滚到恢复前状态；维护模式和备份已保留")
+            raise RuntimeError("数据库恢复事务或基线验证失败，已回滚到恢复前状态；维护模式和备份已保留")
+        from sqlalchemy import create_engine
+        engine = create_engine(current.effective_database_url, connect_args={"connect_timeout": 5},
+                               isolation_level="REPEATABLE READ")
+        try:
+            with engine.connect() as connection, connection.begin():
+                if _database_baseline(connection) != baseline:
+                    raise RuntimeError("数据库恢复后的基线已变化，维护模式和备份已保留；禁止启动业务进程")
+        finally:
+            engine.dispose()
     finally:
         for temporary in paths:
             temporary.unlink(missing_ok=True)

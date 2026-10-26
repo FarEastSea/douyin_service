@@ -8,6 +8,7 @@
 4. 提供静态文件服务（用于前端页面）
 """
 
+from app.core.runtime_identity import deployment_startup_blocked, get_runtime_identity
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
@@ -32,6 +33,14 @@ import importlib
 
 async def activate_runtime(app: FastAPI) -> bool:
     """初始化和故障修复使用同一入口，修复后自动开放业务路由。"""
+    # 外部进程管理器即使在发布期间启动了 Web，也不能在迁移/恢复期间写库或修文件。
+    if deployment_startup_blocked():
+        app.state.degraded_mode = True
+        app.state.bootstrap_status = {"ready": False, "missing": [], "errors": [{
+            "key": "DEPLOYMENT_MAINTENANCE", "label": "正在发布", "group": "应用",
+            "message": "正在切换运行环境，发布完成后自动恢复。",
+        }]}
+        return False
     status = await asyncio.to_thread(validate_env)
     app.state.bootstrap_status = status
     if status.get("missing"):
@@ -96,6 +105,7 @@ async def supervise_runtime(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.runtime_identity = get_runtime_identity()
     app.state.degraded_mode = True
     app.state.runtime_routes_loaded = False
     await activate_runtime(app)
@@ -171,6 +181,7 @@ async def public_health():
         "status": "healthy",
         "alive": True,
         "bootstrap_mode": bool(app.state.degraded_mode),
+        "runtime": get_runtime_identity(),
     }
 
 
@@ -180,6 +191,7 @@ async def public_readiness():
     from app.core.health import build_readiness
 
     payload = await build_readiness(degraded_mode=bool(app.state.degraded_mode))
+    payload["runtime"] = get_runtime_identity()
     return JSONResponse(status_code=200 if payload["ready"] else 503, content=payload)
 
 app.include_router(bootstrap.router, prefix="/api")

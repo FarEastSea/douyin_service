@@ -107,9 +107,14 @@ def _record_recovery_failure(message: str) -> None:
 
 async def resume_pending_changes() -> None:
     """由 Web 生命周期管理；持久化意图使进程重启后继续排空。"""
-    from app.models.database import get_async_db
-    from app.api.system import CompleteConfigUpdate, save_complete_settings
+    from app.core.runtime_identity import deployment_startup_blocked
     while True:
+        # 此监督器独立于 activate_runtime；维护期不能绕过启动门禁恢复配置或写库。
+        if deployment_startup_blocked():
+            await asyncio.sleep(2)
+            continue
+        from app.models.database import get_async_db
+        from app.api.system import CompleteConfigUpdate, save_complete_settings
         try:
             # 已提交但发布失败的配置也在当前进程中恢复，无需手工重启。
             await asyncio.to_thread(recover_config_change)

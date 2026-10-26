@@ -3,7 +3,8 @@ set -euo pipefail
 
 # 生产同构启动脚本：Gunicorn 托管单个 Uvicorn worker，Celery Worker/Beat
 # 由项目级持久状态托管，跨 Web 重载接管。路径从脚本位置推导。
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
 if [ ! -x "${VENV_DIR}/bin/gunicorn" ] && [ -x "${VENV_DIR}/gunicorn" ] && [ -x "${VENV_DIR}/python" ]; then
     VENV_DIR="$(cd "${VENV_DIR}/.." && pwd -P)"
@@ -56,7 +57,12 @@ fi
 GUNICORN_USER_ARGS=()
 if [ "$(id -u)" -eq 0 ] && id www >/dev/null 2>&1; then
     RUNTIME_GROUP="$(id -gn www)"
-    chown -R "www:${RUNTIME_GROUP}" "$LOG_DIR" "$STATE_DIR"
+    chown -R "www:${RUNTIME_GROUP}" "$LOG_DIR"
+    chown "www:${RUNTIME_GROUP}" "$STATE_DIR"
+    # 业务运行状态由 Web 接管；数据库与依赖恢复材料继续保持发布用户私有。
+    find "$STATE_DIR" -mindepth 1 -maxdepth 1 \
+        ! -name deploy-recovery ! -name deploy.lock \
+        -exec chown -hR "www:${RUNTIME_GROUP}" {} +
     GUNICORN_USER_ARGS=(--user www --group "$RUNTIME_GROUP")
 fi
 
@@ -161,6 +167,10 @@ fi
 # 独立协调器跨 Web 重载持续读取网页开关；即使关闭也保留轻量协调进程。
 nohup "$VENV_DIR/bin/python" -m app.core.optional_services \
     < /dev/null >> "$LOG_DIR/optional-services.log" 2>&1 &
+
+if [ "${1:-}" = "--support-only" ]; then
+    exit 0
+fi
 
 if [ "$SERVICE_ALREADY_RUNNING" -eq 1 ]; then
     echo "Service is already running (PID=${EXISTING_PID})."

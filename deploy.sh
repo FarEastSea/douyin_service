@@ -34,6 +34,11 @@ DATABASE_MIGRATED=0
 MAINTENANCE_STARTED=0
 RUNTIME_PREVIOUS_BUILD=""
 OLD_RUNTIME_STATE=""
+PANEL_PYTHON=""
+PANEL_STATE=""
+PANEL_CAPTURED=0
+PANEL_INHIBITED=0
+FINALIZATION_STARTED=0
 
 validate_layout() {
     test -d "$SERVICE_ROOT/.git" || {
@@ -54,6 +59,11 @@ validate_layout() {
         return 1
     fi
     RUNTIME_VENV="$(cd "$RUNTIME_VENV" && pwd -P)"
+    PANEL_PYTHON="/www/server/panel/pyenv/bin/python"
+    if [ ! -x "$PANEL_PYTHON" ]; then
+        echo "Deploy failed: the verified BT Panel project runtime is unavailable." >&2
+        return 1
+    fi
     # 仅扩展本次发布进程的 PATH，不修改服务器的全局环境。
     if ! command -v pg_dump >/dev/null || ! command -v pg_restore >/dev/null || ! command -v psql >/dev/null; then
         if [ -x /www/server/pgsql/bin/pg_dump ] && [ -x /www/server/pgsql/bin/pg_restore ] && \
@@ -432,6 +442,47 @@ deployment_action() {
     (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.deployment "$@" --root "$SERVICE_ROOT")
 }
 
+panel_action() {
+    "$PANEL_PYTHON" "$CANDIDATE_DIR/integrations/bt_deployment.py" "$@" \
+        --root "$SERVICE_ROOT" --runtime "$RUNTIME_VENV" --state "$PANEL_STATE" --target "$TARGET_SHA" 200>&-
+}
+
+assert_release_exclusion() {
+    panel_action assert-held
+    assert_no_running_instances
+}
+
+restore_panel_owner() {
+    local attempt
+    for attempt in 1 2 3; do
+        if panel_action release; then
+            PANEL_INHIBITED=0
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Validated runtime retained; BT ownership finalization needs retry from its durable journal." >&2
+    return 1
+}
+
+record_stage() {
+    "$RUNTIME_VENV/bin/python" - "$SERVICE_ROOT" "$1" "${2:-running}" "$TARGET_SHA" "$PREVIOUS_SHA" <<'PY'
+import datetime, json, os, pathlib, sys, tempfile
+root, stage, state, target, previous = sys.argv[1:]
+directory = pathlib.Path(root) / ".runtime"
+descriptor, temporary = tempfile.mkstemp(prefix=".deployment-status-", dir=directory)
+try:
+    with os.fdopen(descriptor, "w") as output:
+        json.dump({"stage": stage, "state": state, "target": target, "previous": previous,
+                   "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, directory / "deployment-status.json")
+finally:
+    if os.path.exists(temporary): os.unlink(temporary)
+PY
+}
+
 old_runtime_state() {
     # 失败发生在代码切换前时，仍由旧 Web 使用自己的解释器和进程协议恢复。
     # 候选管理器不能为旧代码启动 Worker/Beat，更不能替换其在途 Worker。
@@ -618,10 +669,30 @@ stop_managed_xhs_engine() {
 }
 
 start_runtime() {
-    echo "Starting root application with the BT Panel Python environment..."
-    # The deployment owns this lock, not Gunicorn/XHS or their descendants.
-    # Keep it in this shell through smoke checks, but never pass it to daemons.
-    APP_PORT="$PORT" VENV_DIR="$RUNTIME_VENV" RUNTIME_DIR="$SERVICE_ROOT" bash "$SERVICE_ROOT/start.sh" 200>&-
+    echo "Starting application through its verified BT Panel project owner..."
+    panel_action assert-held
+    # 只启动项目辅助协调器；Web 始终由宝塔保存的同一个项目入口启动。
+    if [ -f "$SERVICE_ROOT/app/core/optional_services.py" ]; then
+        APP_PORT="$PORT" VENV_DIR="$RUNTIME_VENV" RUNTIME_DIR="$SERVICE_ROOT" \
+            bash "$SERVICE_ROOT/start.sh" --support-only 200>&-
+    elif (cd "$SERVICE_ROOT" && "$RUNTIME_VENV/bin/python" -c \
+        'from app.core.config import settings; raise SystemExit(not settings.XHS_SERVICE_ENABLED)'); then
+        # 旧版没有协调器；使用候选脚本的单次启动入口恢复旧引擎，不启动第二个 Web。
+        if ! PROJECT_DIR_OVERRIDE="$SERVICE_ROOT" APP_PORT="$PORT" VENV_DIR="$RUNTIME_VENV" \
+            RUNTIME_DIR="$SERVICE_ROOT" bash "$CANDIDATE_DIR/start.sh" --xhs-start-once 200>&-; then
+            if "$RUNTIME_VENV/bin/python" - "$OLD_RUNTIME_STATE" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(not state.get("components", {}).get("xhs_collector", False))
+PY
+            then
+                echo "Previously ready Xiaohongshu service did not recover." >&2
+                return 1
+            fi
+            echo "Xiaohongshu service remains unavailable as before deployment." >&2
+        fi
+    fi
+    panel_action start
 }
 
 smoke_check() {
@@ -631,8 +702,10 @@ smoke_check() {
         trap - ERR
         cd "$SERVICE_ROOT"
         APP_PORT="$PORT" ALLOW_LEGACY_HEALTH="$allow_legacy_health" SMOKE_ATTEMPTS="$attempts" \
+            EXPECTED_RUNTIME_SHA="$(if [ "$allow_legacy_health" -eq 1 ]; then printf '%s' "$PREVIOUS_SHA"; else printf '%s' "$TARGET_SHA"; fi)" \
             "$RUNTIME_VENV/bin/python" - <<'PY'
-import json, os, time, urllib.error, urllib.request
+import importlib.metadata, json, os, pathlib, sys, time, urllib.error, urllib.request
+import psutil
 from app.core.config import settings
 
 base = f"http://127.0.0.1:{os.environ['APP_PORT']}"
@@ -640,6 +713,36 @@ allow_legacy_health = os.environ.get("ALLOW_LEGACY_HEALTH") == "1"
 token = settings.ADMIN_TOKEN
 headers = {"Authorization": f"Bearer {token}"} if token else {}
 xhs_api_url = "http://127.0.0.1:5556" if getattr(settings, "XHS_SERVICE_ENABLED", False) else None
+expected_revision = os.environ["EXPECTED_RUNTIME_SHA"]
+expected_dependencies = {name: importlib.metadata.version(name)
+                         for name in ("fastapi", "sqlalchemy", "celery", "gunicorn", "uvicorn")}
+
+def verify_runtime(readiness):
+    runtime = readiness.get("runtime") or {}
+    if allow_legacy_health and not runtime:
+        return
+    if runtime.get("revision") != expected_revision or not runtime.get("instance"):
+        raise RuntimeError("responding Web did not load the expected code revision")
+    if any(runtime.get("dependencies", {}).get(name) != version
+           for name, version in expected_dependencies.items()):
+        raise RuntimeError("responding Web loaded a different dependency generation")
+    process = psutil.Process(int(runtime["pid"]))
+    if (pathlib.Path(process.cwd()).resolve() != pathlib.Path.cwd().resolve()
+            or pathlib.Path(process.exe()).resolve() != pathlib.Path(sys.executable).resolve()
+            or abs(process.create_time() - float(runtime["created_at"])) > 0.01):
+        raise RuntimeError("responding Web process identity does not match the project runtime")
+    masters = []
+    for candidate in psutil.process_iter(["pid", "ppid", "cwd", "cmdline"]):
+        try:
+            command = " ".join(candidate.info["cmdline"] or [])
+            if (candidate.info["cwd"] == str(pathlib.Path.cwd()) and "gunicorn" in command
+                    and "main:app" in command):
+                masters.append(candidate)
+        except psutil.Error:
+            continue
+    ids = {item.pid for item in masters}
+    if sum(item.ppid() not in ids for item in masters) != 1 or process.pid not in ids:
+        raise RuntimeError("Web ownership is not unique for the deployed project")
 
 def get(path, auth=False, *, range_probe=False):
     request_headers = dict(headers if auth else {})
@@ -670,6 +773,7 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
             readiness = json.loads(get("/api/ready"))
             if readiness.get("status") != "ready":
                 raise RuntimeError("dependency readiness payload is not ready")
+            verify_runtime(readiness)
         except urllib.error.HTTPError as exc:
             if not (allow_legacy_health and exc.code == 404):
                 if exc.code == 503:
@@ -761,6 +865,10 @@ PY
 }
 
 cleanup_candidate() {
+    if [ -f "$SERVICE_ROOT/.runtime/deployment-bt-owner.json" ]; then
+        echo "Unresolved BT project handoff; candidate retained for recovery." >&2
+        return 0
+    fi
     if [ -n "$CANDIDATE_DIR" ] && [ -d "$CANDIDATE_DIR" ]; then
         case "$CANDIDATE_DIR" in
             "${TMPDIR:-/tmp}"/"$PROJECT_NAME"-candidate.*) rm -rf -- "$CANDIDATE_DIR" ;;
@@ -842,11 +950,23 @@ rollback() {
     trap - ERR
     # 收到第二个终止信号时仍完成恢复或留下明确的失败状态，不递归回滚。
     trap '' TERM HUP INT
+    # 验收通过后的所有权释放可能已部分提交；不能再把已放行的库恢复成旧快照。
+    if [ "$FINALIZATION_STARTED" -eq 1 ]; then
+        record_stage finalization-pending failed || true
+        echo "Runtime verification passed; release finalization is incomplete. Recovery materials retained." >&2
+        exit "$exit_code"
+    fi
     if [ "$ROLLING_BACK" -eq 1 ] || [ "$MAINTENANCE_STARTED" -eq 0 ] || [ -z "$PREVIOUS_SHA" ]; then
         cleanup_candidate
         exit "$exit_code"
     fi
     if [ "$CODE_SWITCHED" -eq 0 ] && [ "$DATABASE_MIGRATED" -eq 0 ]; then
+        record_stage early-recovery
+        if [ "$PANEL_INHIBITED" -eq 1 ]; then
+            panel_action inhibit || exit "$exit_code"
+            panel_action restore-config || exit "$exit_code"
+            panel_action start || exit "$exit_code"
+        fi
         rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
         if ! old_runtime_state restore; then
             echo "Early rollback recovery failed; old code, candidate and backups retained for recovery." >&2
@@ -854,29 +974,36 @@ rollback() {
                 > "$DEPENDENCY_BACKUP/recovery-failed.txt"
             exit "$exit_code"
         fi
+        if [ "$PANEL_CAPTURED" -eq 1 ]; then restore_panel_owner || exit "$exit_code"; fi
+        record_stage early-recovered failed_recovered
         cleanup_candidate
         exit "$exit_code"
     fi
     ROLLING_BACK=1
+    record_stage rollback
     echo "Deploy failed; restoring root worktree to ${PREVIOUS_SHA}..." >&2
     # 验证期间允许的自动接管必须先关闭，避免停止后被 Web 生命周期重新拉起。
     rm -f "$SERVICE_ROOT/.runtime/deployment-verifying"
-    if ! stop_running_instances || ! stop_optional_supervisor || ! stop_managed_xhs_engine || \
-       ! deployment_action shutdown || ! assert_no_running_instances; then
+    if ! panel_action assert-held || ! stop_running_instances || ! stop_optional_supervisor || ! stop_managed_xhs_engine || \
+       ! deployment_action shutdown || ! assert_release_exclusion || ! deployment_action assert-empty; then
         echo "Rollback blocked: project processes did not stop; maintenance and backups retained." >&2
         exit "$exit_code"
     fi
     if [ "$DATABASE_MIGRATED" -eq 1 ]; then
         # 在恢复前再次检查，不能把外部看门狗的重新启动当成成功停止。
-        assert_no_running_instances || exit "$exit_code"
+        assert_release_exclusion || exit "$exit_code"
+        record_stage restore-database
         deployment_action restore --path "$DATABASE_BACKUP" || {
             echo "Database recovery failed; maintenance and backups retained." >&2
             exit "$exit_code"
         }
     fi
     restore_xhs_engine
+    assert_release_exclusion || exit "$exit_code"
     git reset --hard "$PREVIOUS_SHA"
     if [ "$DEPENDENCIES_CHANGED" -eq 1 ]; then
+        assert_release_exclusion || exit "$exit_code"
+        record_stage restore-dependencies
         "$RUNTIME_VENV/bin/python" - "$DEPENDENCY_BACKUP/packages.txt" <<'PY'
 import importlib.metadata
 import re
@@ -894,9 +1021,13 @@ PY
         "$RUNTIME_VENV/bin/python" -m pip install --no-index --find-links "$DEPENDENCY_BACKUP/wheels" -r "$DEPENDENCY_BACKUP/packages.txt"
         "$RUNTIME_VENV/bin/python" -m pip check
     fi
+    assert_release_exclusion || exit "$exit_code"
+    panel_action restore-config || exit "$exit_code"
     rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
     start_runtime
     smoke_check 1 30
+    restore_panel_owner || exit "$exit_code"
+    record_stage recovered failed_recovered
     cleanup_candidate
     echo "Code, dependencies and the pre-migration database snapshot have been recovered." >&2
     exit "$exit_code"
@@ -925,7 +1056,9 @@ if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
 fi
 reconcile_published_worktree_changes "$PREVIOUS_SHA" "$TARGET_SHA"
 
+record_stage prepare-candidate
 prepare_candidate
+record_stage preflight
 preflight
 if ! prepare_xhs_engine; then
     XHS_ENGINE_CANDIDATE=""
@@ -948,8 +1081,14 @@ if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     fi
     OLD_RUNTIME_STATE="$DEPENDENCY_BACKUP/runtime-state.json"
     old_runtime_state capture
+    PANEL_STATE="$DEPENDENCY_BACKUP/bt-owner.json"
+    panel_action capture
+    PANEL_CAPTURED=1
     touch "$SERVICE_ROOT/.runtime/deployment-maintenance"
     MAINTENANCE_STARTED=1
+    PANEL_INHIBITED=1
+    panel_action inhibit
+    record_stage drain
     deployment_action drain --timeout 7500
     # 预检完成后先停止所有旧入口，确保 Jenkins 环境和宝塔环境不会同时运行应用。
     CODE_SWITCHED=1
@@ -957,26 +1096,40 @@ if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     stop_optional_supervisor
     deployment_action shutdown
     stop_managed_xhs_engine
-    assert_no_running_instances
+    assert_release_exclusion
     deployment_action assert-empty
+    record_stage backup
     DATABASE_BACKUP="$DEPENDENCY_BACKUP/database.dump"
     deployment_action backup --path "$DATABASE_BACKUP"
     DATABASE_MIGRATED=1
+    assert_release_exclusion
+    record_stage migrate
     (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -c 'from app.models.database import init_db_sync; init_db_sync(); print("Database migrations OK")')
     RESTART_REQUIRED=1
+    assert_release_exclusion
+    record_stage install-dependencies
     prepare_runtime_environment
+    assert_release_exclusion
     activate_xhs_engine
+    record_stage switch-code
     git reset --hard "$TARGET_SHA"
+    assert_release_exclusion
+    panel_action prepare-start
     touch "$SERVICE_ROOT/.runtime/deployment-verifying"
 fi
 
 if [ "$RESTART_REQUIRED" -eq 1 ]; then
+    record_stage start
     start_runtime
 fi
+record_stage verify
 smoke_check 0 30
+FINALIZATION_STARTED=1
+if [ "$PANEL_CAPTURED" -eq 1 ]; then restore_panel_owner; fi
 rm -f "$SERVICE_ROOT/.runtime/deployment-maintenance" "$SERVICE_ROOT/.runtime/deployment-verifying"
 
 CODE_SWITCHED=0
+record_stage complete success
 trap - ERR TERM HUP INT
 cleanup_legacy_release_layout
 cleanup_candidate
