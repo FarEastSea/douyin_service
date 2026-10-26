@@ -266,7 +266,16 @@ for path in files:
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 print(f"Python syntax OK: {len(files)} files")
 PY
-        "$BUILD_VENV/bin/python" -c 'import main; assert main.app is not None; print("FastAPI import OK")'
+        "$BUILD_VENV/bin/python" - <<'PY'
+import importlib
+import main
+from fastapi import FastAPI
+probe = FastAPI()
+for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "platform_downloads", "operations"):
+    probe.include_router(importlib.import_module("app.api." + name).router, prefix="/api")
+assert main.app is not None and probe.openapi().get("paths")
+print("FastAPI deferred route imports and OpenAPI OK")
+PY
         "$BUILD_VENV/bin/python" - <<'PY'
 import time
 
@@ -792,6 +801,10 @@ for _ in range(int(os.environ.get("SMOKE_ATTEMPTS", "150"))):
                             # Only diagnostic codes: configuration values may contain secrets.
                             keys = [str(item.get("key", "unknown")) for item in bootstrap.get("errors", [])]
                             failures.append("startup error codes: " + ", ".join(keys or ["unavailable"]))
+                            for item in bootstrap.get("errors", []):
+                                stage, kind = item.get("stage", ""), item.get("error_type", "")
+                                if isinstance(stage, str) and isinstance(kind, str) and stage.isidentifier() and kind.isidentifier():
+                                    failures.append(f"startup stage={stage} type={kind}")
                         except Exception:
                             failures.append("startup diagnostics unavailable; inspect application startup log")
                     raise RuntimeError(

@@ -16,6 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 import os
 import asyncio
+import logging
+import time
+import traceback
 
 from app.api import bootstrap
 from app.core.diagnostics import get_runtime_errors
@@ -46,6 +49,7 @@ async def activate_runtime(app: FastAPI) -> bool:
     if status.get("missing"):
         app.state.degraded_mode = True
         return False
+    stage = "configuration_recovery"
     try:
         if journal_path().exists():
             await asyncio.to_thread(recover_config_change)
@@ -53,23 +57,32 @@ async def activate_runtime(app: FastAPI) -> bool:
         from app.models.database import init_db
         from app.core.config import ensure_download_dir
         from app.core import redis_client
+        stage = "database_init"
         await init_db()
+        stage = "download_directory"
         await asyncio.to_thread(ensure_download_dir)
+        stage = "redis_connection"
         if not await asyncio.to_thread(redis_client.check_connection):
             raise RuntimeError("Redis 尚未恢复")
         from app.services.download_publication import recover_media_publications
         from app.services.media_deletion import recover_media_deletions
         from app.services.douyin_account import migrate_legacy_account_sync, recover_legacy_signature_isolation_sync
+        stage = "media_publication_recovery"
         await asyncio.to_thread(recover_media_publications)
+        stage = "media_deletion_recovery"
         await asyncio.to_thread(recover_media_deletions)
+        stage = "account_migration"
         await asyncio.to_thread(migrate_legacy_account_sync)
+        stage = "signature_recovery"
         await asyncio.to_thread(recover_legacy_signature_isolation_sync)
+        stage = "route_registration"
         if not getattr(app.state, "runtime_routes_loaded", False):
             for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "platform_downloads", "operations"):
                 module = importlib.import_module("app.api." + name)
                 app.include_router(module.router, prefix="/api")
             app.state.runtime_routes_loaded = True
             app.openapi_schema = None
+        stage = "process_reconcile"
         await asyncio.to_thread(process_manager.reconcile)
         app.state.degraded_mode = False
         app.state.bootstrap_status = {**status, "ready": True, "missing": [], "errors": []}
@@ -80,9 +93,23 @@ async def activate_runtime(app: FastAPI) -> bool:
         return True
     except Exception as exc:
         from app.core.error_handling import sanitize_text
+        # 只持久化程序阶段和异常类型，不把配置、业务参数或异常原文写入诊断清单。
+        diagnostic = {"stage": stage, "error_type": type(exc).__name__,
+                      "checked_at": time.time(), "runtime": get_runtime_identity()}
+        diagnostic["frames"] = [{"file": os.path.basename(frame.filename), "line": frame.lineno,
+                                 "function": frame.name}
+                                for frame in traceback.extract_tb(exc.__traceback__)[-8:]]
+        logging.getLogger(__name__).error("APP_STARTUP failed: stage=%s type=%s", stage, type(exc).__name__)
+        try:
+            from app.core.config_transaction import atomic_json
+            from pathlib import Path
+            atomic_json(Path(__file__).resolve().parent / ".runtime" / "startup-failure.json", diagnostic)
+        except OSError:
+            pass
         app.state.degraded_mode = True
         app.state.bootstrap_status = {**status, "ready": False, "errors": [{
             "key": "APP_STARTUP", "label": "运行环境", "group": "应用",
+            "stage": stage, "error_type": type(exc).__name__,
             "message": sanitize_text(str(exc), limit=300),
         }]}
         return False
