@@ -18,6 +18,8 @@ from typing import Optional
 import psutil
 
 from app.core.config_transaction import atomic_json
+from app.core.launch_identity import (LEGACY_CONFIGURATION_ENVIRONMENT, interpreter_options,
+                                      token_from_command)
 
 
 def configuration_signature(current=None) -> str:
@@ -135,12 +137,21 @@ class ProcessManager:
                         entry["token"] = proof.get("token")
                 except (OSError, ValueError, TypeError):
                     pass
-            # 清单只记录意图；代际证明必须来自已核验 PID 的真实启动环境。
-            entry["configuration_signature"] = process.environ().get("MEDIA_PROCESS_CONFIGURATION")
+            # 清单只记录意图；代际证明必须来自已核验 PID 的真实启动参数。
+            entry["configuration_signature"] = self._launch_configuration(process, entry)
             entry.update(pid=process.pid, created_at=process.create_time(), executable=process.exe())
             return process
         except (psutil.Error, OSError, ValueError, KeyError):
             return None
+
+    @staticmethod
+    def _launch_configuration(process: psutil.Process, entry: dict) -> Optional[str]:
+        """进程自身携带的令牌必须与清单中启动时记录的令牌一致，才采用该次启动的配置代际。"""
+        token = token_from_command(process.cmdline())
+        if token is not None:
+            return entry.get("launch_signature") if token == entry.get("launch_token") else None
+        # 本次改动之前启动的进程仍通过环境变量携带代际。
+        return process.environ().get(LEGACY_CONFIGURATION_ENVIRONMENT)
 
     def _worker_name(self) -> str:
         identity = sha256(str(Path(self._project_dir).resolve()).encode()).hexdigest()[:12]
@@ -199,7 +210,10 @@ class ProcessManager:
                     pass
                 pidfile.unlink(missing_ok=True)
             concurrency = max(1, min(int(settings.MAX_CONCURRENT_DOWNLOADS), 20))
-            command = [self._python, "-m", "celery", "-A", "app.tasks.celery_app", name,
+            entry["token"] = uuid4().hex
+            entry["launch_token"], entry["launch_signature"] = entry["token"], target_signature
+            command = [self._python, *interpreter_options(entry["token"]),
+                       "-m", "celery", "-A", "app.tasks.celery_app", name,
                        f"--pidfile={pidfile}", "--loglevel=info"]
             if name == "worker":
                 command += [f"--hostname={self._worker_name()}", "--pool=prefork" if os.name != "nt" else "--pool=solo",
@@ -209,14 +223,13 @@ class ProcessManager:
                 command += [f"--schedule={pidfile.parent / 'celerybeat-schedule'}",
                             "--scheduler=app.core.managed_scheduler:ManagedScheduler"]
             pidfile.parent.mkdir(parents=True, exist_ok=True)
-            entry["token"] = uuid4().hex
             entry["configuration_signature"] = target_signature
+            # 不传 env：宝塔安全模块会拦截 www 用户带显式环境的 execve（子进程报空 SubprocessError）。
+            platform_options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
             with open(pidfile.with_suffix(".log"), "a", encoding="utf-8") as log:
                 child = subprocess.Popen(command, cwd=self._project_dir, stdout=log,
                                          stderr=subprocess.STDOUT, start_new_session=True,
-                                         env={**os.environ, "MEDIA_PROCESS_TOKEN": entry["token"],
-                                              "MEDIA_PROCESS_CONFIGURATION": target_signature},
-                                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                                         **platform_options)
             self._children[name] = child
             process = psutil.Process(child.pid)
             entry.update(pid=child.pid, created_at=process.create_time(), executable=process.exe(), ready=False)

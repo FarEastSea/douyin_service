@@ -11,6 +11,7 @@ import redis
 
 from app.core.config import settings
 from app.core.config_transaction import atomic_json
+from app.core.launch_identity import current_token
 
 
 class ManagedScheduler(PersistentScheduler):
@@ -29,7 +30,7 @@ class ManagedScheduler(PersistentScheduler):
             with redis.Redis.from_url(broker, socket_connect_timeout=1, socket_timeout=1) as client:
                 client.ping()
             atomic_json(Path.cwd() / ".runtime" / "beat-ready.json", {
-                "pid": os.getpid(), "token": os.environ.get("MEDIA_PROCESS_TOKEN", ""),
+                "pid": os.getpid(), "token": current_token(),
                 "broker": sha256(broker.encode()).hexdigest(), "checked_at": time.time(),
             })
             self._last_ready = time.monotonic()
