@@ -236,6 +236,10 @@ async def swagger_docs():
         openapi_url=app.openapi_url,
         title=f"{app.title} - API 文档",
         oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+        swagger_js_url="/static/vendor/swagger-ui/5.34.1/swagger-ui-bundle.js",
+        swagger_css_url="/static/vendor/swagger-ui/5.34.1/swagger-ui.css",
+        swagger_favicon_url="/static/vendor/swagger-ui/5.34.1/favicon-32x32.png",
+        swagger_ui_parameters={"validatorUrl": None},
     )
     html = response.body.decode("utf-8")
     auth_interceptors = """
