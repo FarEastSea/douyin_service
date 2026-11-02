@@ -200,8 +200,9 @@ def on_worker_ready(**kwargs):
     from pathlib import Path
     from hashlib import sha256
     from app.core.config_transaction import atomic_json
+    from app.core.launch_identity import current_token
     atomic_json(Path.cwd() / ".runtime" / "worker-ready.json", {
-        "pid": os.getpid(), "token": os.environ.get("MEDIA_PROCESS_TOKEN", ""),
+        "pid": os.getpid(), "token": current_token(),
         "broker": sha256(settings.effective_celery_broker.encode()).hexdigest(),
         "checked_at": time.time(),
     })
