@@ -10,19 +10,17 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
-  Activity,
-  BookOpen,
-  ChevronLeft,
-  ChevronRight,
+  Aperture,
   Download,
   HardDrive,
+  KeyRound,
   LayoutDashboard,
   Layers3,
   Menu,
   MoonStar,
   Settings,
   Sun,
-  UserRound,
+  SunMoon,
   Users,
   X,
   Search,
@@ -124,7 +122,26 @@ const pageTitle = computed(() =>
               ? "下载任务"
               : "总览",
 );
-const themeIcon = computed(() => (store.theme === "light" ? Sun : MoonStar));
+const themeIcon = computed(() =>
+  store.theme === "light" ? Sun : store.theme === "dark" ? MoonStar : SunMoon,
+);
+const themeLabel = computed(() =>
+  store.theme === "light" ? "浅色" : store.theme === "dark" ? "深色" : "跟随系统",
+);
+const readinessLabel = computed(() =>
+  readiness.value === "ready"
+    ? "服务就绪"
+    : readiness.value === "not_ready"
+      ? "服务需检查"
+      : "状态未确认",
+);
+const commandShortcut = /Mac|iPhone|iPad/.test(navigator.userAgent)
+  ? "⌘K"
+  : "Ctrl K";
+function openCommand() {
+  closeSidebar();
+  commandOpen.value = true;
+}
 const mobileNavigationOpen = computed(
   () => mobileViewport.value && store.sidebarOpen,
 );
@@ -289,7 +306,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="!initialized" class="app-loading">
-    <div class="brand-mark"><LayoutDashboard /></div>
+    <span class="brand-mark"><Aperture :size="20" /></span>
     <span>正在载入控制台…</span>
   </div>
   <BootstrapView v-else-if="!bootstrap.ready" :status="bootstrap" />
@@ -305,21 +322,11 @@ onBeforeUnmount(() => {
   >
     <a class="skip-link" href="#main-content">跳转到主要内容</a>
     <header class="workspace-masthead">
-      <div class="masthead-inner">
-        <button ref="mobileMenuButton" class="icon-btn mobile-menu" aria-label="打开导航" @click="openSidebar"><Menu :size="21" /></button>
-        <RouterLink class="workspace-brand" to="/dashboard" aria-label="媒体工作台总览"><Download :size="24" /><strong>媒体工作台</strong></RouterLink>
-        <nav class="workspace-navigation" aria-label="工作区">
-          <RouterLink to="/dashboard">总览</RouterLink>
-          <RouterLink to="/operations/tasks">任务</RouterLink>
-          <RouterLink to="/library">媒体库</RouterLink>
-          <RouterLink to="/authors/douyin" :class="{ 'router-link-active': route.path.startsWith('/authors') || route.path === '/automation' }">订阅</RouterLink>
-        </nav>
-        <div class="masthead-tools">
-          <button class="icon-btn masthead-command" aria-label="打开命令面板" title="命令面板 Ctrl / ⌘ K" @click="commandOpen = true"><Search :size="18" /></button>
-          <button class="icon-btn" :title="`主题：${store.theme}`" :aria-label="`切换主题，当前为${store.theme}`" @click="store.cycleTheme"><component :is="themeIcon" :size="18" /></button>
-          <button ref="newDownloadButton" class="icon-btn masthead-add" aria-label="新建下载" title="新建下载" @click="openNewDownload"><Plus :size="18" /></button>
-          <button class="icon-btn masthead-auth" aria-label="管理凭据" title="管理凭据" @click="openAuth"><UserRound :size="18" /></button>
-        </div>
+      <button ref="mobileMenuButton" class="icon-btn mobile-menu" aria-label="打开导航" @click="openSidebar"><Menu :size="20" /></button>
+      <RouterLink class="workspace-brand" to="/dashboard" aria-label="媒体工作台总览"><span class="brand-mark"><Aperture :size="16" /></span><strong>媒体工作台</strong></RouterLink>
+      <div class="masthead-tools">
+        <button class="icon-btn" aria-label="打开命令面板" @click="openCommand"><Search :size="18" /></button>
+        <button class="icon-btn masthead-add" aria-label="新建下载" @click="openNewDownload"><Plus :size="18" /></button>
       </div>
     </header>
     <aside
@@ -333,96 +340,46 @@ onBeforeUnmount(() => {
       :tabindex="mobileNavigationOpen ? -1 : undefined"
     >
       <header class="brand">
-        <div class="brand-mark"><Download /></div>
-        <div><strong>媒体工作台</strong></div>
-        <button
-          class="collapse-btn"
-          aria-label="关闭导航"
-          @click="toggleSidebar"
-        >
-          <X />
-        </button>
+        <span class="brand-mark"><Aperture :size="18" /></span>
+        <div class="brand-copy"><strong>媒体工作台</strong><small>Media Studio</small></div>
+        <button class="icon-btn collapse-btn" aria-label="关闭导航" @click="toggleSidebar"><X :size="18" /></button>
       </header>
+      <button class="sidebar-search" type="button" @click="openCommand">
+        <Search :size="15" /><span>搜索与命令</span><kbd>{{ commandShortcut }}</kbd>
+      </button>
       <template v-if="directoryMode">
-        <RouterLink class="back-workspace" to="/dashboard" @click="closeSidebar"
-          ><ArrowLeft :size="16" /><span>返回工作区</span></RouterLink
-        >
+        <RouterLink class="back-workspace" to="/dashboard" @click="closeSidebar"><ArrowLeft :size="15" /><span>返回工作区</span></RouterLink>
         <nav class="main-nav directory-nav" :aria-label="pageTitle + '目录'">
           <div v-for="group in directory" :key="group.id" class="nav-group">
-            <span class="nav-label">{{ group.label }}</span
-            ><RouterLink
-              v-for="item in group.items"
-              :key="item.id"
-              :to="sectionPath(directoryMode, item.id)"
-              @click="closeSidebar"
-              ><span>{{ item.label }}</span></RouterLink
-            >
+            <span class="nav-label">{{ group.label }}</span>
+            <RouterLink v-for="item in group.items" :key="item.id" :to="sectionPath(directoryMode, item.id)" @click="closeSidebar"><span>{{ item.label }}</span></RouterLink>
           </div>
         </nav>
       </template>
       <template v-else>
+        <button ref="newDownloadButton" class="btn primary sidebar-create" type="button" @click="openNewDownload"><Plus :size="16" />新建下载</button>
         <nav class="main-nav" aria-label="工作区">
-          <RouterLink to="/dashboard" title="总览" @click="closeSidebar"
-            ><LayoutDashboard /><span>总览</span></RouterLink
-          >
-          <RouterLink
-            to="/operations/tasks"
-            title="任务"
-            @click="closeSidebar"
-            ><Layers3 /><span>任务</span></RouterLink
-          >
-          <RouterLink to="/library" title="媒体库" @click="closeSidebar"><Images /><span>媒体库</span></RouterLink>
-          <RouterLink
-            to="/authors/douyin"
-            title="订阅"
-            :class="{ 'router-link-active': route.path.startsWith('/authors') || route.path === '/automation' }"
-            @click="closeSidebar"
-            ><Users /><span>订阅</span></RouterLink
-          >
+          <span class="nav-label">工作区</span>
+          <RouterLink to="/dashboard" @click="closeSidebar"><LayoutDashboard :size="17" /><span>总览</span></RouterLink>
+          <RouterLink to="/operations/tasks" @click="closeSidebar"><Layers3 :size="17" /><span>任务</span><small v-if="store.stats.downloading_tasks" class="nav-count">{{ store.stats.downloading_tasks }}</small></RouterLink>
+          <RouterLink to="/library" @click="closeSidebar"><Images :size="17" /><span>媒体库</span></RouterLink>
+          <RouterLink to="/authors/douyin" :class="{ 'router-link-active': route.path.startsWith('/authors') || route.path === '/automation' }" @click="closeSidebar"><Users :size="17" /><span>订阅</span></RouterLink>
         </nav>
         <nav class="main-nav utility-nav" aria-label="系统">
-          <RouterLink
-            to="/operations/maintenance/services"
-            title="系统"
-            @click="closeSidebar"
-            ><HardDrive /><span>系统</span></RouterLink
-          >
-          <RouterLink
-            to="/settings/application"
-            title="设置"
-            @click="closeSidebar"
-            ><Settings /><span>设置</span></RouterLink
-          >
+          <span class="nav-label">系统</span>
+          <RouterLink to="/operations/maintenance/services" @click="closeSidebar"><HardDrive :size="17" /><span>系统</span></RouterLink>
+          <RouterLink to="/settings/application" @click="closeSidebar"><Settings :size="17" /><span>设置</span></RouterLink>
         </nav>
       </template>
-      <footer>
-        <RouterLink
-          to="/operations/maintenance/services"
-          class="service-state"
-          :data-state="readiness"
-          @click="closeSidebar"
-          ><i /><span>{{
-            readiness === "ready"
-              ? "服务就绪"
-              : readiness === "not_ready"
-                ? "服务需检查"
-                : "状态未确认"
-          }}</span></RouterLink
-        ><button
-          class="icon-btn"
-          :title="`主题：${store.theme}`"
-          :aria-label="`切换主题，当前为${store.theme}`"
-          @click="store.cycleTheme"
-        >
-          <component :is="themeIcon" />
-        </button>
+      <footer class="sidebar-footer">
+        <RouterLink to="/operations/maintenance/services" class="service-state" :data-state="readiness" @click="closeSidebar"><i aria-hidden="true" /><span>{{ readinessLabel }}</span></RouterLink>
+        <div class="sidebar-tools">
+          <button class="icon-btn" :title="`主题：${themeLabel}`" :aria-label="`切换主题，当前为${themeLabel}`" @click="store.cycleTheme"><component :is="themeIcon" :size="17" /></button>
+          <button class="icon-btn" aria-label="管理凭据" title="管理凭据" @click="openAuth"><KeyRound :size="17" /></button>
+        </div>
       </footer>
     </aside>
-    <button
-      class="mobile-backdrop"
-      aria-label="关闭导航"
-      @click="dismissSidebar"
-    />
+    <button class="mobile-backdrop" aria-label="关闭导航" @click="dismissSidebar" />
 
     <main
       id="main-content"
@@ -434,45 +391,24 @@ onBeforeUnmount(() => {
       <RiskBanner v-if="route.path !== '/dashboard'" />
       <RouterView />
     </main>
-    <footer class="workspace-utility-footer">
-      <RouterLink to="/operations/maintenance/services" class="service-state" :data-state="readiness"><i /><span>{{ readiness === 'ready' ? '服务就绪' : readiness === 'not_ready' ? '服务需检查' : '状态未确认' }}</span></RouterLink>
-      <nav aria-label="系统工具"><RouterLink to="/operations/maintenance/services"><HardDrive :size="16" />系统</RouterLink><RouterLink to="/settings/application"><Settings :size="16" />设置</RouterLink></nav>
-    </footer>
-    <nav
-      v-if="!directoryMode"
-      class="mobile-capture-dock"
-      aria-label="快捷添加"
-      :inert="mobileNavigationOpen"
-    >
-      <button class="btn ghost" @click="openSubscription">
-        <Users :size="18" />订阅作者
-      </button>
-      <button class="btn primary" @click="openNewDownload">
-        <Download :size="18" />下载作品
-      </button>
+    <nav v-if="!directoryMode" class="mobile-capture-dock" aria-label="快捷添加" :inert="mobileNavigationOpen">
+      <button class="btn ghost" @click="openSubscription"><Users :size="18" />订阅作者</button>
+      <button class="btn primary" @click="openNewDownload"><Download :size="18" />下载作品</button>
     </nav>
 
     <Teleport to="body">
-      <Transition name="toast"
-        ><div
+      <Transition name="toast">
+        <div
           v-if="store.toast"
           class="toast"
           :class="{ 'above-capture-dock': !directoryMode }"
           :data-tone="store.toast.tone"
           :role="store.toast.tone === 'error' ? 'alert' : 'status'"
         >
-          <IssueDetail
-            v-if="store.toast.tone === 'error'"
-            :message="store.toast.message"
-          /><span v-else>{{ store.toast.message }}</span
-          ><button
-            class="icon-btn"
-            aria-label="关闭通知"
-            @click="store.toast = null"
-          >
-            <X :size="16" />
-          </button></div
-      ></Transition>
+          <IssueDetail v-if="store.toast.tone === 'error'" :message="store.toast.message" /><span v-else>{{ store.toast.message }}</span>
+          <button class="icon-btn" aria-label="关闭通知" @click="store.toast = null"><X :size="16" /></button>
+        </div>
+      </Transition>
     </Teleport>
     <MediaLightbox
       :open="previewOpen"
@@ -493,8 +429,8 @@ onBeforeUnmount(() => {
         :return-focus="captureOrigin"
         @close="closeNewDownload"
     /></Teleport>
-    <Teleport to="body"
-      ><div v-if="authOpen" class="auth-overlay" @click.self="closeAuth">
+    <Teleport to="body">
+      <div v-if="authOpen" class="auth-overlay" @click.self="closeAuth">
         <form
           ref="authDialog"
           class="auth-dialog"
@@ -504,28 +440,15 @@ onBeforeUnmount(() => {
           tabindex="-1"
           @submit.prevent="login"
         >
-          <button
-            type="button"
-            class="icon-btn close"
-            aria-label="关闭"
-            @click="closeAuth"
-          >
-            <X />
-          </button>
-          <div class="brand-mark"><UserRound /></div>
+          <button type="button" class="icon-btn close" aria-label="关闭" @click="closeAuth"><X :size="18" /></button>
+          <span class="brand-mark"><KeyRound :size="20" /></span>
           <h2 id="auth-title">输入管理 Token</h2>
           <p>Token 只保存在当前浏览器，并通过 Authorization 请求头发送。</p>
-          <label for="admin-token">管理 Token</label
-          ><input
-            id="admin-token"
-            ref="authInput"
-            v-model="token"
-            type="password"
-            autocomplete="off"
-            placeholder="Bearer Token"
-          /><button class="btn primary">登录并继续</button>
+          <label for="admin-token">管理 Token</label>
+          <input id="admin-token" ref="authInput" v-model="token" type="password" autocomplete="off" placeholder="Bearer Token" />
+          <button class="btn primary">登录并继续</button>
         </form>
-      </div></Teleport
-    >
+      </div>
+    </Teleport>
   </div>
 </template>

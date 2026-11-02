@@ -10,6 +10,7 @@ watch(source, () => { failed.value = false })
 
 <template>
   <span class="media-thumbnail" :class="{ 'thumbnail-missing': !source || failed, 'natural-thumbnail': natural }">
+    <img v-if="natural && source && !failed" class="media-ambient" :src="source" alt="" aria-hidden="true" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
     <img v-if="source && !failed" :src="source" :alt="alt || ''" loading="lazy" decoding="async" referrerpolicy="no-referrer" @error="failed = true" />
     <span v-else class="thumbnail-fallback"><Play v-if="isVideoMedia(type)" :size="22" aria-hidden="true" /><Image v-else :size="22" aria-hidden="true" /><span class="sr-only">暂无缩略图</span></span>
     <span v-if="source && !failed && isVideoMedia(type)" class="thumbnail-play" aria-hidden="true"><Play :size="12" fill="currentColor" /></span>
