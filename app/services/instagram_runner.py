@@ -13,6 +13,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import requests
@@ -56,6 +57,29 @@ from app.services.instagram_store import (
 
 def emit(message, **values):
     print(json.dumps({"message": message, **values}, ensure_ascii=False), flush=True)
+
+
+def validate_profile_response(payload):
+    """Do not let upstream turn an invalid GraphQL response into a missing user."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or "user" not in data or payload.get("errors"):
+        raise InstagramStop(
+            "profile_response_invalid",
+            "Instagram 未返回有效的作者资料，扫描未完成并保留断点；请稍后重试，持续出现时需更新解析器",
+        )
+    user = data["user"]
+    if user is None:
+        raise InstagramStop("not_found", "作者不存在或当前会话无法访问")
+    if (
+        not isinstance(user, dict)
+        or not str(user.get("id") or user.get("pk") or "").isdigit()
+        or not isinstance(user.get("username"), str)
+        or not user["username"].strip()
+    ):
+        raise InstagramStop(
+            "profile_response_invalid",
+            "Instagram 作者资料结构不完整，扫描未完成并保留断点",
+        )
 
 
 def verify_mp4(path):
@@ -248,6 +272,7 @@ class Runtime:
         if api and (
             response.status_code in {400, 403}
             or "json" in response.headers.get("content-type", "")
+            or parsed.path in {"/api/graphql", "/graphql/query"}
         ):
             try:
                 payload = response.json()
@@ -294,6 +319,17 @@ class Runtime:
             ):
                 response.close()
                 block_account(self.gate_db, "rate_limited")
+            if (
+                parsed.path == "/api/graphql"
+                and response.status_code == 200
+                and request.headers.get("X-FB-Friendly-Name")
+                == "PolarisProfilePageContentQuery"
+            ):
+                try:
+                    validate_profile_response(payload)
+                except InstagramStop:
+                    response.close()
+                    raise
             if parsed.path == "/graphql/query" and response.status_code == 200:
                 values = payload.get("data")
                 candidates = []
@@ -345,7 +381,7 @@ class Runtime:
         return response
 
     def extractor(self, url, cursor=None):
-        from gallery_dl import config, extractor
+        from gallery_dl import config, exception, extractor, output
 
         config.clear()
         for key, value in {
@@ -365,6 +401,14 @@ class Runtime:
         extr = extractor.find(url)
         if extr is None or extr.category != "instagram":
             raise InstagramStop("engine_unavailable", "固定版 gallery-dl 不支持此链接")
+        # gallery-dl normally installs this adapter in Job, which this controlled
+        # runner intentionally does not construct. Metadata error paths call
+        # log.traceback(), unavailable on the standard logging.Logger.
+        # Keep all engine logging private: response bodies and tokens may appear
+        # even in warning/error records. Only emit our own structured events.
+        engine_log = logging.Logger("instagram.engine.private")
+        engine_log.disabled = True
+        extr.log = output.LoggerAdapter(engine_log, SimpleNamespace(_logger_extra={}))
         extr.initialize()
         memory = {}
 
@@ -420,7 +464,16 @@ class Runtime:
                     if valid:
                         memory[identity] = value["id"]
                         return value["id"]
-            value = func(*args)
+            try:
+                value = func(*args)
+            except exception.NotFoundError:
+                raise
+            except Exception as exc:
+                # Upstream catches ordinary errors during profile lookup and
+                # may misreport them as missing users. Keep the real diagnostic
+                # and stop through the runner's non-retryable control signal.
+                code, message = engine_failure(exc)
+                raise InstagramStop(code, message) from None
             memory[identity] = value
             return value
 
@@ -941,6 +994,10 @@ def scan(runtime):
             "engine_unavailable",
             "access_denied",
             "parse_error",
+            "profile_response_invalid",
+            "engine_contract_error",
+            "engine_dependency_error",
+            "session_endpoint_redirect",
         }
         if terminal:
             run.status = "failed"
@@ -1042,12 +1099,25 @@ def engine_failure(exc):
             "auth_required",
             "Instagram 不接受当前登录会话，请在浏览器登录后重新导入 Cookie",
         )
+    if isinstance(exc, exception.NotFoundError):
+        return "not_found", "内容不存在或当前会话无法访问"
     location = ""
     trace = exc.__traceback__
     while trace:
         if Path(trace.tb_frame.f_code.co_filename).name == "instagram_runner.py":
             location = f"，运行器第 {trace.tb_lineno} 行"
         trace = trace.tb_next
+    # The upstream source location is useful when the error crossed our cache
+    # wrapper. Never include exception messages, locals, paths or response data.
+    trace = exc.__traceback__
+    parser_line = None
+    while trace:
+        filename = Path(trace.tb_frame.f_code.co_filename)
+        if filename.name == "instagram.py" and filename.parent.name == "extractor":
+            parser_line = trace.tb_lineno
+        trace = trace.tb_next
+    if parser_line is not None:
+        location = f"{location}，解析器第 {parser_line} 行"
     return (
         "engine_contract_error",
         f"Instagram 引擎返回结构或处理逻辑异常（{type(exc).__name__}{location}），请反馈此诊断信息",
@@ -1149,6 +1219,10 @@ def run(task_id, token):
                     "engine_unavailable",
                     "access_denied",
                     "parse_error",
+                    "profile_response_invalid",
+                    "engine_contract_error",
+                    "engine_dependency_error",
+                    "session_endpoint_redirect",
                     "not_found",
                 }
                 or task.source_type == "session"

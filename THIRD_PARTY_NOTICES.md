@@ -1,5 +1,14 @@
 # Third-party notices
 
+## gallery-dl
+
+The application installs `gallery-dl==1.32.17` from
+[mikf/gallery-dl](https://github.com/mikf/gallery-dl/tree/v1.32.17).
+Its package metadata declares **GPL-2.0-only**. This project's license does
+not relicense that dependency. The Instagram runner directly imports its
+extractor API; the compatibility boundary with this project's AGPL license
+requires further review, as documented in [licensing notes](docs/licensing.md).
+
 ## Douyin A-Bogus implementation
 
 `app/services/vendor/douyin_abogus.py` is derived from
