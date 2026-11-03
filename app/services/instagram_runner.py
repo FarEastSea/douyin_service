@@ -7,6 +7,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,25 @@ from app.services.instagram_store import (
 
 def emit(message, **values):
     print(json.dumps({"message": message, **values}, ensure_ascii=False), flush=True)
+
+
+def public_query_info(value):
+    """Only persist the public doc ID and Relay provider names, never page tokens."""
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    docid, providers = value
+    if not isinstance(docid, str) or not docid.isdigit() or len(docid) > 64:
+        return None
+    if providers is None:
+        providers = []
+    if not isinstance(providers, (tuple, list)) or len(providers) > 256:
+        return None
+    if any(
+        not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_]{1,256}", name) is None
+        for name in providers
+    ):
+        return None
+    return docid, list(providers)
 
 
 def validate_profile_response(payload):
@@ -421,18 +441,20 @@ class Runtime:
                 memory.pop(identity, None)
                 return
             memory[identity] = value
-            # 仅公共查询 ID 跨执行缓存，网页、登录 token、用户数据只放进程内存。
+            # 1.32.19 caches (doc_id, Relay provider names), not just doc_id.
+            # Use a new namespace so pre-upgrade ID-only entries cannot be read.
+            info = public_query_info(value)
             if (
-                func.__name__ == "_extract_docid"
+                func.__name__ == "_extract_opname_info"
                 and key is not ...
-                and str(value).isdigit()
+                and info is not None
             ):
-                name = "instagram:query:" + str(key)
+                name = "instagram:query:v2:" + str(key)
                 row = self.gate_db.scalar(
                     select(SystemConfig).where(SystemConfig.key == name)
                 )
                 payload = json.dumps(
-                    {"id": str(value), "expires": time.time() + (_exp or 86400)}
+                    {"info": info, "expires": time.time() + (_exp or 86400)}
                 )
                 if row:
                     row.value = payload
@@ -441,29 +463,34 @@ class Runtime:
                 self.gate_db.commit()
 
         def cached(func, *args, _key=0, _exp=0, _mem=True):
-            identity = cache_key(func, args[_key : _key + 1])
+            identity = cache_key(func, () if _key is None else args[_key : _key + 1])
             if identity in memory:
                 return memory[identity]
-            if func.__name__ == "_extract_docid" and args:
+            if func.__name__ == "_extract_opname_info" and args:
                 row = self.gate_db.scalar(
                     select(SystemConfig).where(
-                        SystemConfig.key == "instagram:query:" + str(args[0])
+                        SystemConfig.key == "instagram:query:v2:" + str(args[0])
                     )
                 )
                 if row:
                     try:
                         value = json.loads(row.value)
+                        info = (
+                            public_query_info(value.get("info"))
+                            if isinstance(value, dict)
+                            else None
+                        )
                         valid = (
                             isinstance(value, dict)
                             and float(value.get("expires", 0)) > time.time()
-                            and str(value.get("id", "")).isdigit()
+                            and info is not None
                         )
                     except (ValueError, TypeError):
                         valid = False
                     self.gate_db.rollback()
                     if valid:
-                        memory[identity] = value["id"]
-                        return value["id"]
+                        memory[identity] = info
+                        return info
             try:
                 value = func(*args)
             except exception.NotFoundError:
