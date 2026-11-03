@@ -300,3 +300,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local diagnostic captures must never be published.
+/抖音封禁抓包/

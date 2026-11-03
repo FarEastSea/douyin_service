@@ -107,6 +107,9 @@ const states: Record<string, [string, string]> = {
   deferred: ["待续检", "neutral"],
   not_due: ["未到检查时间", "neutral"],
   account_warning: ["账号需关注", "warning"],
+  banned: ["已封禁", "error"],
+  restricted: ["账号受限", "warning"],
+  deleted: ["已销号", "warning"],
 };
 export function statusPresentation(status?: string) {
   const value = states[status || ""];

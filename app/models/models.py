@@ -81,6 +81,21 @@ class Author(Base):
         cascade="all, delete-orphan", passive_deletes=True,
     )
 
+    @property
+    def account_status(self):
+        from app.services.douyin_author_status import stored_author_status
+        return stored_author_status(self.last_error).get("account_status")
+
+    @property
+    def account_status_label(self):
+        from app.services.douyin_author_status import stored_author_status
+        return stored_author_status(self.last_error).get("account_status_label")
+
+    @property
+    def account_status_detail(self):
+        from app.services.douyin_author_status import stored_author_status
+        return stored_author_status(self.last_error).get("account_status_detail")
+
 
 class AuthorProfileHistory(Base):
     """作者昵称或头像变更历史。"""

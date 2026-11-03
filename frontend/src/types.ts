@@ -61,6 +61,9 @@ export interface Author {
   total_works: number;
   downloaded_works: number;
   last_error?: string;
+  account_status?: string;
+  account_status_label?: string;
+  account_status_detail?: string;
   auto_update_status?: string;
   auto_update_message?: string;
   created_at: string;

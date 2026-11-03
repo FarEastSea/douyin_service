@@ -469,16 +469,17 @@ onBeforeUnmount(() => {
               ><StatusIndicator
                 v-else
                 :status="
-                  item.auto_update_status ||
+                  item.account_status || item.auto_update_status ||
                   (item.is_subscribed ? 'waiting' : 'unsubscribed')
                 "
+                :label="item.account_status_label"
               /><button
                 v-if="item.last_error"
                 class="error-excerpt"
-                :title="item.last_error"
+                :title="item.account_status_detail || item.last_error"
                 @click="openAuthor(item)"
               >
-                最近检查异常
+                {{ item.account_status_label || '最近检查异常' }}
               </button>
             </td>
             <td data-label="订阅">
@@ -596,7 +597,7 @@ onBeforeUnmount(() => {
           </dl>
           <IssueDetail
             v-if="detail.last_error"
-            :message="detail.last_error"
+            :message="detail.account_status_label ? [detail.account_status_label, detail.account_status_detail].filter(Boolean).join('：') : detail.last_error"
           /><a
             v-if="detail.share_url || detail.profile_url"
             class="text-button"

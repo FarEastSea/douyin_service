@@ -24,6 +24,7 @@ from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.douyin_author_status import explicit_author_status
 from app.core import redis_client
 from app.core.network_security import get_douyin_response, validate_douyin_url
 from app.core.runtime_config import get_cached_runtime_config
@@ -832,6 +833,9 @@ class DouyinDownloader:
                     continue
 
                 fallback_author_info = self._extract_author_identity(item.get('author'), sec_uid)
+                restriction = explicit_author_status(item.get('author'))
+                if restriction:
+                    return {**fallback_author_info, **restriction}
                 if author_profile_has_identity(fallback_author_info):
                     logger.info(
                         "作者资料接口不可用，已从作品列表回退作者资料: sec_uid=%s",
@@ -839,9 +843,9 @@ class DouyinDownloader:
                     )
                     return {
                         **fallback_author_info,
-                        'account_status': 'active',
-                        'account_status_label': '正常',
-                        'account_status_detail': None,
+                        'account_status': account_status if account_status in {'banned', 'restricted', 'deleted'} else 'active',
+                        'account_status_label': account_status_label if account_status in {'banned', 'restricted', 'deleted'} else '正常',
+                        'account_status_detail': account_status_detail if account_status in {'banned', 'restricted', 'deleted'} else None,
                     }
 
             return _build_author_info_response(
@@ -878,6 +882,9 @@ class DouyinDownloader:
                 )
 
             author_info = self._extract_author_identity(user, sec_uid)
+            restriction = explicit_author_status(user)
+            if restriction:
+                return {**author_info, **restriction}
             if author_profile_has_identity(author_info):
                 return {
                     **author_info,

@@ -60,6 +60,9 @@ class AuthorResponse(BaseModel):
     total_works: int
     downloaded_works: int
     last_error: Optional[str] = None
+    account_status: Optional[str] = None
+    account_status_label: Optional[str] = None
+    account_status_detail: Optional[str] = None
     created_at: datetime
     already_exists: bool = False
     position: Optional[int] = None
