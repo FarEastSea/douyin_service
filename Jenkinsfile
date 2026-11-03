@@ -76,7 +76,7 @@ REMOTE_SCRIPT
             echo 'BT Panel dependencies, root deployment, immediate restart, and smoke checks succeeded.'
         }
         failure {
-            echo 'Deploy failed. Review the stage log; deploy.sh restores the previous root commit after a switch failure.'
+            echo 'Deployment pipeline failed. Check the stage log and server deployment receipt to determine whether failure occurred before the code switch or required recovery.'
         }
     }
 }

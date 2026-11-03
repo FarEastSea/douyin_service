@@ -1055,7 +1055,13 @@ mkdir -p "$SERVICE_ROOT/logs"
 mkdir -p "$SERVICE_ROOT/.runtime"
 command -v flock >/dev/null
 exec 200>"$SERVICE_ROOT/.runtime/deploy.lock"
-flock -n 200 || { echo "Another deployment is running." >&2; exit 1; }
+if ! flock -n 200; then
+    echo "Another deployment is running; waiting for the project release lock..."
+    if ! flock -w "${DEPLOY_LOCK_TIMEOUT:-7200}" 200; then
+        echo "Deploy failed: timed out waiting for the project release lock; no release changes were made." >&2
+        exit 1
+    fi
+fi
 
 echo "Preparing ${PROJECT_NAME} deployment for BT Panel..."
 PREVIOUS_SHA="$(git rev-parse HEAD)"
@@ -1067,6 +1073,7 @@ if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
     echo "Deploy failed: target commit ${TARGET_SHA} is unavailable." >&2
     exit 1
 fi
+TARGET_SHA="$(git rev-parse "${TARGET_SHA}^{commit}")"
 reconcile_published_worktree_changes "$PREVIOUS_SHA" "$TARGET_SHA"
 
 record_stage prepare-candidate
