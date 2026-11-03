@@ -1,6 +1,7 @@
 """Instagram 的稳定身份与分流订阅状态。"""
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -94,6 +95,7 @@ def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True)
                     content_kind=kind,
                     scan_mode=mode,
                     enabled=enabled,
+                    next_check_at=utcnow() + timedelta(seconds=interval_for(kind)),
                 )
                 db.add(row)
             elif mode == "history" and kind in kinds and kind in previously_selected:
@@ -102,7 +104,7 @@ def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True)
             elif row.enabled != enabled:
                 row.enabled = enabled
                 if enabled:
-                    row.next_check_at = utcnow()
+                    row.next_check_at = utcnow() + timedelta(seconds=interval_for(kind))
     db.flush()
 
 

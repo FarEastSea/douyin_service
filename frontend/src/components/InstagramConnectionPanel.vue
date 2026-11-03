@@ -13,7 +13,7 @@ const testing = computed(() => ['pending', 'downloading'].includes(status.value?
 const feedback = computed(() => {
   const task = status.value?.test_task;
   if (error.value) return { tone: 'error', text: error.value };
-  if (!props.cookie.trim() && task?.status === 'failed') return { tone: 'error', text: task.error_message || '会话检测未完成，请查看检测任务。', code: task.error_code };
+  if (!props.cookie.trim() && task?.status === 'failed') return { tone: 'error', text: task.error_message || '会话检测未完成，请查看运行记录。', code: task.error_code };
   if (notice.value) return { tone: 'info', text: notice.value };
   if (testing.value) return { tone: 'info', text: '会话检测已排队或正在执行，结果会自动更新。' };
   if (status.value?.status === 'ready') return { tone: 'success', text: '会话检测通过，可以开启采集。' };
@@ -63,7 +63,7 @@ const labels: Record<string, string> = { ready: '检测通过', unchecked: '尚�
     <div v-if="feedback" class="instagram-feedback" :data-tone="feedback.tone" :role="feedback.tone === 'error' ? 'alert' : 'status'" aria-live="polite">
       <AlertCircle v-if="feedback.tone === 'error'" :size="20" /><CheckCircle2 v-else-if="feedback.tone === 'success'" :size="20" /><LoaderCircle v-else-if="testing" :size="20" /><Info v-else :size="20" />
       <div><strong>{{ feedback.text }}</strong><small v-if="feedback.code">错误代码：{{ feedback.code }}</small></div>
-      <RouterLink v-if="status?.test_task" class="text-button" :to="{path:'/operations/tasks',query:{task_key:`instagram:${status.test_task.id}`}}">查看检测任务</RouterLink>
+      <RouterLink v-if="status?.test_task" class="text-button" :to="{path:'/automation',query:{run:status.test_run_key || undefined}}">查看运行记录</RouterLink>
     </div>
     <div class="instagram-cookie-toolbar"><div><strong>Cookie</strong><small>{{ status?.configured ? '已加密保存，内容不会回显' : '尚未保存登录会话' }}</small></div><button class="btn ghost" type="button" :aria-expanded="expanded" aria-controls="instagram-cookie-editor" @click="expanded = !expanded"><ChevronDown :size="16" />{{ expanded ? '收起' : '更新 Cookie' }}</button></div>
     <div v-show="expanded" id="instagram-cookie-editor" class="instagram-cookie-editor">

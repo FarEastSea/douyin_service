@@ -157,6 +157,8 @@ async def list_tasks(
 ):
     spec = _require_platform(platform)
     conditions = [PlatformDownloadTask.platform == spec.id]
+    if spec.id == "instagram":
+        conditions.append(PlatformDownloadTask.source_type == "work")
     if status:
         conditions.append(PlatformDownloadTask.status == status)
     search_text = str(q or "").strip()

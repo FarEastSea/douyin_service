@@ -170,6 +170,7 @@ class Settings(BaseModel):
         return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.INSTAGRAM_DOWNLOAD_SUBDIR)
     INSTAGRAM_DOWNLOAD_ENGINE: str = "gallery-dl"
     INSTAGRAM_COOKIE: Optional[str] = None
+    SUBSCRIPTION_RECORD_RETENTION_DAYS: int = Field(30, ge=1, le=365)
     INSTAGRAM_ENABLED: bool = False
     INSTAGRAM_REQUEST_DELAY_MIN: float = Field(8, ge=3, le=300)
     INSTAGRAM_REQUEST_DELAY_MAX: float = Field(15, ge=3, le=600)

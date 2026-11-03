@@ -204,6 +204,13 @@ def get_session(db=Depends(session)):
         .order_by(PlatformDownloadTask.id.desc())
     )
     result["test_task"] = serialize_platform_task(tests) if tests else None
+    if tests:
+        run = db.scalar(
+            select(PlatformSubscriptionRun).where(
+                PlatformSubscriptionRun.task_id == tests.id
+            )
+        )
+        result["test_run_key"] = f"instagram:{run.id}" if run else None
     db.commit()
     return result
 
@@ -226,11 +233,16 @@ def queue_session_test(db):
         .values(status="cancelled", phase="cancelled")
     )
     db.commit()
-    return queue_job(
+    task = queue_job(
         db,
         ResolvedPlatformInput(key, "https://www.instagram.com/", "session"),
         {"fingerprint": fingerprint},
     )
+    from app.services.subscription_records import sync_session_runs
+
+    sync_session_runs(db)
+    db.commit()
+    return task
 
 
 @router.post("/session/test")
@@ -398,7 +410,6 @@ def update_subscription(
             .values(manual=False)
         )
     db.commit()
-    notify_dispatch()
     return author_payload(db, author)
 
 
@@ -577,3 +588,43 @@ def reports(
         "total": total,
         "pages": max(1, (total + page_size - 1) // page_size),
     }
+
+
+@router.get("/runs")
+def unified_run_list(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db=Depends(session),
+):
+    from app.services.subscription_records import unified_runs
+
+    return unified_runs(db, page, page_size)
+
+
+@router.get("/runs/{run_key}")
+def unified_run_detail(run_key: str, db=Depends(session)):
+    from app.services.subscription_records import instagram_payload
+    from app.api.authors import _subscription_report_payload
+    from app.models.models import SubscriptionCheckReport
+
+    try:
+        platform, identity = run_key.split(":")
+        identity = int(identity)
+    except ValueError:
+        raise HTTPException(404, "运行记录不存在")
+    if platform == "instagram":
+        row = db.get(PlatformSubscriptionRun, identity)
+        if row and row.platform == platform:
+            return instagram_payload(db, row)
+    elif platform == "douyin":
+        row = db.get(SubscriptionCheckReport, identity)
+        if row:
+            newest = db.scalar(
+                select(SubscriptionCheckReport.id)
+                .order_by(SubscriptionCheckReport.started_at.desc())
+                .limit(1)
+            )
+            return _subscription_report_payload(
+                row, newest, settings.snapshot().DEFAULT_CHECK_INTERVAL
+            )
+    raise HTTPException(404, "运行记录不存在")

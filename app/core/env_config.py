@@ -150,6 +150,7 @@ for _key, _label, _default, _help in (
     ("INSTAGRAM_STORIES_INTERVAL", "Stories 检查周期（秒）", "21600", "仅对开启 Stories 的作者生效；过期内容无法补回"),
     ("INSTAGRAM_HIGHLIGHTS_INTERVAL", "Highlights 检查周期（秒）", "86400", "仅对开启精选的作者生效"),
     ("INSTAGRAM_BATCH_ITEMS", "每片最多作品数", "50", "分片到达上限后保存断点续跑"),
+    ("SUBSCRIPTION_RECORD_RETENTION_DAYS", "运行记录保留天数", "30", "自动清理过期运行记录与内部检查任务，保留媒体和文件下载任务"),
     ("INSTAGRAM_BATCH_SECONDS", "每片最多运行秒数", "600", "必须低于 Celery 软超时"),
 ):
     _field = EnvField(key=_key, label=_label, group="Instagram", default=_default, help=_help, secret=_key == "INSTAGRAM_COOKIE")

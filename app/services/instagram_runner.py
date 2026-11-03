@@ -21,6 +21,7 @@ import requests
 from sqlalchemy import func, select
 
 from app.core.config import settings
+from app.core.runtime_config import get_runtime_config_sync
 from app.models.database import get_sync_db
 from app.models.models import (
     PlatformAuthor,
@@ -864,8 +865,8 @@ def scan(runtime):
                 count += 1
                 discovered += int(is_new)
                 had_all = work_complete(db, work)
-                known = known + 1 if had_all and not work.is_pinned else 0
-                if child.status != "cancelled":
+                known = known if work.is_pinned else known + 1 if had_all else 0
+                if child.status != "cancelled" and not had_all:
                     for file in files:
                         try:
                             saved += int(
@@ -914,8 +915,8 @@ def scan(runtime):
                 if (
                     mode == "recent"
                     and kind in {"posts", "reels"}
-                    and count >= 24
-                    and known >= 12
+                    and known
+                    >= int(get_runtime_config_sync(db)["subscription_known_streak"])
                 ):
                     boundary = True
                     break
@@ -977,8 +978,8 @@ def scan(runtime):
             or 0
         )
         task.file_count, task.downloaded_media_count, task.progress_percent = (
-            indexed,
-            indexed,
+            saved,
+            saved,
             100,
         )
         task.error_code = task.error_message = None
@@ -1375,7 +1376,13 @@ def run(task_id, token):
         return 1
     finally:
         if runtime:
-            runtime.close()
+            try:
+                from app.services.subscription_records import sync_session_runs
+
+                sync_session_runs(runtime.db)
+                runtime.db.commit()
+            finally:
+                runtime.close()
 
 
 if __name__ == "__main__":

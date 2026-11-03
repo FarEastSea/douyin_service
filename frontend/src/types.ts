@@ -283,6 +283,10 @@ export interface TaskDetail extends UnifiedTask {
   };
 }
 export interface AutomationRun {
+  key?: string;
+  platform?: string;
+  content_kind?: string;
+  downloaded_files?: number;
   id: number;
   status: string;
   trigger_type: string;

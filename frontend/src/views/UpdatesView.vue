@@ -35,7 +35,7 @@ const loading = ref(false),
   detail = ref<AutomationRun>(),
   detailBusy = ref(false),
   detailError = ref("");
-const runId = computed(() => Number(route.query.run) || 0),
+const runId = computed(() => String(route.query.run || "")),
   authorSearch = ref(""),
   onlyIssues = ref(false);
 const results = computed(() =>
@@ -66,15 +66,17 @@ async function load(silent = false) {
       `/authors/reports/subscriptions?paginated=true&page=${page.value}&page_size=20`,
     );
     if (current !== sequence) return;
-    reports.value = data.items;
+    const unified = await api<AutomationPage>(`/platform-downloads/instagram/runs?page=${page.value}&page_size=20`);
+    if (current !== sequence) return;
+    reports.value = unified.items;
     cycle.value = data.cycle;
-    pages.value = data.pages;
-    total.value = data.total;
+    pages.value = unified.pages;
+    total.value = unified.total;
     loaded.value = true;
     loadError.value = "";
     updatedAt.value = new Date().toISOString();
-    if (page.value > Math.max(1, data.pages))
-      changePage(Math.max(1, data.pages));
+    if (page.value > Math.max(1, unified.pages))
+      changePage(Math.max(1, unified.pages));
   } catch (e: any) {
     if (current === sequence) loadError.value = e.message || "无法读取运行记录";
   } finally {
@@ -92,7 +94,7 @@ async function loadDetail(silent = false) {
   detailBusy.value = true;
   try {
     const data = await api<AutomationRun>(
-      `/authors/reports/subscriptions/${runId.value}`,
+      runId.value.includes(":") ? `/platform-downloads/instagram/runs/${runId.value}` : `/authors/reports/subscriptions/${runId.value}`,
     );
     if (current === detailSequence) detail.value = data;
   } catch (e: any) {
@@ -102,7 +104,7 @@ async function loadDetail(silent = false) {
     if (current === detailSequence) detailBusy.value = false;
   }
 }
-function openRun(id: number) {
+function openRun(id: number | string) {
   authorSearch.value = "";
   onlyIssues.value = false;
   void router.replace({ query: { ...route.query, run: String(id) } });
@@ -152,6 +154,9 @@ async function copyDiagnostic() {
   }
 }
 function trigger(value?: string) {
+  if (value === "session") return "会话检测";
+  if (value === "history") return "历史补采";
+  if (value === "recent") return "增量检查";
   return value === "manual"
     ? "手动检查"
     : value === "reconcile"
@@ -215,7 +220,7 @@ onBeforeUnmount(() => {
         :disabled="busy || store.risk.active"
         @click="run()"
       >
-        <Zap :size="15" />{{ busy ? "提交中…" : "检查全部" }}
+        <Zap :size="15" />{{ busy ? "提交中…" : "检查抖音" }}
       </button>
     </PageHeader>
     <SubscriptionNavigation />
@@ -227,7 +232,7 @@ onBeforeUnmount(() => {
     </div>
     <section class="cycle-strip" aria-label="当前检查周期">
       <div>
-        <span class="eyebrow">当前周期</span
+        <span class="eyebrow">抖音检查周期</span
         ><strong>{{
           !loaded || cycle.active == null
             ? "状态未确认"
@@ -265,7 +270,7 @@ onBeforeUnmount(() => {
       <h2>运行历史</h2>
       <span
         >{{ loaded ? total.toLocaleString() + " 次运行" : "—" }} ·
-        抖音订阅</span
+        全部平台</span
       >
     </div>
     <StateView
@@ -283,6 +288,7 @@ onBeforeUnmount(() => {
             <th>时间 / 来源</th>
             <th>检查人数</th>
             <th>新作品</th>
+            <th>下载文件</th>
             <th>待续检</th>
             <th>耗时</th>
             <th>结果</th>
@@ -292,19 +298,20 @@ onBeforeUnmount(() => {
         <tbody>
           <tr
             v-for="report in reports"
-            :key="report.id"
-            :class="{ selected: runId === report.id }"
+            :key="report.key || report.id"
+            :class="{ selected: runId === String(report.key || report.id) }"
           >
             <td data-label="时间">
-              <button class="record-link" @click="openRun(report.id)">
+              <button class="record-link" @click="openRun(report.key || report.id)">
                 {{ dateTime(report.started_at) }}</button
-              ><span>{{ trigger(report.trigger_type) }}</span>
+              ><span>{{ report.platform === 'instagram' ? 'Instagram · ' + (report.content_kind || '') : '抖音 · ' }}{{ trigger(report.trigger_type) }}</span>
             </td>
             <td data-label="检查人数">
               {{ report.checked_authors
               }}<small> / {{ report.total_authors }}</small>
             </td>
             <td data-label="新作品">{{ report.new_works }}</td>
+            <td data-label="下载文件">{{ report.downloaded_files ?? '—' }}</td>
             <td data-label="待续检">{{ report.remaining_authors }}</td>
             <td data-label="耗时">
               {{
@@ -321,7 +328,7 @@ onBeforeUnmount(() => {
                 v-if="report.failed_authors + report.warning_authors"
                 class="text-button danger"
                 @click="
-                  openRun(report.id);
+                  openRun(report.key || report.id);
                   onlyIssues = true;
                 "
               >
@@ -366,6 +373,8 @@ onBeforeUnmount(() => {
             <dd>{{ detail.new_works }} 个</dd>
           </div>
           <div>
+            <dt>下载文件</dt><dd>{{ detail.downloaded_files ?? '—' }}</dd>
+          </div><div>
             <dt>待续检</dt>
             <dd>{{ detail.remaining_authors }} 位</dd>
           </div>
@@ -395,7 +404,7 @@ onBeforeUnmount(() => {
             <div>
               <RouterLink
                 v-if="item.author_id"
-                :to="`/authors/douyin?focus=${item.author_id}`"
+                :to="detail.platform === 'instagram' ? `/authors/instagram?author=${item.author_id}` : `/authors/douyin?focus=${item.author_id}`"
                 >{{ item.nickname || "作者 " + item.author_id }}</RouterLink
               ><strong v-else>{{ item.nickname || "作者未确认" }}</strong
               ><StatusIndicator :status="item.status" />

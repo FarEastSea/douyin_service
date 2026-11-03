@@ -139,7 +139,7 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
       {
         title: "调度周期",
         description: "启用自动检查，并限制允许配置的最短检查周期。",
-        envKeys: ["MIN_CHECK_INTERVAL"],
+        envKeys: ["MIN_CHECK_INTERVAL", "SUBSCRIPTION_RECORD_RETENTION_DAYS"],
         runtimeKeys: ["auto_check_enabled", "subscription_check_interval"],
       },
       {

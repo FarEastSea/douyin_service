@@ -18,12 +18,12 @@ type Stream = { id: number; content_kind: string; scan_mode: string; enabled: bo
 type Author = { id: number; username: string; nickname: string; external_user_id: string; avatar_url?: string; profile_url: string; is_subscribed: boolean; total_works: number; streams: Stream[] };
 const root = "/platform-downloads/instagram";
 const route = useRoute(), router = useRouter();
-const authors = ref<Author[]>([]), reports = ref<any[]>([]), works = ref<any[]>([]), collections = ref<any[]>([]);
+const authors = ref<Author[]>([]), works = ref<any[]>([]), collections = ref<any[]>([]);
 const loading = ref(false), busy = ref(false), error = ref(""), detailError = ref(""), notice = ref(""), updated = ref("");
 const page = ref(Number(route.query.page) || 1), pages = ref(1), total = ref(0), search = ref(String(route.query.q || "")), subscribed = ref(String(route.query.subscribed || ""));
 const selectedIds = ref<number[]>([]), detail = ref<Author>(), kinds = ref<string[]>([]), session = ref<any>();
 const workPage = ref(1), workPages = ref(1), workTotal = ref(0), collectionPage = ref(1), collectionPages = ref(1), collectionTotal = ref(0);
-const selected = computed(() => Number(route.query.author) || 0), reportsMode = computed(() => route.query.view === "reports");
+const selected = computed(() => Number(route.query.author) || 0);
 const contentLabels: Record<string, string> = { posts: "Posts", reels: "Reels", stories: "Stories", highlights: "Highlights" };
 const utc = (value?: string) => dateTime(value ? /Z$|[+-]\d\d:\d\d$/.test(value) ? value : value + "Z" : undefined);
 let timer: number | undefined, searchTimer: number | undefined, loadSequence = 0, detailSequence = 0;
@@ -35,11 +35,11 @@ async function load() {
   loading.value = true; error.value = "";
   try {
     const query = new URLSearchParams({ page: String(page.value), page_size: "20" });
-    if (search.value.trim() && !reportsMode.value) query.set("q", search.value.trim());
-    if (subscribed.value && !reportsMode.value) query.set("subscribed", subscribed.value);
-    const [data, account] = await Promise.all([api(`${root}/${reportsMode.value ? 'reports' : 'authors'}?${query}`), api(`${root}/session`)]);
+    if (search.value.trim()) query.set("q", search.value.trim());
+    if (subscribed.value) query.set("subscribed", subscribed.value);
+    const [data, account] = await Promise.all([api(`${root}/authors?${query}`), api(`${root}/session`)]);
     if (sequence !== loadSequence) return;
-    if (reportsMode.value) reports.value = data.items; else {
+    {
       authors.value = data.items;
       const refreshed = authors.value.find(a => a.id === detail.value?.id);
       if (refreshed && detail.value) detail.value = { ...detail.value, ...refreshed };
@@ -56,7 +56,7 @@ function changePage(value: number) { page.value = value; selectedIds.value = [];
 function openAdd() { window.dispatchEvent(new CustomEvent("app:new-download", { detail: { intent: "subscribe", platform: "instagram" } })); }
 function openAuthor(id: number) { void router.replace({ query: { ...route.query, author: String(id), view: undefined } }); }
 function closeAuthor() { void router.replace({ query: { ...route.query, author: undefined } }); }
-function switchView() { page.value = 1; void router.replace({ query: { view: reportsMode.value ? undefined : "reports" } }); }
+function switchView() { void router.push("/automation"); }
 async function loadDetail() {
   const id = selected.value, sequence = ++detailSequence;
   detail.value = undefined; detailError.value = "";
@@ -108,15 +108,14 @@ function delayLabel(stream: Stream) {
   return minutes > 1 ? `到期延迟 ${minutes} 分钟` : "下次 " + utc(stream.next_check_at);
 }
 watch(selected, () => void loadDetail(), { immediate: true });
-watch(reportsMode, () => { page.value = 1; selectedIds.value = []; void load(); });
 function authorsChanged() { void load(); }
-onMounted(() => { void load(); window.addEventListener("app:authors-changed", authorsChanged); timer = window.setInterval(() => { if (!document.hidden && !busy.value) void load(); }, 15000); });
+onMounted(() => { if (route.query.view === "reports") { void router.replace("/automation"); return; } void load(); window.addEventListener("app:authors-changed", authorsChanged); timer = window.setInterval(() => { if (!document.hidden && !busy.value) void load(); }, 15000); });
 onBeforeUnmount(() => { ++loadSequence; ++detailSequence; window.clearInterval(timer); window.clearTimeout(searchTimer); window.removeEventListener("app:authors-changed", authorsChanged); });
 </script>
 <template>
   <div class="workspace-page authors-page">
     <PageHeader title="Instagram 订阅" description="分批收集作品，查看实际检查进度与历史补采。" :busy="loading" :updated-at="updated" refreshable @refresh="load">
-      <button class="btn ghost" @click="switchView">{{ reportsMode ? '作者列表' : '运行记录' }}</button>
+      <button class="btn ghost" @click="switchView">运行记录</button>
       <button class="btn primary" @click="openAdd"><Plus :size="15" />订阅作者</button>
     </PageHeader>
     <SubscriptionNavigation />
@@ -126,14 +125,14 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; window.clearInterval(t
     </div>
     <p v-if="notice" role="status">{{ notice }}</p>
     <div v-if="error" class="load-error-banner" role="alert">{{ error }}</div>
-    <FilterToolbar v-if="!reportsMode" :active="subscribed ? '订阅状态' : ''" @clear="subscribed=''; search=''; filters()">
+    <FilterToolbar :active="subscribed ? '订阅状态' : ''" @clear="subscribed=''; search=''; filters()">
       <template #search><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索用户名、名称或 ID" aria-label="搜索 Instagram 作者" @input="searchInput" /></label></template>
       <select v-model="subscribed" aria-label="订阅状态" @change="filters"><option value="">全部作者</option><option value="true">已订阅</option><option value="false">已暂停</option></select>
       <button v-if="selectedIds.length" class="btn ghost" :disabled="busy" @click="mutate('/authors/batch', {ids:selectedIds,is_subscribed:false})">暂停所选 {{ selectedIds.length }} 位作者</button>
     </FilterToolbar>
-    <StateView v-if="reportsMode ? !reports.length : !authors.length" :loading="loading" :error="error" :title="reportsMode ? '尚无运行记录' : '尚无匹配的 Instagram 作者'" description="添加订阅后，身份解析、检查和历史补采会按预算分批执行。" @retry="load" />
+    <StateView v-if="!authors.length" :loading="loading" :error="error" title="尚无匹配的 Instagram 作者" description="添加订阅后，身份解析、检查和历史补采会按预算分批执行。" @retry="load" />
     <div v-else class="table-shell">
-      <table v-if="!reportsMode" class="data-table author-table">
+      <table class="data-table author-table">
         <thead><tr><th><input type="checkbox" aria-label="选择本页全部作者" :checked="authors.length > 0 && authors.every(a => selectedIds.includes(a.id))" @change="selectedIds = ($event.target as HTMLInputElement).checked ? authors.map(a=>a.id) : []" /></th><th>作者</th><th>作品</th><th>订阅与进度</th><th class="actions-col">操作</th></tr></thead>
         <tbody><tr v-for="author in authors" :key="author.id" :class="{selected:selected===author.id}">
           <td><input v-model="selectedIds" type="checkbox" :value="author.id" :aria-label="'选择 '+author.username" /></td>
@@ -143,9 +142,6 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; window.clearInterval(t
           <td><button class="text-button" @click="openAuthor(author.id)">查看详情</button></td>
         </tr></tbody>
       </table>
-      <table v-else class="data-table"><thead><tr><th>时间</th><th>内容</th><th>新增 / 保存文件</th><th>结果</th><th>任务</th></tr></thead><tbody><tr v-for="run in reports" :key="run.id">
-        <td>{{ utc(run.started_at) }}</td><td>{{ contentLabels[run.content_kind] || run.content_kind }} · {{ run.scan_mode==='history' ? '历史补采' : '新增检查' }}</td><td>{{ run.discovered }} / {{ run.saved }}</td><td><StatusIndicator :status="run.status" /><p class="field-help">{{ run.message }}</p></td><td><RouterLink v-if="run.task_id" :to="{path:'/operations/tasks',query:{task_key:`instagram:${run.task_id}`}}">查看任务</RouterLink></td>
-      </tr></tbody></table>
     </div>
     <Pager :page="page" :pages="pages" :total="total" @change="changePage" />
     <InspectorPanel :open="Boolean(selected)" :title="detail?.nickname || 'Instagram 作者'" :subtitle="detail ? '@'+detail.username : ''" @close="closeAuthor">

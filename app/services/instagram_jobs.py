@@ -76,6 +76,9 @@ def dispatch_due(db):
     if not lock.acquire(blocking=False):
         return {"dispatched": 0}
     try:
+        from app.services.subscription_records import cleanup_records
+
+        cleanup_records(db)
         now, current = utcnow(), settings.snapshot()
         # 已登记但未开始的消息同样占用通道；故障回收只针对过期本项目任务。
         inflight = list(

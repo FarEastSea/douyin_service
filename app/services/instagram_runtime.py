@@ -168,7 +168,10 @@ def readiness(db):
         else "unchecked",
         "validated_at": row.validated_at,
         "cooldown_until": row.cooldown_until,
-        "last_error": row.last_error,
+        "last_error": None
+        if row.status == "ready" and row.cooldown_until and row.cooldown_until <= now
+        else row.last_error,
+        "cooling": bool(row.cooldown_until and row.cooldown_until > now),
         "hourly_used": count(3600),
         "daily_used": count(86400),
         "enabled": settings.snapshot().INSTAGRAM_ENABLED,

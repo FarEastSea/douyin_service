@@ -699,7 +699,8 @@ async def unified_tasks(
     platform_ids = known_platforms - {"douyin", "x"}
     generic_ids = platform_ids if not wanted else ({wanted} if wanted in platform_ids else set())
     if generic_ids:
-        base_conditions = [PlatformDownloadTask.platform.in_(generic_ids)]
+        base_conditions = [PlatformDownloadTask.platform.in_(generic_ids),
+            or_(PlatformDownloadTask.platform != "instagram", PlatformDownloadTask.source_type == "work")]
         if located_id:
             base_conditions.append(PlatformDownloadTask.id == located_id)
         if search:
