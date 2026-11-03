@@ -78,6 +78,16 @@ async def get_platform_credential_status(db, platform: str, env_key: str) -> dic
 async def save_platform_cookie(db, platform: str, cookie: str) -> dict:
     normalized = str(platform).strip().lower()
     clean_cookie = str(cookie or "").strip()
+    if normalized == "instagram":
+        from app.services.instagram_runtime import normalize_cookie
+        from app.models.models import InstagramAccountState
+        clean_cookie = normalize_cookie(clean_cookie)
+        state = await db.get(InstagramAccountState, 1)
+        if state is None:
+            state = InstagramAccountState(id=1)
+            db.add(state)
+        state.status, state.validated_fingerprint = "unchecked", None
+        state.last_error = "会话已更新，请等待检测完成"
     if not normalized or not clean_cookie:
         raise ValueError("平台和 Cookie 不能为空")
     row = await db.scalar(

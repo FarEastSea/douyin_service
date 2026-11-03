@@ -4,7 +4,7 @@
 
 | 现有能力 | 新入口 | 接口 / 规则 | 验收场景 |
 |---|---|---|---|
-| 六平台下载 | 顶栏新建、任务页主要操作 | /tasks/download、/x/download、/platform-downloads/{platform}/download | 识别来源、单条与主页边界、提交后定位任务 |
+| 七平台下载 | 顶栏新建、任务页主要操作 | /tasks/download、/x/download、/platform-downloads/{platform}/download | 识别来源、单条与主页边界、提交后定位任务 |
 | 跨平台队列 | 任务，默认媒体列表 / 可切表格 | /operations/tasks | q / platform / status / sort / page 深链；刷新保持列表 |
 | 全平台媒体库 | 媒体库 | /operations/media、媒体缩略图与原预览接口 | 资源分页、筛选、文件缺失、连续本页预览、关联任务与作者 |
 | 任务详情 | 任务 Inspector | /operations/tasks/{platform}/{id} | 文件、进度、来源、错误与平台日志按需读取 |
@@ -14,6 +14,8 @@
 | 记录删除 | 任务 Inspector / 批处理 | 原任务 DELETE、统一 actions | 保留磁盘文件；统一失败批处理继续保护部分下载记录 |
 | 预览与互动趋势 | 任务 / 作品 Inspector | 原 preview / media / stats | 本地预览、不可用反馈、统计指标与快照 |
 | 作者订阅 | 订阅 / 抖音作者与 X 作者 | /authors、/x/authors 的 subscribe / unsubscribe | 开关反馈、平台能力差异、X 服务端检索 |
+| Instagram 订阅与分片历史 | 订阅 / Instagram | /platform-downloads/instagram/authors、subscription、scan、history、reports | 分类开关、分页断点、已索引量与待发现估计、实际延期、批量暂停；默认关闭，真实账号待验收 |
+| Instagram 会话和调度设置 | 设置 / Instagram | config/all、Instagram config/cookie、connection、session/test | 文本与文件导入、加密不回显、固定出口、动态预算、冷却与人工验证提示 |
 | 抖音作者作品 | 作者菜单、作者 Inspector | /authors/{id}/works | 分页、搜索、状态、类型、时间与排序；完整浏览 |
 | 作者资料历史与同步 | 作者 Inspector | profile-history、sync-avatar | 名称 / 头像变化、低频资料同步 |
 | 作者自动化配置与轨迹 | 作者 Inspector | auto-update、作者 PUT | 有效间隔、下一次预计检查、运行反向定位；X 沿用已有间隔，不虚构编辑能力 |
@@ -44,6 +46,8 @@
 本地浏览器采用拦截接口的明确演示数据，验证组件、深链、焦点、移动布局、保护和反馈；不执行生产下载、删除、通知或维护。实际下载链路、长时间性能、屏幕阅读器及线上动态配置仍需在真实环境验收后再移除旧入口。临时验证文件位于忽略目录，验证结束删除，不提交。
 
 ## 当前验证记录
+
+Instagram 本地验收覆盖固定版 gallery-dl 解析合成数据、稳定 ID 去重、轮播缺项恢复、Stories/Highlights 重叠、分片断点、300位作者调度、会话熔断、取消与重试、增量迁移、批次预览及视频 Range 请求，共38项检查通过。生产资源重新构建；1440px 和390px 浏览器验证了作者详情、内容开关、立即检查、订阅提交、运行记录、配置与 Cookie 文件导入。Instagram 默认关闭，当前没有真实采集账号；各内容类型、私密权限及生产发布验收仍待完成。
 
 本轮类型检查和生产构建通过。隔离浏览器验证覆盖 390–2560px 深浅主题、媒体连续预览、桌面并排与手机全屏详情、键盘焦点，以及慢请求保存期间继续编辑。设置控制器另以合成接口验证部分保存失败、提交快照、取消目录迁移、过期响应及写入超时不重复提交。生产下载、外部平台请求、删除与维护仍需真实环境验收。
 

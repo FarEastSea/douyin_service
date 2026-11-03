@@ -218,6 +218,7 @@ export function useSettingsController(props: {
           "account-weibo": "WEIBO",
           "account-bilibili": "BILIBILI",
           "account-xhs": "XHS",
+          "account-instagram": "INSTAGRAM",
         }) as Record<string, string>
       )[activePage.value.id] || "",
   );

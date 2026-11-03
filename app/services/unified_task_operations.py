@@ -159,6 +159,23 @@ async def _cancel_platform(db: AsyncSession, platform: str, task_id: int) -> Non
     task.celery_task_id = None
     if old_token:
         await asyncio.to_thread(redis_client.clear_external_attempt, platform, task.id, old_token)
+    if platform == "instagram":
+        from datetime import timedelta
+        from app.models.models import PlatformSubscriptionState
+        from app.services.instagram_jobs import options_for
+        from app.services.instagram_runtime import utcnow
+        from app.services.instagram_store import interval_for
+        state_id = options_for(task).get("state_id")
+        state = await db.get(PlatformSubscriptionState, state_id) if state_id else None
+        if state and state.scan_mode == "history":
+            states = (await db.scalars(select(PlatformSubscriptionState).where(PlatformSubscriptionState.author_id == state.author_id, PlatformSubscriptionState.scan_mode == "history"))).all()
+            for stream in states:
+                stream.enabled = stream.manual = False
+                stream.deferred_reason = "历史任务已取消，补采已暂停"
+        elif state:
+            state.manual = False
+            state.next_check_at = utcnow() + timedelta(seconds=interval_for(state.content_kind))
+            state.deferred_reason = "本次检查已取消，等待下个周期"
     await db.commit()
 
 
@@ -173,6 +190,22 @@ async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None
     prepare_platform_task_for_retry(task)
     await asyncio.to_thread(redis_client.delete_platform_task_state, platform, task.id)
     await asyncio.to_thread(redis_client.delete_platform_task_pid, platform, task.id)
+    if platform == "instagram":
+        from app.tasks.platform_download_tasks import dispatch_instagram
+        import json
+        options = json.loads(task.instagram_options or "{}")
+        options.pop("not_before", None)
+        from app.models.models import PlatformSubscriptionState
+        from app.services.instagram_runtime import utcnow
+        state_id = options.get("state_id")
+        state = await db.get(PlatformSubscriptionState, state_id) if state_id else None
+        if state:
+            state.enabled = state.manual = True
+            state.next_check_at, state.deferred_reason = utcnow(), None
+        task.instagram_options = json.dumps(options)
+        await db.commit()
+        await asyncio.to_thread(dispatch_instagram.delay)
+        return
     await db.commit()
     await _dispatch_or_fail(
         db, task, download_platform_profile, f"任务队列暂不可用，{platform} 任务未重新投递",

@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from sqlalchemy import BigInteger, Integer, case, cast, func, literal, or_, select, union_all
 
-from app.models.models import Author, DownloadTask, PlatformDownloadTask, PlatformMediaAsset, Work, XDownloadTask, XMediaAsset
+from app.models.models import Author, DownloadTask, PlatformDownloadTask, PlatformMediaAsset, PlatformWork, Work, XDownloadTask, XMediaAsset
 from app.services.media_paths import resolve_media_path
 
 
-PLATFORMS = {"douyin", "x", "tiktok", "weibo", "bilibili", "xhs"}
+PLATFORMS = {"douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v", ".mkv"}
 
 
@@ -56,8 +56,8 @@ def media_query(*, platform: str = "", media_type: str = "", search: str = "", a
     if not platform or platform not in {"douyin", "x"}:
         generic = select(
             PlatformMediaAsset.platform.label("platform"), PlatformMediaAsset.id.label("id"),
-            PlatformMediaAsset.task_id.label("task_id"), cast(literal(None), Integer).label("work_id"),
-            cast(literal(None), Integer).label("author_id"), PlatformMediaAsset.author_name.label("author_name"),
+            PlatformMediaAsset.task_id.label("task_id"), PlatformMediaAsset.work_id.label("work_id"),
+            PlatformWork.author_id.label("author_id"), PlatformMediaAsset.author_name.label("author_name"),
             PlatformMediaAsset.title.label("title"), PlatformMediaAsset.filename.label("filename"),
             PlatformMediaAsset.file_path.label("file_path"), PlatformMediaAsset.media_type.label("media_type"),
             cast(PlatformMediaAsset.size_bytes, BigInteger).label("file_size"),
@@ -66,6 +66,7 @@ def media_query(*, platform: str = "", media_type: str = "", search: str = "", a
             PlatformMediaAsset.published_at.label("published_at"), PlatformMediaAsset.width.label("width"),
             PlatformMediaAsset.height.label("height"), PlatformMediaAsset.duration_ms.label("duration_ms"),
         ).join(PlatformDownloadTask, PlatformDownloadTask.id == PlatformMediaAsset.task_id)
+        generic = generic.outerjoin(PlatformWork, PlatformWork.id == PlatformMediaAsset.work_id)
         generic = generic.where(PlatformMediaAsset.platform.in_(PLATFORMS - {"douyin", "x"}))
         if platform:
             generic = generic.where(PlatformMediaAsset.platform == platform)

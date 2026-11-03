@@ -29,6 +29,7 @@ _DOWNLOAD_PATH_ENV_KEYS = {
     "DOWNLOAD_ROOT", "DOWNLOAD_DIR", "X_DOWNLOAD_DIR",
     "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR", "TIKTOK_DOWNLOAD_SUBDIR",
     "WEIBO_DOWNLOAD_SUBDIR", "BILIBILI_DOWNLOAD_SUBDIR", "XHS_DOWNLOAD_SUBDIR",
+    "INSTAGRAM_DOWNLOAD_SUBDIR",
 }
 _DOWNLOAD_ENGINE_VALUES = {
     "X_DOWNLOAD_ENGINE": "gallery-dl",
@@ -36,6 +37,7 @@ _DOWNLOAD_ENGINE_VALUES = {
     "WEIBO_DOWNLOAD_ENGINE": "gallery-dl",
     "BILIBILI_DOWNLOAD_ENGINE": "yt-dlp",
     "XHS_DOWNLOAD_ENGINE": "xhs-api",
+    "INSTAGRAM_DOWNLOAD_ENGINE": "gallery-dl",
 }
 
 
@@ -135,6 +137,24 @@ ENV_FIELDS: List[EnvField] = [
 ]
 
 FIELD_MAP = {field.key: field for field in ENV_FIELDS}
+for _key, _label, _default, _help in (
+    ("INSTAGRAM_ENABLED", "启用 Instagram 采集", "false", "先导入并检测会话，再开启下载与自动订阅"),
+    ("INSTAGRAM_DOWNLOAD_SUBDIR", "Instagram 子目录", "Instagram", "根目录下的相对子目录"),
+    ("INSTAGRAM_DOWNLOAD_ENGINE", "Instagram 下载引擎", "gallery-dl", "固定使用受控 gallery-dl 运行器"),
+    ("INSTAGRAM_COOKIE", "Instagram Cookie", "", "通过账号页加密保存"),
+    ("INSTAGRAM_REQUEST_DELAY_MIN", "请求最短间隔（秒）", "8", "所有 Instagram 请求共享节奏"),
+    ("INSTAGRAM_REQUEST_DELAY_MAX", "请求最长间隔（秒）", "15", "随机间隔上限；不低于最短间隔"),
+    ("INSTAGRAM_HOURLY_BUDGET", "每小时接口预算", "60", "滚动一小时，包含引擎内部重试和分页"),
+    ("INSTAGRAM_DAILY_BUDGET", "每日接口预算", "500", "滚动24小时；耗尽后保存断点等待"),
+    ("INSTAGRAM_CHECK_INTERVAL", "Posts/Reels 检查周期（秒）", "21600", "默认每6小时检查新增"),
+    ("INSTAGRAM_STORIES_INTERVAL", "Stories 检查周期（秒）", "21600", "仅对开启 Stories 的作者生效；过期内容无法补回"),
+    ("INSTAGRAM_HIGHLIGHTS_INTERVAL", "Highlights 检查周期（秒）", "86400", "仅对开启精选的作者生效"),
+    ("INSTAGRAM_BATCH_ITEMS", "每片最多作品数", "50", "分片到达上限后保存断点续跑"),
+    ("INSTAGRAM_BATCH_SECONDS", "每片最多运行秒数", "600", "必须低于 Celery 软超时"),
+):
+    _field = EnvField(key=_key, label=_label, group="Instagram", default=_default, help=_help, secret=_key == "INSTAGRAM_COOKIE")
+    ENV_FIELDS.append(_field)
+    FIELD_MAP[_key] = _field
 
 
 def get_env_file_signature() -> tuple[int, int, int]:
@@ -314,6 +334,7 @@ def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]
             "DOUYIN_DOWNLOAD_SUBDIR", "X_DOWNLOAD_SUBDIR",
             "TIKTOK_DOWNLOAD_SUBDIR", "WEIBO_DOWNLOAD_SUBDIR", "BILIBILI_DOWNLOAD_SUBDIR",
             "XHS_DOWNLOAD_SUBDIR",
+            "INSTAGRAM_DOWNLOAD_SUBDIR",
         ):
             value = str(values.get(key) or "").strip()
             if not value:

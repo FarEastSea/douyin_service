@@ -198,6 +198,11 @@ def download_platform_profile(self, task_id: int):
             return {"success": False, "error": "平台下载任务不存在"}
         bind_download_attempt(db, task_id, self.request.id, PlatformDownloadTask)
 
+        if task.platform == "instagram":
+            platform_id = "instagram"
+            from app.services.instagram_jobs import execute_instagram_task
+            return execute_instagram_task(self, db, task)
+
         spec = get_profile_platform_spec(task.platform)
         platform_id = task.platform
         if platform_id == "xhs" and task.source_type == "profile":
@@ -432,6 +437,16 @@ def download_platform_profile(self, task_id: int):
                 redis_client.clear_external_attempt(platform_id, task_id, self.request.id)
             except Exception:
                 pass
+        db.close()
+
+
+@celery_app.task(name="app.tasks.platform_download_tasks.dispatch_instagram")
+def dispatch_instagram():
+    from app.services.instagram_jobs import dispatch_due
+    db = get_sync_db()
+    try:
+        return dispatch_due(db)
+    finally:
         db.close()
 
 

@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from "vue-router";
 const AuthorsView = () => import("./views/AuthorsView.vue");
+const InstagramAuthorsView = () => import("./views/InstagramAuthorsView.vue");
 const WorksView = () => import("./views/WorksView.vue");
 const UpdatesView = () => import("./views/UpdatesView.vue");
 const SettingsView = () => import("./views/SettingsView.vue");
@@ -24,7 +25,7 @@ function legacySettingsRedirect(
 ) {
   const requestedPlatform = platform || String(query.platform || "");
   if (
-    ["douyin", "x", "tiktok", "weibo", "bilibili", "xhs"].includes(
+    ["douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"].includes(
       requestedPlatform,
     )
   ) {
@@ -56,6 +57,7 @@ export const router = createRouter({
     { path: "/dashboard", component: DashboardView },
     { path: "/library", component: MediaLibraryView },
     { path: "/subscriptions", redirect: "/authors/douyin" },
+    { path: "/authors/instagram", component: InstagramAuthorsView },
     { path: "/operations/tasks", component: UnifiedTasksView },
     {
       path: "/operations/maintenance",

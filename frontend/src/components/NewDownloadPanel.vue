@@ -83,6 +83,7 @@ const options = computed(() =>
         { id: "weibo", name: "微博" },
         { id: "bilibili", name: "B站" },
         { id: "xhs", name: "小红书" },
+        { id: "instagram", name: "Instagram" },
       ] as MediaPlatform[]),
 );
 const platform = computed(
@@ -99,9 +100,9 @@ const blocked = computed(() => {
   if (
     mode.value === "subscribe" &&
     platform.value &&
-    !["douyin", "x"].includes(platform.value)
+    !["douyin", "x", "instagram"].includes(platform.value)
   )
-    return "目前支持订阅抖音和 X 作者，请粘贴对应的作者主页。";
+    return "目前支持订阅抖音、X 和 Instagram 作者，请粘贴对应的作者主页。";
   if (mode.value === "subscribe" && kind.value === "work")
     return "这是作品链接。订阅请使用作者主页，或切换到下载作品。";
   if (platform.value === "xhs" && kind.value === "author")
@@ -217,7 +218,13 @@ async function submit() {
       error.value = "未能识别平台，请在下方选择平台后提交。";
       return;
     }
-    if (mode.value === "subscribe") {
+    if (mode.value === "subscribe" && target === "instagram") {
+      const result = await api<any>("/platform-downloads/instagram/authors", {
+        method: "POST", ...jsonBody({ source }),
+      });
+      success.value = { message: result.message, path: "/operations/tasks", query: { platform: "instagram", task_key: `instagram:${result.task_id}` } };
+      window.dispatchEvent(new CustomEvent("app:authors-changed", { detail: { platform: target } }));
+    } else if (mode.value === "subscribe") {
       const author = await api<any>(
         target === "x" ? "/x/authors/" : "/authors/",
         {
@@ -275,7 +282,7 @@ async function submit() {
           : `/platform-downloads/${target}/download`,
         {
           method: "POST",
-          ...jsonBody(target === "x" ? { profile_url: source } : { source }),
+          ...jsonBody(target === "x" ? { profile_url: source } : target === "instagram" ? { source, allow_profile: kind.value === "author" } : { source }),
         },
       );
       success.value = {
@@ -293,7 +300,7 @@ async function submit() {
   } catch (reason: any) {
     error.value = reason.message || "提交失败，请稍后重试。";
     if (reason.code === "author_link_requires_confirmation") {
-      found.value = { platform_id: "douyin", input_kind: "author" };
+      found.value = { platform_id: platform.value || "douyin", input_kind: "author" };
     }
   } finally {
     submitting.value = false;
@@ -421,7 +428,7 @@ onBeforeUnmount(() => {
             "
             :placeholder="
               mode === 'subscribe'
-                ? '粘贴作者分享链接，也支持 X 用户名'
+                ? '粘贴作者分享链接，也支持 X、Instagram 用户名'
                 : '直接粘贴复制的整段分享内容'
             "
             @keydown.enter.exact="submitFromKeyboard"
@@ -467,7 +474,7 @@ onBeforeUnmount(() => {
             <option
               v-for="item in options.filter(
                 (item) =>
-                  mode !== 'subscribe' || ['douyin', 'x'].includes(item.id),
+                  mode !== 'subscribe' || ['douyin', 'x', 'instagram'].includes(item.id),
               )"
               :key="item.id"
               :value="item.id"
@@ -480,7 +487,7 @@ onBeforeUnmount(() => {
           v-if="mode === 'download' && kind === 'author' && !blocked"
           class="capture-profile-note"
         >
-          这是作者主页，提交会扫描该作者作品并创建下载任务。<button
+          {{ platform === 'instagram' ? '这是作者主页，提交会分批下载 Posts/Reels 的全部可访问历史。' : '这是作者主页，提交会扫描该作者作品并创建下载任务。' }}<button
             type="button"
             class="text-button"
             :disabled="submitting"

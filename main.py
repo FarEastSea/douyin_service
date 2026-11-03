@@ -77,7 +77,7 @@ async def activate_runtime(app: FastAPI) -> bool:
         await asyncio.to_thread(recover_legacy_signature_isolation_sync)
         stage = "route_registration"
         if not getattr(app.state, "runtime_routes_loaded", False):
-            for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "platform_downloads", "operations"):
+            for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "instagram", "platform_downloads", "operations"):
                 module = importlib.import_module("app.api." + name)
                 app.include_router(module.router, prefix="/api")
             app.state.runtime_routes_loaded = True

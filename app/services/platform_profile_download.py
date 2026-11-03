@@ -59,6 +59,12 @@ class ResolvedPlatformInput:
 
 
 PROFILE_PLATFORM_SPECS = {
+    "instagram": ProfilePlatformSpec(
+        id="instagram", name="Instagram", cookie_domain=".instagram.com",
+        cookie_env_key="INSTAGRAM_COOKIE", cookie_file_env_key="INSTAGRAM_COOKIE_FILE",
+        engine_env_key="INSTAGRAM_DOWNLOAD_ENGINE", download_subdir_env_key="INSTAGRAM_DOWNLOAD_SUBDIR",
+        default_download_subdir="Instagram", default_engine="gallery-dl",
+    ),
     "tiktok": ProfilePlatformSpec(
         id="tiktok",
         name="TikTok",
@@ -123,6 +129,9 @@ def resolve_platform_input(platform: str, raw_input: str) -> ResolvedPlatformInp
         raise ValueError(f"请输入 {spec.name} 用户主页、用户名或单条作品链接")
     if spec.id == "tiktok":
         return _resolve_tiktok_input(value)
+    if spec.id == "instagram":
+        from app.services.instagram_input import resolve_instagram_input
+        return resolve_instagram_input(value)
     if spec.id == "weibo":
         return _resolve_weibo_input(value)
     if spec.id == "bilibili":

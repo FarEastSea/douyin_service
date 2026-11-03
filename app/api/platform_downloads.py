@@ -3,12 +3,11 @@
 import asyncio
 import os
 import signal
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,6 +18,7 @@ from app.models.models import (
     PlatformAuthor,
     PlatformDownloadTask,
     PlatformMediaAsset,
+    PlatformTaskWork,
     PlatformWork,
 )
 from app.models.schemas import (
@@ -202,10 +202,13 @@ async def list_media(
     ))).scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    media_condition = PlatformMediaAsset.task_id == task.id
+    if platform == "instagram":
+        media_condition = or_(media_condition, PlatformMediaAsset.work_id.in_(select(PlatformTaskWork.work_id).where(PlatformTaskWork.task_id == task.id)))
     statement = (
         select(PlatformMediaAsset)
-        .where(PlatformMediaAsset.task_id == task.id)
-        .order_by(PlatformMediaAsset.created_at, PlatformMediaAsset.id)
+        .where(media_condition)
+        .order_by(PlatformMediaAsset.work_id, PlatformMediaAsset.media_index, PlatformMediaAsset.created_at, PlatformMediaAsset.id)
     )
     if page is not None:
         statement = statement.offset((page - 1) * page_size).limit(page_size)
@@ -234,7 +237,7 @@ async def list_media(
     ) for item in assets]
     if page is None:
         return items
-    total = int(await db.scalar(select(func.count(PlatformMediaAsset.id)).where(PlatformMediaAsset.task_id == task_id)) or 0)
+    total = int(await db.scalar(select(func.count(PlatformMediaAsset.id)).where(media_condition)) or 0)
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size)}
 
@@ -325,7 +328,11 @@ async def delete_task(platform: str, task_id: int, db: AsyncSession = Depends(ge
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     if task.status in ACTIVE_PLATFORM_TASK_STATUSES:
-        await asyncio.to_thread(_kill_task, spec.id, task.id)
+        if spec.id == "instagram":
+            await operate_task(db, f"instagram:{task.id}", "cancel")
+            await db.refresh(task)
+        else:
+            await asyncio.to_thread(_kill_task, spec.id, task.id)
     await asyncio.to_thread(_clear_runtime, spec.id, task.id, True)
     await db.delete(task)
     await db.commit()

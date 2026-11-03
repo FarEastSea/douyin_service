@@ -64,6 +64,10 @@ celery_app.conf.update(
     
     # 定时任务配置 (Celery Beat)
     beat_schedule={
+        "instagram-dispatch-minute": {
+            "task": "app.tasks.platform_download_tasks.dispatch_instagram",
+            "schedule": crontab(minute="*"),
+        },
         "check-subscriptions-runtime": {
             "task": "app.tasks.download_tasks.check_subscriptions",
             "schedule": crontab(minute=0),

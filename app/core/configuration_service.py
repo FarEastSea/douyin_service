@@ -134,6 +134,12 @@ async def _save_configuration(db: AsyncSession, values: dict, *, preview: bool =
             raise field_error(key, str(exc)) from exc
     from app.core.env_config import _check_database, _check_redis
     connection_values = {**(await asyncio.to_thread(settings.snapshot)).model_dump(), **updates}
+    if {"INSTAGRAM_REQUEST_DELAY_MIN", "INSTAGRAM_REQUEST_DELAY_MAX"} & set(updates):
+        try:
+            if float(connection_values["INSTAGRAM_REQUEST_DELAY_MAX"]) < float(connection_values["INSTAGRAM_REQUEST_DELAY_MIN"]):
+                raise field_error("INSTAGRAM_REQUEST_DELAY_MAX", "最长请求间隔不能小于最短请求间隔")
+        except (TypeError, ValueError):
+            raise field_error("INSTAGRAM_REQUEST_DELAY_MAX", "请求间隔必须是有效数字") from None
     from app.core.config import Settings
     try:
         Settings.model_validate(connection_values)

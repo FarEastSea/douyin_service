@@ -26,14 +26,17 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.models.database import Base
 import json
-from datetime import datetime
-
+from datetime import datetime, timezone
 from app.models.work_media import (
     normalize_image_urls,
     normalize_optional_urls,
     prepare_image_urls_for_storage,
     prepare_optional_urls_for_storage,
 )
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Author(Base):
@@ -441,6 +444,7 @@ class PlatformDownloadTask(Base):
     source_key = Column(String(255), nullable=False)
     source_url = Column(Text, nullable=False)
     source_type = Column(String(16), nullable=False, default="profile")
+    instagram_options = Column(Text)
     status = Column(String(16), default="pending", index=True)
     phase = Column(String(32), default="queued")
     engine_name = Column(String(32), default="gallery-dl")
@@ -468,6 +472,7 @@ class PlatformMediaAsset(Base):
     """通用平台任务下载得到的本地媒体资源。"""
     __tablename__ = "platform_media_assets"
     __table_args__ = (
+        Index("uq_platform_media_identity", "platform", "external_media_id", unique=True),
         Index("idx_platform_media_task", "task_id", "created_at"),
         Index("idx_platform_media_platform", "platform", "created_at"),
     )
@@ -479,6 +484,9 @@ class PlatformMediaAsset(Base):
         nullable=False,
     )
     platform = Column(String(32), nullable=False, index=True)
+    work_id = Column(Integer, ForeignKey("platform_works.id", ondelete="SET NULL"), nullable=True)
+    external_media_id = Column(String(255), nullable=True)
+    media_index = Column(Integer, default=0)
     media_type = Column(String(16), nullable=False)
     file_path = Column(Text, nullable=False)
     filename = Column(Text, nullable=False)
@@ -538,6 +546,7 @@ class PlatformAuthor(Base):
     profile_url = Column(Text, nullable=False)
     nickname = Column(String(255))
     red_id = Column(String(255))
+    username = Column(String(255))
     avatar_url = Column(Text)
     description = Column(Text)
     account_status = Column(String(32), default="unknown", nullable=False, index=True)
@@ -579,6 +588,9 @@ class PlatformWork(Base):
     xsec_token = Column(Text)
     title = Column(Text)
     work_type = Column(String(16), default="unknown", nullable=False)
+    content_kind = Column(String(16))
+    expires_at = Column(DateTime)
+    expected_media_count = Column(Integer)
     cover_url = Column(Text)
     published_at = Column(DateTime)
     is_pinned = Column(Boolean, default=False, nullable=False)
@@ -586,6 +598,13 @@ class PlatformWork(Base):
     last_seen_at = Column(DateTime, default=datetime.now, nullable=False)
 
     author = relationship("PlatformAuthor", back_populates="works")
+
+
+class PlatformTaskWork(Base):
+    """扫描批次与稳定作品的关联；媒体仍仅属于一个作品和保存任务。"""
+    __tablename__ = "platform_task_works"
+    task_id = Column(Integer, ForeignKey("platform_download_tasks.id", ondelete="CASCADE"), primary_key=True)
+    work_id = Column(Integer, ForeignKey("platform_works.id", ondelete="CASCADE"), primary_key=True)
 
 
 class PlatformCredential(Base):
@@ -598,6 +617,83 @@ class PlatformCredential(Base):
     cookie_fingerprint = Column(String(16), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class InstagramAccountState(Base):
+    """单个采集会话的持久化熔断、固定出口与请求时间。"""
+    __tablename__ = "instagram_account_state"
+    id = Column(Integer, primary_key=True, default=1)
+    encrypted_proxy = Column(Text)
+    status = Column(String(32), default="unchecked", nullable=False)
+    validated_fingerprint = Column(String(64))
+    last_error = Column(Text)
+    validated_at = Column(DateTime)
+    cooldown_until = Column(DateTime)
+    next_request_at = Column(DateTime)
+    risk_count = Column(Integer, default=0, nullable=False)
+
+
+class InstagramRequest(Base):
+    """只记录时间与请求类别，不保存 URL、请求头或响应体。"""
+    __tablename__ = "instagram_requests"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    requested_at = Column(DateTime, nullable=False, index=True)
+
+
+class PlatformSubscriptionState(Base):
+    __tablename__ = "platform_subscription_states"
+    __table_args__ = (
+        UniqueConstraint("author_id", "content_kind", "scan_mode", name="uq_platform_subscription_stream"),
+        Index("idx_platform_subscription_due", "enabled", "next_check_at"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    author_id = Column(Integer, ForeignKey("platform_authors.id", ondelete="CASCADE"), nullable=False)
+    content_kind = Column(String(16), nullable=False)
+    scan_mode = Column(String(16), nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    manual = Column(Boolean, default=False, nullable=False)
+    checkpoint = Column(Text, default="{}", nullable=False)
+    next_check_at = Column(DateTime, default=_utcnow, nullable=False)
+    last_check_at = Column(DateTime)
+    last_success_at = Column(DateTime)
+    history_complete = Column(Boolean, default=False, nullable=False)
+    estimated_total = Column(Integer)
+    deferred_reason = Column(String(255))
+    task_id = Column(Integer, ForeignKey("platform_download_tasks.id", ondelete="SET NULL"))
+
+
+class PlatformSubscriptionRun(Base):
+    """每个分片一条运行记录，扫描与媒体下载完成状态分离。"""
+    __tablename__ = "platform_subscription_runs"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    author_id = Column(Integer, ForeignKey("platform_authors.id", ondelete="SET NULL"))
+    state_id = Column(Integer, ForeignKey("platform_subscription_states.id", ondelete="SET NULL"))
+    task_id = Column(Integer, ForeignKey("platform_download_tasks.id", ondelete="SET NULL"))
+    content_kind = Column(String(16))
+    scan_mode = Column(String(16))
+    status = Column(String(32), default="running", nullable=False)
+    discovered = Column(Integer, default=0, nullable=False)
+    saved = Column(Integer, default=0, nullable=False)
+    message = Column(Text)
+    started_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
+    finished_at = Column(DateTime)
+
+
+class InstagramCollection(Base):
+    __tablename__ = "instagram_collections"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    external_id = Column(String(255), nullable=False, unique=True)
+    author_id = Column(Integer, ForeignKey("platform_authors.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(255))
+    last_seen_at = Column(DateTime, default=_utcnow, nullable=False)
+
+
+class InstagramCollectionItem(Base):
+    __tablename__ = "instagram_collection_items"
+    collection_id = Column(Integer, ForeignKey("instagram_collections.id", ondelete="CASCADE"), primary_key=True)
+    work_id = Column(Integer, ForeignKey("platform_works.id", ondelete="CASCADE"), primary_key=True)
+    position = Column(Integer, default=0, nullable=False)
 
 
 class SystemConfig(Base):

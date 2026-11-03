@@ -16,6 +16,7 @@ import {
 } from "@lucide/vue";
 import StatusIndicator from "./StatusIndicator.vue";
 import IssueDetail from "./IssueDetail.vue";
+import InstagramConnectionPanel from "./InstagramConnectionPanel.vue";
 import type { SettingsController } from "../composables/useSettingsController";
 const componentProps = defineProps<{ controller: SettingsController }>();
 const {
@@ -306,6 +307,7 @@ const {
       </section>
     </section>
 
+    <InstagramConnectionPanel v-if="activePlatform?.id === 'instagram'" @cookie="platformCookieValues.instagram = $event" />
     <section
       v-if="activePage.id === 'account-x' || activePlatform"
       class="account-page"

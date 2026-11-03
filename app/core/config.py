@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Optional
 from urllib.parse import quote
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.engine import URL
 
 from app.core import env_config
@@ -42,6 +42,7 @@ class Settings(BaseModel):
     WEIBO_DOWNLOAD_SUBDIR: str = "Weibo"
     BILIBILI_DOWNLOAD_SUBDIR: str = "Bilibili"
     XHS_DOWNLOAD_SUBDIR: str = "Xiaohongshu"
+    INSTAGRAM_DOWNLOAD_SUBDIR: str = "Instagram"
 
     @cached_property
     def DOWNLOAD_DIR(self) -> str:
@@ -163,6 +164,22 @@ class Settings(BaseModel):
     X_TASK_LOG_MAX_LINES: int = 400
     X_TASK_LOG_TTL_SECONDS: int = 7 * 24 * 3600
     X_TASK_STATE_TTL_SECONDS: int = 24 * 3600
+
+    @cached_property
+    def INSTAGRAM_DOWNLOAD_DIR(self) -> str:
+        return str(Path(self.DOWNLOAD_ROOT).expanduser() / self.INSTAGRAM_DOWNLOAD_SUBDIR)
+    INSTAGRAM_DOWNLOAD_ENGINE: str = "gallery-dl"
+    INSTAGRAM_COOKIE: Optional[str] = None
+    INSTAGRAM_ENABLED: bool = False
+    INSTAGRAM_REQUEST_DELAY_MIN: float = Field(8, ge=3, le=300)
+    INSTAGRAM_REQUEST_DELAY_MAX: float = Field(15, ge=3, le=600)
+    INSTAGRAM_HOURLY_BUDGET: int = Field(60, ge=1, le=1000)
+    INSTAGRAM_DAILY_BUDGET: int = Field(500, ge=1, le=10000)
+    INSTAGRAM_CHECK_INTERVAL: int = Field(21600, ge=3600, le=604800)
+    INSTAGRAM_STORIES_INTERVAL: int = Field(21600, ge=3600, le=86400)
+    INSTAGRAM_HIGHLIGHTS_INTERVAL: int = Field(86400, ge=21600, le=604800)
+    INSTAGRAM_BATCH_ITEMS: int = Field(50, ge=1, le=200)
+    INSTAGRAM_BATCH_SECONDS: int = Field(600, ge=30, le=900)
 
     # TikTok 首批复用 gallery-dl；账号配置仍由网页设置中心维护。
     @cached_property
@@ -299,6 +316,7 @@ def ensure_download_dir():
         "WEIBO_DOWNLOAD_SUBDIR": current.WEIBO_DOWNLOAD_SUBDIR,
         "BILIBILI_DOWNLOAD_SUBDIR": current.BILIBILI_DOWNLOAD_SUBDIR,
         "XHS_DOWNLOAD_SUBDIR": current.XHS_DOWNLOAD_SUBDIR,
+        "INSTAGRAM_DOWNLOAD_SUBDIR": current.INSTAGRAM_DOWNLOAD_SUBDIR,
     }
     error = env_config.check_download_directory(values)
     if error:
@@ -312,5 +330,6 @@ def ensure_download_dir():
     (root / current.WEIBO_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.BILIBILI_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     (root / current.XHS_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
+    (root / current.INSTAGRAM_DOWNLOAD_SUBDIR).mkdir(parents=True, exist_ok=True)
     return root
 

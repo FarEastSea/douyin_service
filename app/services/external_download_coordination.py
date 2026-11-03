@@ -61,6 +61,9 @@ def defer_external_download(model, task_id: int, token: str, dispatcher) -> dict
             return {"success": False, "superseded": True}
         _reset_for_coordination(task)
         db.commit()
+        if model is PlatformDownloadTask and task.platform == "instagram":
+            # Instagram 始终交由单通道调度，Redis 恢复后按预算逐片领取。
+            return {"success": False, "deferred": True, "retry_after": 60}
     next_token = str(uuid4())
     try:
         dispatcher.apply_async(args=[task_id], countdown=30, task_id=next_token)
@@ -99,6 +102,8 @@ def recover_external_coordination_tasks() -> int:
                     continue
                 _reset_for_coordination(task)
                 db.commit()
+                if model is PlatformDownloadTask and task.platform == "instagram":
+                    continue
             try:
                 dispatcher.apply_async(args=[task_id], countdown=30)
                 recovered += 1

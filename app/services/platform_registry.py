@@ -144,6 +144,13 @@ def _extract_host_and_path(value: str) -> tuple[str, str]:
 
 
 def _classify_input(platform_id: str, path: str, host: str = "") -> PlatformInputKind:
+    if platform_id == "instagram":
+        from app.services.instagram_input import resolve_instagram_input
+        try:
+            resolved = resolve_instagram_input(f"https://{host}{path}")
+            return "author" if resolved.source_type == "profile" else "work"
+        except ValueError:
+            return "unknown"
     normalized_path = path.lower()
     if platform_id == "douyin":
         if normalized_path.startswith("/user/"):
@@ -200,6 +207,12 @@ def _build_registry(definitions: Iterable[PlatformDefinition]) -> PlatformRegist
 
 
 platform_registry = _build_registry((
+    PlatformDefinition(
+        id="instagram", name="Instagram", short_name="Instagram", route_prefix="/instagram",
+        icon_text="IG", domains=("instagram.com",),
+        capabilities=PlatformCapabilities(authors=True, works=True, subscriptions=True,
+            subscription_reports=True, profile_download=True, work_download=True),
+    ),
     PlatformDefinition(
         id="douyin",
         name="抖音",

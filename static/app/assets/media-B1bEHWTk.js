@@ -1,0 +1,1 @@
+function e(e){return e===`video`||e===`live`||e===`live_photo`}function t(t){return e(t)?`video`:`image`}function n(e,t=0){window.dispatchEvent(new CustomEvent(`app:preview`,{detail:{items:e,start:t}}))}export{t as n,n as r,e as t};

@@ -7,6 +7,7 @@ export const platformNames: Record<string, string> = {
   weibo: "微博",
   bilibili: "B站",
   xhs: "小红书",
+  instagram: "Instagram",
 };
 export const modalDepth = ref(0);
 export const inspectorDepth = ref(0);
@@ -70,6 +71,13 @@ export function duration(start?: string, end?: string) {
 }
 const states: Record<string, [string, string]> = {
   pending: ["等待中", "neutral"],
+  waiting_budget: ["等待接口预算", "neutral"],
+  cooling: ["保护性冷却", "warning"],
+  checkpoint: ["需要浏览器验证", "warning"],
+  auth_required: ["需要更新会话", "warning"],
+  session_changed: ["等待会话检测", "warning"],
+  batch_limit: ["等待下一分片", "neutral"],
+  time_budget: ["等待下一分片", "neutral"],
   queued: ["排队中", "neutral"],
   waiting: ["等待检查", "neutral"],
   downloading: ["下载中", "active"],

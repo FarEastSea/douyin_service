@@ -150,6 +150,7 @@ ADD_COLUMN_MIGRATIONS = [
 
 
 INDEX_MIGRATIONS = [
+    _create_index("0130_platform_media_identity", "平台媒体稳定身份去重", "uq_platform_media_identity", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_platform_media_identity ON platform_media_assets (platform, external_media_id)", "CREATE UNIQUE INDEX uq_platform_media_identity ON platform_media_assets (platform, external_media_id)"),
     _create_index("0101_idx_status_created", "下载任务状态与创建时间索引", "idx_status_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_status_created ON download_tasks (status, created_at)", "CREATE INDEX idx_status_created ON download_tasks (status, created_at)"),
     _create_index("0102_idx_work_status", "下载任务作品与状态索引", "idx_work_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_work_status ON download_tasks (work_id, status)", "CREATE INDEX idx_work_status ON download_tasks (work_id, status)"),
     _create_index("0103_idx_x_status_created", "X 任务状态与创建时间索引", "idx_x_status_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_x_status_created ON x_download_tasks (status, created_at)", "CREATE INDEX idx_x_status_created ON x_download_tasks (status, created_at)"),
@@ -508,6 +509,20 @@ DATA_MIGRATIONS = [
 ]
 
 
+ADD_COLUMN_MIGRATIONS.extend(
+    _add_column(f"ig_{table}_{column}", table, column, f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    for table, column, declaration in (
+        ("platform_authors", "username", "VARCHAR(255)"),
+        ("platform_download_tasks", "instagram_options", "TEXT"),
+        ("platform_works", "content_kind", "VARCHAR(16)"),
+        ("platform_works", "expires_at", "TIMESTAMP NULL"),
+        ("platform_works", "expected_media_count", "INTEGER"),
+        ("platform_media_assets", "work_id", "INTEGER REFERENCES platform_works(id) ON DELETE SET NULL"),
+        ("platform_media_assets", "external_media_id", "VARCHAR(255)"),
+        ("platform_media_assets", "media_index", "INTEGER DEFAULT 0"),
+        ("platform_subscription_states", "estimated_total", "INTEGER"),
+    )
+)
 MIGRATIONS = [*ADD_COLUMN_MIGRATIONS, *INDEX_MIGRATIONS, *DATA_MIGRATIONS]
 
 

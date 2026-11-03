@@ -74,7 +74,7 @@ class StorageRepairRequest(BaseModel):
 
 
 class RetryAllFailedRequest(BaseModel):
-    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs"] = ""
+    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"] = ""
 
 
 def _safe_stat(path_value: str | None) -> tuple[bool, int]:
@@ -271,6 +271,14 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
     xhs_service = await asyncio.to_thread(_xhs_service_check)
     success_evidence = await _platform_success_evidence(db)
     artifact_evidence = await _latest_artifact_evidence(db)
+    def instagram_status():
+        from app.models.database import get_sync_db
+        from app.services.instagram_runtime import readiness
+        with get_sync_db() as session:
+            value = readiness(session)
+            session.commit()
+            return value
+    instagram = await asyncio.to_thread(instagram_status)
     items = []
     external_validation_required = False
     for definition in platform_registry.list():
@@ -302,6 +310,16 @@ async def platform_readiness(db: AsyncSession = Depends(get_async_db)):
             warnings.append("FFmpeg 未安装，将使用可直接播放的单文件格式，最高画质可能受限")
         if not cookie_configured:
             warnings.append("未配置 Cookie，公开视频可能可用，受限内容无法验收")
+        if platform_id == "instagram":
+            cookie_configured = instagram["configured"]
+            if not instagram["enabled"]:
+                blockers.append("Instagram 采集尚未启用")
+            if instagram["status"] != "ready":
+                blockers.append("Instagram 会话尚未检测通过或已要求人工验证")
+            if instagram["cooldown_until"] and instagram["cooldown_until"] > datetime.now(timezone.utc).replace(tzinfo=None):
+                blockers.append("Instagram 正在保护性冷却")
+            warnings = [message for message in warnings if "公开视频" not in message]
+            warnings.append("各内容类型需以当前账号实际下载验收；限频不保证免于验证")
         capabilities = definition.to_dict()["capabilities"]
         supported_sources = [name for name, enabled in {
             "profile": capabilities["profile_download"],
@@ -764,7 +782,7 @@ async def unified_tasks(
 
 @router.get("/tasks/retry-all-failed/preview")
 async def preview_retry_all_failed(
-    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs"] = "",
+    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"] = "",
     db: AsyncSession = Depends(get_async_db),
 ):
     keys = await failed_task_keys(db, platform)
@@ -809,7 +827,7 @@ async def _submit_failed_task_operation(db: AsyncSession, platform: str, action:
 
 @router.get("/tasks/delete-all-failed/preview")
 async def preview_delete_all_failed(
-    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs"] = "",
+    platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"] = "",
     db: AsyncSession = Depends(get_async_db),
 ):
     return {"platform": platform, "total": len(await failed_task_keys(db, platform))}
