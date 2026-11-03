@@ -307,12 +307,12 @@ const {
       </section>
     </section>
 
-    <InstagramConnectionPanel v-if="activePlatform?.id === 'instagram'" @cookie="platformCookieValues.instagram = $event" />
+    <InstagramConnectionPanel v-if="activePlatform?.id === 'instagram'" :cookie="platformCookieValues.instagram || ''" :saving="controller.saving.value" @update:cookie="platformCookieValues.instagram = $event" @saved="controller.refreshCredentialStatus()" />
     <section
       v-if="activePage.id === 'account-x' || activePlatform"
       class="account-page"
     >
-      <div class="account-summary">
+      <div v-if="activePlatform?.id !== 'instagram'" class="account-summary">
         <Cookie :size="19" />
         <div>
           <strong>{{ activePage.title }}</strong>
@@ -352,7 +352,7 @@ const {
           "
         />
       </div>
-      <section class="setting-section">
+      <section v-if="activePlatform?.id !== 'instagram'" class="setting-section">
         <header>
           <div>
             <h2>账号事实</h2>
@@ -425,7 +425,7 @@ const {
           </label>
         </div>
       </section>
-      <section class="setting-section">
+      <section v-if="activePlatform?.id !== 'instagram'" class="setting-section">
         <header>
           <div>
             <h2>登录凭据</h2>

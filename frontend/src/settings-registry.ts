@@ -282,7 +282,7 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
     id: "account-instagram", title: "Instagram 账号",
     description: "导入正常浏览器会话，管理固定出口、请求预算和低频订阅。",
     fieldSections: [
-      { title: "采集开关", description: "先导入并检测会话，再启用采集。保存的配置在下一次实际请求或调度时生效。", envKeys: ["INSTAGRAM_ENABLED", "INSTAGRAM_DOWNLOAD_ENGINE"] },
+      { title: "采集开关", description: "先导入并检测会话，再启用采集。保存后在下一次请求或调度时生效。", envKeys: ["INSTAGRAM_ENABLED"] },
       { title: "请求节奏与预算", description: "所有任务共用一个通道。预算是保守的工程默认值，不能保证不触发平台验证。", envKeys: ["INSTAGRAM_REQUEST_DELAY_MIN", "INSTAGRAM_REQUEST_DELAY_MAX", "INSTAGRAM_HOURLY_BUDGET", "INSTAGRAM_DAILY_BUDGET"] },
       { title: "订阅与历史分片", description: "新增和即将过期的 Stories 优先；预算不足时延后检查。作者增长后请关注实际延迟。", envKeys: ["INSTAGRAM_CHECK_INTERVAL", "INSTAGRAM_STORIES_INTERVAL", "INSTAGRAM_HIGHLIGHTS_INTERVAL", "INSTAGRAM_BATCH_ITEMS", "INSTAGRAM_BATCH_SECONDS"] },
     ],

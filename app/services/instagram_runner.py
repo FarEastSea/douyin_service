@@ -983,6 +983,77 @@ def scan(runtime):
     )
 
 
+def validate_session(extr, expected_id):
+    # current_user is a mobile endpoint; the web host may redirect it to home.
+    # This endpoint returns the logged-in account's form, never a queried author.
+    data = extr.api._call("/v1/accounts/edit/web_form_data/")
+    form = data.get("form_data") if isinstance(data, dict) else None
+    if (
+        not isinstance(data, dict)
+        or data.get("status") not in {None, "ok"}
+        or not isinstance(form, dict)
+        or not isinstance(form.get("username"), str)
+        or not form["username"].strip()
+    ):
+        raise InstagramStop(
+            "session_response_invalid",
+            "身份检测未返回已登录账号，请在浏览器确认登录状态后重新导入 Cookie",
+        )
+    identity = form.get("id") or form.get("pk") or form.get("user_id")
+    if identity is not None and str(identity) != expected_id:
+        raise InstagramStop(
+            "session_identity_mismatch",
+            "Cookie 中的账号标识与已登录会话不一致，请完整导出同一账号的 Cookie",
+        )
+
+
+def engine_failure(exc):
+    """Return only fixed explanations and safe code locations, never exception text."""
+    if isinstance(exc, ImportError):
+        return (
+            "engine_dependency_error",
+            "Instagram 引擎依赖不可用，请检查服务端固定版本依赖",
+        )
+    from gallery_dl import exception
+
+    if isinstance(exc, exception.AbortExtraction):
+        text = str(exc)
+        if "HTTP redirect to login page" in text:
+            return (
+                "auth_required",
+                "Instagram 要求重新登录，请在浏览器登录后重新导入 Cookie",
+            )
+        if "HTTP redirect to challenge page" in text:
+            return (
+                "checkpoint",
+                "Instagram 要求浏览器验证，请人工完成验证后重新导入 Cookie",
+            )
+        return (
+            "session_endpoint_redirect",
+            "Instagram 将请求重定向到其他页面，身份接口未完成验证；请核对出口与浏览器登录状态",
+        )
+    if isinstance(exc, (ImportError, exception.NoExtractorError)):
+        return (
+            "engine_dependency_error",
+            "Instagram 引擎依赖不可用，请检查服务端固定版本依赖",
+        )
+    if isinstance(exc, exception.AuthenticationError):
+        return (
+            "auth_required",
+            "Instagram 不接受当前登录会话，请在浏览器登录后重新导入 Cookie",
+        )
+    location = ""
+    trace = exc.__traceback__
+    while trace:
+        if Path(trace.tb_frame.f_code.co_filename).name == "instagram_runner.py":
+            location = f"，运行器第 {trace.tb_lineno} 行"
+        trace = trace.tb_next
+    return (
+        "engine_contract_error",
+        f"Instagram 引擎返回结构或处理逻辑异常（{type(exc).__name__}{location}），请反馈此诊断信息",
+    )
+
+
 def run(task_id, token):
     logging.disable(logging.CRITICAL)
     runtime = None
@@ -1001,11 +1072,7 @@ def run(task_id, token):
                 extr = runtime.extractor(
                     f"https://www.instagram.com/id:{own_id}/posts/"
                 )
-                user = extr.api._call(
-                    "/v1/accounts/current_user/", params={"edit": "true"}
-                )["user"]
-                if str(user.get("id") or user.get("pk")) != own_id:
-                    raise ValueError("会话检测返回的账号身份不匹配")
+                validate_session(extr, own_id)
                 row = account_state(runtime.gate_db)
                 row.status, row.validated_fingerprint, row.validated_at = (
                     "ready",
@@ -1085,7 +1152,15 @@ def run(task_id, token):
                     "not_found",
                 }
                 or task.source_type == "session"
-                and stop.code in {"auth_required", "checkpoint", "session_changed"}
+                and stop.code
+                in {
+                    "auth_required",
+                    "checkpoint",
+                    "session_changed",
+                    "session_response_invalid",
+                    "session_identity_mismatch",
+                    "network_error",
+                }
             )
             if task.source_type != "session" and not db.scalar(
                 select(PlatformSubscriptionRun.id)
@@ -1136,6 +1211,15 @@ def run(task_id, token):
             )
             if not terminal:
                 task.celery_task_id = None
+            if task.source_type == "session":
+                account = account_state(db)
+                account.last_error = stop.message
+                if terminal and stop.code not in {
+                    "auth_required",
+                    "checkpoint",
+                    "session_changed",
+                }:
+                    account.status, account.validated_fingerprint = "unchecked", None
             db.commit()
         except StaleDownloadAttempt:
             db.rollback()
@@ -1148,6 +1232,7 @@ def run(task_id, token):
         return 0
     except Exception as exc:
         # 绝不输出上游异常原文，避免泄露带签名 URL、Cookie 或代理地址。
+        code, message = engine_failure(exc)
         if runtime:
             runtime.db.rollback()
             for record in runtime.db.scalars(
@@ -1162,9 +1247,30 @@ def run(task_id, token):
                     utcnow(),
                 )
             runtime.db.commit()
-        emit(
-            "Instagram 解析或文件验证失败", event="error", error_type=type(exc).__name__
-        )
+            try:
+                lock_download_attempt(runtime.db, task_id, token, PlatformDownloadTask)
+                task = runtime.db.get(PlatformDownloadTask, task_id)
+                task.status, task.phase, task.error_code, task.error_message = (
+                    "failed",
+                    code,
+                    code,
+                    message,
+                )
+                task.completed_at, task.output_log = datetime.now(), message
+                if runtime.testing:
+                    account = account_state(runtime.db)
+                    account.last_error = message
+                    if code in {"auth_required", "checkpoint"}:
+                        account.status = code
+                    else:
+                        account.status, account.validated_fingerprint = (
+                            "unchecked",
+                            None,
+                        )
+                runtime.db.commit()
+            except StaleDownloadAttempt:
+                runtime.db.rollback()
+        emit(message, event="error", code=code, error_type=type(exc).__name__)
         return 1
     finally:
         if runtime:

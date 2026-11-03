@@ -1347,6 +1347,7 @@ export function useSettingsController(props: {
     }
   }
   return {
+    refreshCredentialStatus: loadPlatformCredentialStatus,
     advancedDiagnostics,
     advancedBusy,
     advancedError,

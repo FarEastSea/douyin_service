@@ -4362,3 +4362,29 @@ details.diagnostic-box > summary {
     transition-duration: 0.001ms !important;
   }
 }
+/* Instagram session editor uses the console's existing surfaces and tokens. */
+.instagram-feedback { display:flex; align-items:flex-start; gap:12px; padding:14px 16px; border:1px solid var(--accent-line); background:var(--accent-soft); border-radius:var(--radius-md); color:var(--text); }
+.instagram-feedback > svg { flex:none; color:var(--accent); margin-top:2px; }
+.instagram-feedback > div { flex:1; min-width:0; overflow-wrap:anywhere; }
+.instagram-feedback small { display:block; margin-top:5px; color:var(--text-3); }
+.instagram-feedback[data-tone="error"] { border-color:var(--warning-line); background:var(--warning-soft); }
+.instagram-feedback[data-tone="error"] > svg { color:var(--warning); }
+.instagram-feedback[data-tone="success"] { border-color:var(--success-line); background:var(--success-soft); }
+.instagram-feedback[data-tone="success"] > svg { color:var(--success); }
+.instagram-cookie-toolbar,.instagram-file-row,.instagram-session-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.instagram-cookie-toolbar { justify-content:space-between; }
+.instagram-cookie-toolbar small { display:block; margin-top:4px; color:var(--text-3); }
+.instagram-cookie-editor { display:grid; gap:12px; }
+.instagram-cookie-editor textarea { width:100%; resize:vertical; font-family:var(--font-mono,monospace); }
+.instagram-file-name { display:inline-flex; align-items:center; gap:7px; color:var(--success); overflow-wrap:anywhere; min-width:0; }
+.instagram-session .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.instagram-connection { border-top:1px solid var(--line); padding-top:14px; }
+.instagram-connection summary { cursor:pointer; color:var(--text-2); }
+.instagram-connection > .fact-list { margin:16px 0; }
+.instagram-connection > .setting-row { padding:14px 0; }
+@media (max-width:640px) {
+  .instagram-feedback { display:grid; grid-template-columns:20px minmax(0,1fr); }
+  .instagram-feedback .text-button { grid-column:2; margin-left:0; justify-self:start; }
+  .instagram-cookie-toolbar .btn { flex:none; }
+  .instagram-connection > .setting-row { display:grid; gap:10px; }
+}
