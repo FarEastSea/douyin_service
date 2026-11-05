@@ -21,6 +21,7 @@ from app.models.models import (
 from app.services.instagram_runtime import utcnow
 from app.services.subscription_report_format import douyin_report_payload
 
+TERMINAL_TASK_STATUSES = ("completed", "failed", "cancelled")
 BATCH_SIZE = 100
 CYCLE_STATE_KEY = "subscription_check_cycle_state"
 
@@ -95,11 +96,25 @@ def cleanup_records(db):
         days=settings.snapshot().SUBSCRIPTION_RECORD_RETENTION_DAYS
     )
     for model in (PlatformSubscriptionRun, SubscriptionCheckReport):
+        inactive = model.status != "running"
+        if model is PlatformSubscriptionRun:
+            # Aborted workers can leave "running" behind. A missing or terminal
+            # parent proves that an expired run no longer has an active owner.
+            inactive = (
+                inactive
+                | model.task_id.is_(None)
+                | select(PlatformDownloadTask.id)
+                .where(
+                    PlatformDownloadTask.id == model.task_id,
+                    PlatformDownloadTask.status.in_(TERMINAL_TASK_STATUSES),
+                )
+                .exists()
+            )
         ids = list(
             db.scalars(
                 select(model.id)
                 .where(
-                    model.status != "running",
+                    inactive,
                     func.coalesce(model.finished_at, model.started_at) < cutoff,
                 )
                 .order_by(model.id)
@@ -117,7 +132,7 @@ def cleanup_records(db):
             .where(
                 PlatformDownloadTask.platform == "instagram",
                 PlatformDownloadTask.source_type != "work",
-                PlatformDownloadTask.status.in_(("completed", "failed", "cancelled")),
+                PlatformDownloadTask.status.in_(TERMINAL_TASK_STATUSES),
                 func.coalesce(
                     PlatformDownloadTask.completed_at, PlatformDownloadTask.created_at
                 )
