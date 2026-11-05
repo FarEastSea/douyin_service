@@ -521,8 +521,59 @@ ADD_COLUMN_MIGRATIONS.extend(
         ("platform_media_assets", "external_media_id", "VARCHAR(255)"),
         ("platform_media_assets", "media_index", "INTEGER DEFAULT 0"),
         ("platform_subscription_states", "estimated_total", "INTEGER"),
+        ("platform_subscription_states", "blocked_code", "VARCHAR(64)"),
     )
 )
+
+def _block_failed_instagram_streams(connection):
+    # Freeze the known old terminal failures once; an explicit scan clears this
+    # state later. Do not infer a failure from free-form messages.
+    result = connection.execute(
+        text("""
+        UPDATE platform_subscription_states SET blocked_code = (
+            SELECT error_code FROM platform_download_tasks
+            WHERE id = platform_subscription_states.task_id
+        ), manual = false
+        WHERE blocked_code IS NULL AND task_id IN (
+            SELECT id FROM platform_download_tasks WHERE platform = 'instagram'
+            AND status = 'failed' AND error_code IN :codes
+        )
+    """).bindparams(bindparam("codes", expanding=True)),
+        {
+            "codes": (
+                "not_found",
+                "unsafe_url",
+                "engine_unavailable",
+                "access_denied",
+                "parse_error",
+                "profile_response_invalid",
+                "engine_contract_error",
+                "engine_dependency_error",
+                "session_endpoint_redirect",
+            )
+        },
+    )
+    return {"blocked_streams": result.rowcount}
+
+
+INDEX_MIGRATIONS.append(
+    _create_index(
+        "0118_idx_platform_run_task",
+        "运行记录执行任务索引",
+        "idx_platform_run_task",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_platform_run_task ON platform_subscription_runs (task_id)",
+        "CREATE INDEX idx_platform_run_task ON platform_subscription_runs (task_id)",
+    )
+)
+DATA_MIGRATIONS.append(
+    Migration(
+        migration_id="0403_instagram_terminal_streams",
+        migration_type="backfill",
+        description="暂停已确认解析失败的 Instagram 订阅，等待明确重试",
+        handler=_block_failed_instagram_streams,
+    )
+)
+
 MIGRATIONS = [*ADD_COLUMN_MIGRATIONS, *INDEX_MIGRATIONS, *DATA_MIGRATIONS]
 
 

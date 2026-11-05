@@ -42,7 +42,7 @@ const results = computed(() =>
   (detail.value?.details || []).filter(
     (item) =>
       (!onlyIssues.value ||
-        ["failed", "warning", "error"].includes(item.status) ||
+        ["failed", "warning", "error", "partial", "interrupted", "deferred"].includes(item.status) ||
         item.error ||
         item.warning) &&
       (!authorSearch.value ||
@@ -62,14 +62,10 @@ async function load(silent = false) {
   loading.value = true;
   const current = ++sequence;
   try {
-    const data = await api<AutomationPage>(
-      `/authors/reports/subscriptions?paginated=true&page=${page.value}&page_size=20`,
-    );
-    if (current !== sequence) return;
-    const unified = await api<AutomationPage>(`/platform-downloads/instagram/runs?page=${page.value}&page_size=20`);
+    const unified = await api<AutomationPage>(`/subscription-runs?page=${page.value}&page_size=20`);
     if (current !== sequence) return;
     reports.value = unified.items;
-    cycle.value = data.cycle;
+    cycle.value = unified.cycle;
     pages.value = unified.pages;
     total.value = unified.total;
     loaded.value = true;
@@ -94,7 +90,7 @@ async function loadDetail(silent = false) {
   detailBusy.value = true;
   try {
     const data = await api<AutomationRun>(
-      runId.value.includes(":") ? `/platform-downloads/instagram/runs/${runId.value}` : `/authors/reports/subscriptions/${runId.value}`,
+      runId.value.includes(":") ? `/subscription-runs/${encodeURIComponent(runId.value)}` : `/authors/reports/subscriptions/${runId.value}`,
     );
     if (current === detailSequence) detail.value = data;
   } catch (e: any) {
@@ -153,6 +149,10 @@ async function copyDiagnostic() {
     store.notify(e.message || "复制失败", "error");
   }
 }
+function sourceLabel(report: AutomationRun) {
+  const labels: Record<string, string> = {posts:'Posts',reels:'Reels',stories:'Stories',highlights:'Highlights',session:'会话',work:'作品',profile:'作者'};
+  return report.platform === 'instagram' ? `Instagram${report.content_kind ? ' · ' + (labels[report.content_kind] || report.content_kind) : ''}` : '抖音';
+}
 function trigger(value?: string) {
   if (value === "session") return "会话检测";
   if (value === "history") return "历史补采";
@@ -166,7 +166,7 @@ function trigger(value?: string) {
 useContextActions(() => [
   {
     id: "check-all",
-    label: "检查全部订阅作者",
+    label: "检查抖音订阅作者",
     run: () => run(),
     disabled: store.risk.active || busy.value,
   },
@@ -186,7 +186,7 @@ onMounted(() => {
   timer = window.setInterval(() => {
     if (!document.hidden) {
       void load(true);
-      if (detail.value?.status === "running") void loadDetail(true);
+      if (["running", "pending"].includes(detail.value?.status || "")) void loadDetail(true);
     }
   }, 10000);
 });
@@ -304,7 +304,7 @@ onBeforeUnmount(() => {
             <td data-label="时间">
               <button class="record-link" @click="openRun(report.key || report.id)">
                 {{ dateTime(report.started_at) }}</button
-              ><span>{{ report.platform === 'instagram' ? 'Instagram · ' + (report.content_kind || '') : '抖音 · ' }}{{ trigger(report.trigger_type) }}</span>
+              ><span>{{ sourceLabel(report) }} · {{ trigger(report.trigger_type) }}</span>
             </td>
             <td data-label="检查人数">
               {{ report.checked_authors
@@ -348,7 +348,7 @@ onBeforeUnmount(() => {
     />
     <InspectorPanel
       :open="!!runId"
-      :title="'运行 #' + runId"
+      :title="detail ? `${sourceLabel(detail)} · 运行 #${detail.id}` : '运行详情'"
       :subtitle="
         dateTime(detail?.started_at) + ' · ' + trigger(detail?.trigger_type)
       "

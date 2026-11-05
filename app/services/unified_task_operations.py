@@ -200,6 +200,7 @@ async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None
         state_id = options.get("state_id")
         state = await db.get(PlatformSubscriptionState, state_id) if state_id else None
         if state:
+            state.blocked_code = None
             state.enabled = state.manual = True
             state.next_check_at, state.deferred_reason = utcnow(), None
         task.instagram_options = json.dumps(options)

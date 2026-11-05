@@ -40,6 +40,8 @@ from app.services.download_lifecycle import (
 )
 from app.services.instagram_runtime import (
     InstagramStop,
+    TERMINAL_SCAN_ERRORS,
+    SESSION_RECOVERY_ERRORS,
     account_state,
     block_account,
     connection,
@@ -1016,19 +1018,11 @@ def scan(runtime):
             state.next_check_at, state.deferred_reason = until, stop.message
         options.update(checkpoint=checkpoint, not_before=until.isoformat())
         task.instagram_options = json.dumps(options)
-        terminal = stop.code in {
-            "not_found",
-            "unsafe_url",
-            "engine_unavailable",
-            "access_denied",
-            "parse_error",
-            "profile_response_invalid",
-            "engine_contract_error",
-            "engine_dependency_error",
-            "session_endpoint_redirect",
-        }
+        terminal = stop.code in TERMINAL_SCAN_ERRORS
         if terminal:
             run.status = "failed"
+            if state:
+                state.blocked_code, state.manual = stop.code, False
         task.status = "failed" if terminal else "pending"
         task.phase, task.error_code, task.error_message = (
             stop.code,
@@ -1038,17 +1032,21 @@ def scan(runtime):
         task.output_log = (
             f"[Instagram] 已检查 {count} 条作品；保存 {saved} 个文件。" + stop.message
         )
-        task.file_count = task.downloaded_media_count = int(
-            db.scalar(
-                select(func.count(PlatformMediaAsset.id)).where(
-                    PlatformMediaAsset.work_id.in_(
-                        select(PlatformTaskWork.work_id).where(
-                            PlatformTaskWork.task_id == task.id
+        task.file_count = task.downloaded_media_count = (
+            saved
+            if profile
+            else int(
+                db.scalar(
+                    select(func.count(PlatformMediaAsset.id)).where(
+                        PlatformMediaAsset.work_id.in_(
+                            select(PlatformTaskWork.work_id).where(
+                                PlatformTaskWork.task_id == task.id
+                            )
                         )
                     )
                 )
+                or 0
             )
-            or 0
         )
         task.celery_task_id = None if not terminal else task.celery_task_id
     finally:
@@ -1066,6 +1064,50 @@ def scan(runtime):
         partial=partial,
         status=run.status,
     )
+
+
+def record_unstarted_scan(db, task, started, status, message):
+    """Keep setup failures visible even when no author or scan exists yet."""
+    if task.source_type == "session":
+        return None
+    options = json.loads(task.instagram_options or "{}")
+    state = (
+        db.get(PlatformSubscriptionState, options["state_id"])
+        if options.get("state_id")
+        else None
+    )
+    existing = db.scalar(
+        select(PlatformSubscriptionRun.id)
+        .where(
+            PlatformSubscriptionRun.task_id == task.id,
+            PlatformSubscriptionRun.started_at >= started,
+        )
+        .limit(1)
+    )
+    if existing is None:
+        db.add(
+            PlatformSubscriptionRun(
+                platform="instagram",
+                author_id=state.author_id if state else None,
+                state_id=state.id if state else None,
+                task_id=task.id,
+                content_kind=state.content_kind
+                if state
+                else options.get(
+                    "kind", (options.get("kinds") or [task.source_type])[0]
+                ),
+                scan_mode=state.scan_mode
+                if state
+                else "recent"
+                if options.get("subscribe")
+                else "history",
+                status=status,
+                message=message,
+                started_at=started,
+                finished_at=utcnow(),
+            )
+        )
+    return state
 
 
 def validate_session(extr, expected_id):
@@ -1179,6 +1221,29 @@ def run(task_id, token):
                 )
                 row.last_error, row.cooldown_until, row.risk_count = None, None, 0
                 runtime.gate_db.commit()
+                for state in runtime.gate_db.scalars(
+                    select(PlatformSubscriptionState)
+                    .join(PlatformAuthor)
+                    .where(
+                        PlatformAuthor.platform == "instagram",
+                        PlatformSubscriptionState.deferred_reason.is_not(None),
+                        PlatformSubscriptionState.enabled.is_(True),
+                        PlatformSubscriptionState.blocked_code.is_(None),
+                        PlatformSubscriptionState.manual.is_(True)
+                        | (
+                            PlatformAuthor.is_subscribed.is_(True)
+                            & bool(settings.snapshot().AUTO_CHECK_ENABLED)
+                        ),
+                        PlatformSubscriptionState.task_id.in_(
+                            select(PlatformDownloadTask.id).where(
+                                PlatformDownloadTask.error_code.in_(
+                                    SESSION_RECOVERY_ERRORS
+                                )
+                            )
+                        ),
+                    )
+                ):
+                    state.next_check_at, state.deferred_reason = utcnow(), None
                 for pending in runtime.gate_db.scalars(
                     select(PlatformDownloadTask).where(
                         PlatformDownloadTask.platform == "instagram",
@@ -1194,6 +1259,27 @@ def run(task_id, token):
                     )
                 ):
                     options = json.loads(pending.instagram_options or "{}")
+                    pending_state = (
+                        runtime.gate_db.get(
+                            PlatformSubscriptionState, options["state_id"]
+                        )
+                        if options.get("state_id")
+                        else None
+                    )
+                    if pending_state:
+                        pending_author = runtime.gate_db.get(
+                            PlatformAuthor, pending_state.author_id
+                        )
+                        if (
+                            not pending_state.enabled
+                            or pending_state.blocked_code
+                            or not (
+                                pending_state.manual
+                                or pending_author.is_subscribed
+                                and settings.snapshot().AUTO_CHECK_ENABLED
+                            )
+                        ):
+                            continue
                     options.pop("not_before", None)
                     pending.instagram_options = json.dumps(options)
                     pending.error_code, pending.error_message, pending.phase = (
@@ -1201,15 +1287,6 @@ def run(task_id, token):
                         None,
                         "queued",
                     )
-                for state in runtime.gate_db.scalars(
-                    select(PlatformSubscriptionState)
-                    .join(PlatformAuthor)
-                    .where(
-                        PlatformAuthor.platform == "instagram",
-                        PlatformSubscriptionState.deferred_reason.is_not(None),
-                    )
-                ):
-                    state.next_check_at, state.deferred_reason = utcnow(), None
                 runtime.gate_db.commit()
                 runtime.task.status, runtime.task.phase, runtime.task.completed_at = (
                     "completed",
@@ -1241,18 +1318,7 @@ def run(task_id, token):
             options["not_before"] = until.isoformat()
             task.instagram_options = json.dumps(options)
             terminal = (
-                stop.code
-                in {
-                    "unsafe_url",
-                    "engine_unavailable",
-                    "access_denied",
-                    "parse_error",
-                    "profile_response_invalid",
-                    "engine_contract_error",
-                    "engine_dependency_error",
-                    "session_endpoint_redirect",
-                    "not_found",
-                }
+                stop.code in TERMINAL_SCAN_ERRORS
                 or task.source_type == "session"
                 and stop.code
                 in {
@@ -1264,47 +1330,17 @@ def run(task_id, token):
                     "network_error",
                 }
             )
-            if task.source_type != "session" and not db.scalar(
-                select(PlatformSubscriptionRun.id)
-                .where(
-                    PlatformSubscriptionRun.task_id == task_id,
-                    PlatformSubscriptionRun.started_at >= started,
+            state = record_unstarted_scan(
+                db, task, started, "failed" if terminal else "deferred", stop.message
+            )
+            if state:
+                if terminal:
+                    state.blocked_code, state.manual = stop.code, False
+                state.last_check_at, state.next_check_at, state.deferred_reason = (
+                    started,
+                    until,
+                    stop.message,
                 )
-                .limit(1)
-            ):
-                state = (
-                    db.get(PlatformSubscriptionState, options["state_id"])
-                    if options.get("state_id")
-                    else None
-                )
-                db.add(
-                    PlatformSubscriptionRun(
-                        platform="instagram",
-                        author_id=state.author_id if state else None,
-                        state_id=state.id if state else None,
-                        task_id=task_id,
-                        content_kind=state.content_kind
-                        if state
-                        else options.get(
-                            "kind", (options.get("kinds") or [task.source_type])[0]
-                        ),
-                        scan_mode=state.scan_mode
-                        if state
-                        else "recent"
-                        if options.get("subscribe")
-                        else "history",
-                        status="failed" if terminal else "deferred",
-                        message=stop.message,
-                        started_at=started,
-                        finished_at=utcnow(),
-                    )
-                )
-                if state:
-                    state.last_check_at, state.next_check_at, state.deferred_reason = (
-                        started,
-                        until,
-                        stop.message,
-                    )
             task.status, task.phase, task.error_code, task.error_message = (
                 "failed" if terminal else "pending",
                 stop.code,
@@ -1337,20 +1373,19 @@ def run(task_id, token):
         code, message = engine_failure(exc)
         if runtime:
             runtime.db.rollback()
-            for record in runtime.db.scalars(
-                select(PlatformSubscriptionRun).where(
-                    PlatformSubscriptionRun.task_id == task_id,
-                    PlatformSubscriptionRun.status == "running",
-                )
-            ):
-                record.status, record.message, record.finished_at = (
-                    "failed",
-                    "解析或文件验证失败",
-                    utcnow(),
-                )
-            runtime.db.commit()
             try:
                 lock_download_attempt(runtime.db, task_id, token, PlatformDownloadTask)
+                for record in runtime.db.scalars(
+                    select(PlatformSubscriptionRun).where(
+                        PlatformSubscriptionRun.task_id == task_id,
+                        PlatformSubscriptionRun.status == "running",
+                    )
+                ):
+                    record.status, record.message, record.finished_at = (
+                        "failed",
+                        message,
+                        utcnow(),
+                    )
                 task = runtime.db.get(PlatformDownloadTask, task_id)
                 task.status, task.phase, task.error_code, task.error_message = (
                     "failed",
@@ -1358,6 +1393,15 @@ def run(task_id, token):
                     code,
                     message,
                 )
+                state = record_unstarted_scan(
+                    runtime.db, task, started, "failed", message
+                )
+                if state and code in TERMINAL_SCAN_ERRORS:
+                    state.blocked_code, state.manual, state.deferred_reason = (
+                        code,
+                        False,
+                        message,
+                    )
                 task.completed_at, task.output_log = datetime.now(), message
                 if runtime.testing:
                     account = account_state(runtime.db)
@@ -1379,8 +1423,16 @@ def run(task_id, token):
             try:
                 from app.services.subscription_records import sync_session_runs
 
-                sync_session_runs(runtime.db)
-                runtime.db.commit()
+                # A completed execution may no longer flush its fenced Session.
+                # Synchronize only this session check with a fresh transaction;
+                # task ownership is rechecked under its row lock.
+                runtime.db.rollback()
+                if runtime.testing:
+                    with get_sync_db() as record_db:
+                        sync_session_runs(record_db, task_id=task_id, token=token)
+                        record_db.commit()
+            except Exception:
+                emit("运行记录等待后台恢复", event="record_pending")
             finally:
                 runtime.close()
 

@@ -240,7 +240,7 @@ def queue_session_test(db):
     )
     from app.services.subscription_records import sync_session_runs
 
-    sync_session_runs(db)
+    sync_session_runs(db, task_id=task.id)
     db.commit()
     return task
 
@@ -425,6 +425,7 @@ def scan_author(author_id: int, db=Depends(session)):
         )
     )
     for row in rows:
+        row.blocked_code = None
         row.next_check_at, row.manual = utcnow(), True
     db.commit()
     notify_dispatch()
@@ -452,6 +453,7 @@ def history_author(author_id: int, request: HistoryUpdate, db=Depends(session)):
     ):
         row.enabled = row.manual = request.enabled and row.content_kind in selected
         if row.enabled:
+            row.blocked_code = None
             row.history_complete, row.next_check_at = False, utcnow()
     db.commit()
     notify_dispatch()
@@ -603,28 +605,9 @@ def unified_run_list(
 
 @router.get("/runs/{run_key}")
 def unified_run_detail(run_key: str, db=Depends(session)):
-    from app.services.subscription_records import instagram_payload
-    from app.api.authors import _subscription_report_payload
-    from app.models.models import SubscriptionCheckReport
+    from app.services.subscription_records import unified_run_detail as get_detail
 
     try:
-        platform, identity = run_key.split(":")
-        identity = int(identity)
-    except ValueError:
-        raise HTTPException(404, "运行记录不存在")
-    if platform == "instagram":
-        row = db.get(PlatformSubscriptionRun, identity)
-        if row and row.platform == platform:
-            return instagram_payload(db, row)
-    elif platform == "douyin":
-        row = db.get(SubscriptionCheckReport, identity)
-        if row:
-            newest = db.scalar(
-                select(SubscriptionCheckReport.id)
-                .order_by(SubscriptionCheckReport.started_at.desc())
-                .limit(1)
-            )
-            return _subscription_report_payload(
-                row, newest, settings.snapshot().DEFAULT_CHECK_INTERVAL
-            )
-    raise HTTPException(404, "运行记录不存在")
+        return get_detail(db, run_key)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from None

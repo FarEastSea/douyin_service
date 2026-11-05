@@ -1,34 +1,70 @@
-"""Shared presentation of subscription runs and bounded metadata retention."""
+"""Subscription history, session record repair and bounded metadata retention."""
 
-from datetime import timedelta
-from sqlalchemy import select, func, literal, union_all, delete, update
+import json
+from datetime import UTC, timedelta
+
+from sqlalchemy import case, delete, func, literal, select, union_all, update
+from sqlalchemy.orm import defer
+
 from app.core.config import settings
+from app.core.runtime_config import get_runtime_config_sync
 from app.models.models import (
+    PlatformAuthor,
     PlatformDownloadTask,
     PlatformSubscriptionRun,
     PlatformSubscriptionState,
-    PlatformAuthor,
-    PlatformWork,
     PlatformTaskWork,
+    PlatformWork,
     SubscriptionCheckReport,
+    SystemConfig,
 )
 from app.services.instagram_runtime import utcnow
+from app.services.subscription_report_format import douyin_report_payload
+
+BATCH_SIZE = 100
+CYCLE_STATE_KEY = "subscription_check_cycle_state"
 
 
-def sync_session_runs(db):
-    tasks = db.scalars(
-        select(PlatformDownloadTask)
+def sync_session_runs(db, *, task_id=None, token=None):
+    status = case(
+        (PlatformDownloadTask.status == "downloading", "running"),
+        else_=PlatformDownloadTask.status,
+    )
+    matching = (
+        select(PlatformSubscriptionRun.id)
         .where(
-            PlatformDownloadTask.platform == "instagram",
-            PlatformDownloadTask.source_type == "session",
+            PlatformSubscriptionRun.task_id == PlatformDownloadTask.id,
+            PlatformSubscriptionRun.status == status,
+            PlatformSubscriptionRun.finished_at.is_not_distinct_from(
+                PlatformDownloadTask.completed_at
+            ),
         )
-        .with_for_update()
+        .exists()
+    )
+    query = select(PlatformDownloadTask).where(
+        PlatformDownloadTask.platform == "instagram",
+        PlatformDownloadTask.source_type == "session",
+    )
+    if task_id is not None:
+        query = query.where(PlatformDownloadTask.id == task_id)
+    else:
+        query = query.where(~matching)
+    tasks = list(
+        db.scalars(
+            query.order_by(PlatformDownloadTask.id)
+            .limit(BATCH_SIZE)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
     )
     for task in tasks:
+        if token is not None and task.celery_task_id != token:
+            continue
         run = db.scalar(
-            select(PlatformSubscriptionRun).where(
-                PlatformSubscriptionRun.task_id == task.id
-            )
+            select(PlatformSubscriptionRun)
+            .where(PlatformSubscriptionRun.task_id == task.id)
+            .order_by(PlatformSubscriptionRun.id.desc())
+            .limit(1)
         )
         if run is None:
             run = PlatformSubscriptionRun(
@@ -36,12 +72,18 @@ def sync_session_runs(db):
                 task_id=task.id,
                 content_kind="session",
                 scan_mode="session",
-                started_at=task.created_at,
+                started_at=task.started_at or task.created_at,
             )
             db.add(run)
         run.status = "running" if task.status == "downloading" else task.status
         run.message = task.error_message or (
-            "会话检测通过" if task.status == "completed" else "等待会话检测"
+            "会话检测通过"
+            if task.status == "completed"
+            else "会话检测已取消"
+            if task.status == "cancelled"
+            else "正在检测会话"
+            if task.status == "downloading"
+            else "等待会话检测"
         )
         run.finished_at = task.completed_at
     db.flush()
@@ -61,11 +103,14 @@ def cleanup_records(db):
                     func.coalesce(model.finished_at, model.started_at) < cutoff,
                 )
                 .order_by(model.id)
-                .limit(100)
+                .limit(BATCH_SIZE)
+                .with_for_update(skip_locked=True)
             )
         )
         if ids:
             db.execute(delete(model).where(model.id.in_(ids)))
+    # The task row lock serializes collection with retry/cancel/worker claims.
+    # A locked candidate cannot turn into an active execution before deletion.
     ids = list(
         db.scalars(
             select(PlatformDownloadTask.id)
@@ -83,7 +128,8 @@ def cleanup_records(db):
                 .exists(),
             )
             .order_by(PlatformDownloadTask.id)
-            .limit(100)
+            .limit(BATCH_SIZE)
+            .with_for_update(skip_locked=True)
         )
     )
     if ids:
@@ -102,11 +148,21 @@ def cleanup_records(db):
     db.commit()
 
 
-def instagram_payload(db, row):
-    author = db.get(PlatformAuthor, row.author_id) if row.author_id else None
+def iso_utc(value):
+    if value is None:
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+
+
+def instagram_payload(db, row, *, include_details=True):
+    author = (
+        db.get(PlatformAuthor, row.author_id)
+        if row.author_id and include_details
+        else None
+    )
     session = row.content_kind == "session"
-    checked = int(author is not None)
-    failed = int(row.status in ("failed", "partial", "interrupted"))
+    checked = int(row.author_id is not None)
+    failed = int(row.status in ("failed", "partial", "interrupted")) * checked
     return dict(
         id=row.id,
         key=f"instagram:{row.id}",
@@ -127,23 +183,57 @@ def instagram_payload(db, row):
         downloaded_files=row.saved or 0,
         summary=row.message,
         content_kind=row.content_kind,
-        started_at=(row.started_at.isoformat() + "Z") if row.started_at else None,
-        finished_at=(row.finished_at.isoformat() + "Z") if row.finished_at else None,
+        started_at=iso_utc(row.started_at),
+        finished_at=iso_utc(row.finished_at),
         details=[
             dict(
                 author_id=row.author_id,
-                nickname=(author.nickname or author.username) if author else "会话检测",
+                nickname=(author.nickname or author.username)
+                if author
+                else "会话检测"
+                if session
+                else "作者未确认",
                 status=row.status,
                 new_works=row.discovered or 0,
                 message=row.message,
             )
-        ],
+        ]
+        if include_details
+        else [],
     )
 
 
-def unified_runs(db, page, page_size):
-    from app.api.authors import _subscription_report_payload
+def unified_run_detail(db, run_key):
+    try:
+        platform, identity = run_key.split(":")
+        identity = int(identity)
+        if identity < 1:
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise ValueError("运行记录不存在") from None
+    if platform == "instagram":
+        row = db.get(PlatformSubscriptionRun, identity)
+        if row and row.platform == platform:
+            return instagram_payload(db, row)
+    elif platform == "douyin":
+        row = db.get(SubscriptionCheckReport, identity)
+        if row:
+            newest = db.scalar(
+                select(SubscriptionCheckReport.id)
+                .order_by(
+                    SubscriptionCheckReport.started_at.desc(),
+                    SubscriptionCheckReport.id.desc(),
+                )
+                .limit(1)
+            )
+            return douyin_report_payload(
+                row, newest, get_runtime_config_sync(db)["subscription_check_interval"]
+            )
+    raise ValueError("运行记录不存在")
 
+
+def unified_runs(db, page, page_size):
+    interval = get_runtime_config_sync(db)["subscription_check_interval"]
     sources = union_all(
         select(
             literal("douyin").label("platform"),
@@ -164,29 +254,90 @@ def unified_runs(db, page, page_size):
         )
         .limit(1)
     )
+    identities = list(
+        db.execute(
+            select(sources)
+            .order_by(sources.c.at.desc(), sources.c.platform, sources.c.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    douyin_ids = [
+        identity for platform, identity, _ in identities if platform == "douyin"
+    ]
+    instagram_ids = [
+        identity for platform, identity, _ in identities if platform == "instagram"
+    ]
+    douyin_rows = (
+        {
+            row.id: row
+            for row in db.scalars(
+                select(SubscriptionCheckReport)
+                .options(defer(SubscriptionCheckReport.details_json))
+                .where(SubscriptionCheckReport.id.in_(douyin_ids))
+            )
+        }
+        if douyin_ids
+        else {}
+    )
+    instagram_rows = (
+        {
+            row.id: row
+            for row in db.scalars(
+                select(PlatformSubscriptionRun).where(
+                    PlatformSubscriptionRun.id.in_(instagram_ids)
+                )
+            )
+        }
+        if instagram_ids
+        else {}
+    )
     items = []
-    for platform, identity, _ in db.execute(
-        select(sources)
-        .order_by(sources.c.at.desc(), sources.c.platform, sources.c.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    ):
-        if platform == "instagram":
+    for platform, identity, _ in identities:
+        if platform == "instagram" and identity in instagram_rows:
             items.append(
-                instagram_payload(db, db.get(PlatformSubscriptionRun, identity))
+                instagram_payload(db, instagram_rows[identity], include_details=False)
             )
-        else:
-            item = _subscription_report_payload(
-                db.get(SubscriptionCheckReport, identity),
-                newest,
-                settings.snapshot().DEFAULT_CHECK_INTERVAL,
-                False,
+        elif platform == "douyin" and identity in douyin_rows:
+            items.append(
+                douyin_report_payload(douyin_rows[identity], newest, interval, False)
             )
-            item.update(key=f"douyin:{identity}", platform="douyin")
-            items.append(item)
+    cycle_row = db.scalar(
+        select(SystemConfig).where(SystemConfig.key == CYCLE_STATE_KEY)
+    )
+    try:
+        cycle = json.loads(cycle_row.value) if cycle_row else {}
+    except (ValueError, TypeError):
+        cycle = {}
+    if not isinstance(cycle, dict):
+        cycle = {}
+    if not cycle and newest is not None:
+        latest = douyin_rows.get(newest)
+        if latest is None:
+            latest = db.scalar(
+                select(SubscriptionCheckReport)
+                .options(defer(SubscriptionCheckReport.details_json))
+                .where(SubscriptionCheckReport.id == newest)
+            )
+        if latest:
+            payload = douyin_report_payload(latest, newest, interval, False)
+            cycle = dict(
+                active=payload["status"] == "running",
+                **{
+                    key: payload[key]
+                    for key in (
+                        "total_authors",
+                        "checked_authors",
+                        "remaining_authors",
+                        "new_works",
+                    )
+                },
+            )
     return dict(
         items=items,
         total=total,
         page=page,
+        page_size=page_size,
         pages=max(1, (total + page_size - 1) // page_size),
+        cycle=cycle,
     )

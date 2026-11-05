@@ -124,6 +124,7 @@ def dispatch_due(db):
                 .where(
                     PlatformAuthor.platform == "instagram",
                     PlatformSubscriptionState.enabled.is_(True),
+                    PlatformSubscriptionState.blocked_code.is_(None),
                     PlatformSubscriptionState.next_check_at <= now,
                 )
             ):
@@ -156,6 +157,7 @@ def dispatch_due(db):
                 not state_id
                 or state
                 and state.enabled
+                and not state.blocked_code
                 and (
                     state.manual
                     or author
@@ -186,6 +188,7 @@ def dispatch_due(db):
                     PlatformAuthor.platform == "instagram",
                     PlatformSubscriptionState.scan_mode == "recent",
                     PlatformSubscriptionState.enabled.is_(True),
+                    PlatformSubscriptionState.blocked_code.is_(None),
                     PlatformSubscriptionState.manual.is_(False),
                     PlatformSubscriptionState.last_success_at.is_not(None),
                     PlatformSubscriptionState.deferred_reason.is_(None),
@@ -202,6 +205,7 @@ def dispatch_due(db):
                     .where(
                         PlatformAuthor.platform == "instagram",
                         PlatformSubscriptionState.enabled.is_(True),
+                        PlatformSubscriptionState.blocked_code.is_(None),
                         (
                             PlatformAuthor.is_subscribed.is_(True)
                             & bool(current.AUTO_CHECK_ENABLED)

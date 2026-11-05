@@ -104,6 +104,7 @@ def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True)
             elif row.enabled != enabled:
                 row.enabled = enabled
                 if enabled:
+                    row.blocked_code = None
                     row.next_check_at = utcnow() + timedelta(seconds=interval_for(kind))
     db.flush()
 
@@ -320,6 +321,7 @@ def author_payload(db, author):
                         "last_success_at",
                         "history_complete",
                         "deferred_reason",
+                        "blocked_code",
                         "task_id",
                     )
                 },

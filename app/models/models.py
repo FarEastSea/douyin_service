@@ -674,12 +674,14 @@ class PlatformSubscriptionState(Base):
     history_complete = Column(Boolean, default=False, nullable=False)
     estimated_total = Column(Integer)
     deferred_reason = Column(String(255))
+    blocked_code = Column(String(64))
     task_id = Column(Integer, ForeignKey("platform_download_tasks.id", ondelete="SET NULL"))
 
 
 class PlatformSubscriptionRun(Base):
     """每个分片一条运行记录，扫描与媒体下载完成状态分离。"""
     __tablename__ = "platform_subscription_runs"
+    __table_args__ = (Index("idx_platform_run_task", "task_id"),)
     id = Column(Integer, primary_key=True, autoincrement=True)
     platform = Column(String(32), nullable=False, index=True)
     author_id = Column(Integer, ForeignKey("platform_authors.id", ondelete="SET NULL"))

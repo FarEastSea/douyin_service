@@ -25,6 +25,24 @@ from app.services.platform_credentials import (
 )
 
 
+TERMINAL_SCAN_ERRORS = frozenset(
+    {
+        "not_found",
+        "unsafe_url",
+        "engine_unavailable",
+        "access_denied",
+        "parse_error",
+        "profile_response_invalid",
+        "engine_contract_error",
+        "engine_dependency_error",
+        "session_endpoint_redirect",
+    }
+)
+SESSION_RECOVERY_ERRORS = frozenset(
+    {"auth_required", "checkpoint", "session_changed", "disabled"}
+)
+
+
 class InstagramStop(BaseException):
     """不可被引擎的普通重试捕获的控制信号。"""
 

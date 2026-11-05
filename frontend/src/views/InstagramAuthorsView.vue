@@ -14,7 +14,7 @@ import StateView from "../components/StateView.vue";
 import StatusIndicator from "../components/StatusIndicator.vue";
 import Pager from "../components/Pager.vue";
 
-type Stream = { id: number; content_kind: string; scan_mode: string; enabled: boolean; history_complete: boolean; next_check_at: string; last_success_at?: string; deferred_reason?: string; indexed_works?: number; estimated_remaining?: number | null };
+type Stream = { id: number; content_kind: string; scan_mode: string; enabled: boolean; history_complete: boolean; next_check_at: string; last_success_at?: string; deferred_reason?: string; blocked_code?: string; indexed_works?: number; estimated_remaining?: number | null };
 type Author = { id: number; username: string; nickname: string; external_user_id: string; avatar_url?: string; profile_url: string; is_subscribed: boolean; total_works: number; streams: Stream[] };
 const root = "/platform-downloads/instagram";
 const route = useRoute(), router = useRouter();
@@ -102,8 +102,9 @@ async function preview(taskId: number) {
   } catch (e: any) { detailError.value = e.message; }
 }
 function delayLabel(stream: Stream) {
-  if (stream.scan_mode === "history" && stream.history_complete) return "历史已补齐";
   if (!stream.enabled) return "已暂停";
+  if (stream.blocked_code) return "检查受阻，请手动重试";
+  if (stream.scan_mode === "history" && stream.history_complete) return "历史已补齐";
   const minutes = Math.floor((Date.now() - Date.parse(stream.next_check_at + "Z")) / 60000);
   return minutes > 1 ? `到期延迟 ${minutes} 分钟` : "下次 " + utc(stream.next_check_at);
 }
@@ -138,7 +139,7 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; window.clearInterval(t
           <td><input v-model="selectedIds" type="checkbox" :value="author.id" :aria-label="'选择 '+author.username" /></td>
           <td data-label="作者"><div class="author-cell"><AuthorAvatar :id="author.id" platform="instagram" :url="author.avatar_url" /><div><button class="record-link" @click="openAuthor(author.id)">{{ author.nickname || author.username }}</button><span>@{{ author.username }}</span></div></div></td>
           <td data-label="作品">{{ author.total_works }}</td>
-          <td data-label="订阅与进度"><StatusIndicator :status="author.is_subscribed ? 'success' : 'paused'" :label="author.is_subscribed ? '已订阅' : '已暂停'" /><p class="field-help">{{ author.streams.filter(s=>s.enabled && s.scan_mode==='history' && !s.history_complete).length ? '历史补采中' : '查看内容检查进度' }}</p></td>
+          <td data-label="订阅与进度"><StatusIndicator :status="author.is_subscribed ? 'success' : 'paused'" :label="author.is_subscribed ? '已订阅' : '已暂停'" /><p class="field-help">{{ author.streams.some(s=>s.enabled && s.blocked_code) ? '检查受阻' : author.streams.filter(s=>s.enabled && s.scan_mode==='history' && !s.history_complete).length ? '历史补采中' : '查看内容检查进度' }}</p></td>
           <td><button class="text-button" @click="openAuthor(author.id)">查看详情</button></td>
         </tr></tbody>
       </table>
