@@ -110,7 +110,12 @@ def _recover_one(journal: Path) -> None:
 
 def recover_media_deletions() -> None:
     for journal in deletion_directory().glob("*.json"):
-        _recover_one(journal)
+        try:
+            _recover_one(journal)
+        except RuntimeError:
+            # 清单冲突（隔离文件被改写、原路径被占用）保留待人工处理，不阻塞服务启动；
+            # 数据库等可恢复错误仍向上抛出，由启动流程重试。
+            logger.exception("媒体删除清单待人工处理: %s", journal.name)
 
 
 def _bind_settlement(db) -> None:
@@ -133,10 +138,10 @@ def _bind_settlement(db) -> None:
     event.listen(db, "after_transaction_end", settle)
 
 
-def stage_media_deletion(db, paths, *, author_ids=(), work_ids=(), task_ids=()) -> int:
-    """调用方必须先锁 Author→Work→Task；不提交事务。"""
+def stage_media_deletion(db, paths, *, author_ids=(), work_ids=(), task_ids=(), root=None) -> int:
+    """调用方必须先锁 Author→Work→Task；不提交事务。root 默认抖音目录，其他平台传下载根目录。"""
     operation = uuid4().hex
-    root = Path(settings.DOWNLOAD_DIR).expanduser().resolve()
+    root = Path(root or settings.DOWNLOAD_DIR).expanduser().resolve()
     candidates = set()
     for value in paths:
         if not value:

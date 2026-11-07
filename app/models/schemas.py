@@ -266,6 +266,8 @@ class UnifiedTaskActionRequest(BaseModel):
     task_keys: List[Annotated[str, Field(min_length=3, max_length=64)]] = Field(
         ..., min_length=1, max_length=100,
     )
+    # 仅对 delete 生效：同时删除已完整下载的文件；损坏或未完成的文件总会清理。
+    delete_files: bool = False
 
 
 class PaginatedResponse(BaseModel):

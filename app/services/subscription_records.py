@@ -8,6 +8,7 @@ from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.core.runtime_config import get_runtime_config_sync
+from app.core.time_basis import local_offset, local_to_utc
 from app.models.models import (
     PlatformAuthor,
     PlatformDownloadTask,
@@ -36,9 +37,9 @@ def sync_session_runs(db, *, task_id=None, token=None):
         .where(
             PlatformSubscriptionRun.task_id == PlatformDownloadTask.id,
             PlatformSubscriptionRun.status == status,
-            PlatformSubscriptionRun.finished_at.is_not_distinct_from(
-                PlatformDownloadTask.completed_at
-            ),
+            # 运行记录是 UTC、任务是服务器本地时间，只比较“是否已结束”，具体时间按 task_id 同步时换算。
+            PlatformSubscriptionRun.finished_at.is_(None)
+            == PlatformDownloadTask.completed_at.is_(None),
         )
         .exists()
     )
@@ -73,7 +74,7 @@ def sync_session_runs(db, *, task_id=None, token=None):
                 task_id=task.id,
                 content_kind="session",
                 scan_mode="session",
-                started_at=task.started_at or task.created_at,
+                started_at=local_to_utc(task.started_at or task.created_at),
             )
             db.add(run)
         run.status = "running" if task.status == "downloading" else task.status
@@ -86,7 +87,7 @@ def sync_session_runs(db, *, task_id=None, token=None):
             if task.status == "downloading"
             else "等待会话检测"
         )
-        run.finished_at = task.completed_at
+        run.finished_at = local_to_utc(task.completed_at)
     db.flush()
 
 
@@ -95,6 +96,8 @@ def cleanup_records(db):
     cutoff = utcnow() - timedelta(
         days=settings.snapshot().SUBSCRIPTION_RECORD_RETENTION_DAYS
     )
+    # 抖音报告与任务表是服务器本地时间，需用本地截止时间比较。
+    local_cutoff = cutoff + local_offset()
     for model in (PlatformSubscriptionRun, SubscriptionCheckReport):
         inactive = model.status != "running"
         if model is PlatformSubscriptionRun:
@@ -115,7 +118,8 @@ def cleanup_records(db):
                 select(model.id)
                 .where(
                     inactive,
-                    func.coalesce(model.finished_at, model.started_at) < cutoff,
+                    func.coalesce(model.finished_at, model.started_at)
+                    < (cutoff if model is PlatformSubscriptionRun else local_cutoff),
                 )
                 .order_by(model.id)
                 .limit(BATCH_SIZE)
@@ -136,7 +140,7 @@ def cleanup_records(db):
                 func.coalesce(
                     PlatformDownloadTask.completed_at, PlatformDownloadTask.created_at
                 )
-                < cutoff,
+                < local_cutoff,
                 ~PlatformDownloadTask.media_assets.any(),
                 ~select(PlatformWork.id)
                 .where(PlatformWork.download_task_id == PlatformDownloadTask.id)
@@ -169,12 +173,9 @@ def iso_utc(value):
     return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
 
 
-def instagram_payload(db, row, *, include_details=True):
-    author = (
-        db.get(PlatformAuthor, row.author_id)
-        if row.author_id and include_details
-        else None
-    )
+def instagram_payload(db, row, *, include_details=True, author=None):
+    if author is None and row.author_id:
+        author = db.get(PlatformAuthor, row.author_id)
     session = row.content_kind == "session"
     checked = int(row.author_id is not None)
     failed = int(row.status in ("failed", "partial", "interrupted")) * checked
@@ -198,6 +199,8 @@ def instagram_payload(db, row, *, include_details=True):
         downloaded_files=row.saved or 0,
         summary=row.message,
         content_kind=row.content_kind,
+        author_id=row.author_id,
+        author_name=(author.nickname or author.username) if author else None,
         started_at=iso_utc(row.started_at),
         finished_at=iso_utc(row.finished_at),
         details=[
@@ -258,7 +261,8 @@ def unified_runs(db, page, page_size):
         select(
             literal("instagram"),
             PlatformSubscriptionRun.id,
-            PlatformSubscriptionRun.started_at,
+            # Instagram 记录是 UTC，换算成服务器本地时间后才能与抖音记录统一排序。
+            PlatformSubscriptionRun.started_at + literal(local_offset()),
         ).where(PlatformSubscriptionRun.platform == "instagram"),
     ).subquery()
     total = db.scalar(select(func.count()).select_from(sources))
@@ -307,11 +311,28 @@ def unified_runs(db, page, page_size):
         if instagram_ids
         else {}
     )
+    author_ids = {row.author_id for row in instagram_rows.values() if row.author_id}
+    instagram_authors = (
+        {
+            author.id: author
+            for author in db.scalars(
+                select(PlatformAuthor).where(PlatformAuthor.id.in_(author_ids))
+            )
+        }
+        if author_ids
+        else {}
+    )
     items = []
     for platform, identity, _ in identities:
         if platform == "instagram" and identity in instagram_rows:
+            row = instagram_rows[identity]
             items.append(
-                instagram_payload(db, instagram_rows[identity], include_details=False)
+                instagram_payload(
+                    db,
+                    row,
+                    include_details=False,
+                    author=instagram_authors.get(row.author_id),
+                )
             )
         elif platform == "douyin" and identity in douyin_rows:
             items.append(

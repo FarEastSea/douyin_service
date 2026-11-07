@@ -18,6 +18,7 @@ from sqlalchemy import case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.exclusions import router as exclusions_router
 from app.api.media_library import router as media_library_router
 from app.core import redis_client
 from app.core.config import settings
@@ -48,7 +49,7 @@ from app.services.storage_maintenance import (
 from app.tasks.operations_tasks import run_storage_audit_task, run_storage_repair_all_task
 from app.tasks.operations_tasks import retry_all_failed_task, delete_all_failed_task
 from app.services.bulk_task_retry import create_job, failed_task_keys, get_job, release_lock, save_job
-from app.services.unified_task_operations import TaskOperationError, operate_task
+from app.services.unified_task_operations import TaskOperationError, deletion_summary, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
 from app.services.media_library import douyin_media_type
@@ -56,6 +57,7 @@ from app.services.media_library import douyin_media_type
 
 router = APIRouter(prefix="/operations", tags=["统一运维"])
 router.include_router(media_library_router)
+router.include_router(exclusions_router)
 logger = logging.getLogger(__name__)
 
 
@@ -856,15 +858,20 @@ async def unified_task_actions(
     task_keys = list(dict.fromkeys(request.task_keys))
     succeeded: list[str] = []
     failed: list[dict[str, Any]] = []
+    files = {"removed": 0, "kept": 0}
     for task_key in task_keys:
         try:
-            await operate_task(db, task_key, request.action)
+            result = await operate_task(db, task_key, request.action, delete_files=request.delete_files)
+            for key in files:
+                files[key] += int((result or {}).get(key) or 0)
             succeeded.append(task_key)
         except TaskOperationError as exc:
             failed.append({"task_key": task_key, "message": str(exc), "status_code": exc.status_code})
     action_label = {"retry": "重试", "cancel": "取消", "pause": "暂停",
                     "resume": "恢复", "refresh_retry": "刷新重试", "delete": "删除"}[request.action]
     message = f"已{action_label} {len(succeeded)} 个任务"
+    if request.action == "delete" and (summary := deletion_summary(files)):
+        message += f"，{summary}"
     if failed:
         message += f"，{len(failed)} 个未处理"
     try:
@@ -879,7 +886,7 @@ async def unified_task_actions(
         logger.warning("统一任务操作已完成，但活动日志写入失败: %s", exc)
     return MessageResponse(
         success=bool(succeeded), message=message,
-        data={"succeeded": succeeded, "failed": failed},
+        data={"succeeded": succeeded, "failed": failed, "files": files},
     )
 
 

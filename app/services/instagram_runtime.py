@@ -131,6 +131,12 @@ def normalize_cookie(raw):
 
 def connection(db):
     cookie = get_platform_cookie_sync(db, "instagram", "INSTAGRAM_COOKIE")
+    if cookie:
+        # 首次启动值可能直接来自 .env，与网页保存值走同一规范化，无效值视为未配置。
+        try:
+            cookie = normalize_cookie(cookie)
+        except ValueError:
+            cookie = None
     row = account_state(db)
     proxy = _decrypt(row.encrypted_proxy) if row.encrypted_proxy else ""
     fingerprint = sha256(f"{cookie or ''}\n{proxy}".encode()).hexdigest()
@@ -310,7 +316,7 @@ def block_account(db, code, retry_after=None):
         if not math.isfinite(seconds):
             seconds = 86400
         row.cooldown_until = utcnow() + timedelta(seconds=min(seconds, 7 * 86400))
-        row.status = "ready"  # 冷却后只允许单通道中的首个请求试探。
+        # 限流不能证明会话有效：保留原状态，已通过检测的会话冷却后由单通道首个请求试探。
         message = "Instagram 请求受限，全部采集进入保护性冷却"
     else:
         row.status = code

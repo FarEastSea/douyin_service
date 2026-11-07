@@ -1,7 +1,6 @@
 """Instagram 的稳定身份与分流订阅状态。"""
 
 import json
-from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -10,6 +9,7 @@ from app.core.config import settings
 from app.models.models import (
     InstagramCollection,
     InstagramCollectionItem,
+    MediaRedownloadBlock,
     PlatformAuthor,
     PlatformDownloadTask,
     PlatformMediaAsset,
@@ -68,10 +68,6 @@ def upsert_author(db, user):
 
 
 def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True):
-    kinds = set(kinds if kinds is not None else ("posts", "reels"))
-    if not kinds or kinds - set(KINDS):
-        raise ValueError("至少选择一种有效的 Instagram 内容类型")
-    author.is_subscribed = subscribed
     states = {
         (row.content_kind, row.scan_mode): row
         for row in db.scalars(
@@ -85,6 +81,11 @@ def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True)
         for row in states.values()
         if row.scan_mode == "recent" and row.enabled
     }
+    # 未指定内容类型时沿用已选择的内容，避免一次性下载或恢复订阅关闭 Stories/Highlights。
+    kinds = set(kinds if kinds is not None else previously_selected or ("posts", "reels"))
+    if not kinds or kinds - set(KINDS):
+        raise ValueError("至少选择一种有效的 Instagram 内容类型")
+    author.is_subscribed = subscribed
     for kind in KINDS:
         for mode in ("recent",) if kind == "stories" else ("recent", "history"):
             row = states.get((kind, mode))
@@ -95,7 +96,8 @@ def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True)
                     content_kind=kind,
                     scan_mode=mode,
                     enabled=enabled,
-                    next_check_at=utcnow() + timedelta(seconds=interval_for(kind)),
+                    # 新选择的内容立即到期，由全局预算与优先级决定实际执行顺序。
+                    next_check_at=utcnow(),
                 )
                 db.add(row)
             elif mode == "history" and kind in kinds and kind in previously_selected:
@@ -105,7 +107,7 @@ def configure_subscription(db, author, *, subscribed, kinds=None, backfill=True)
                 row.enabled = enabled
                 if enabled:
                     row.blocked_code = None
-                    row.next_check_at = utcnow() + timedelta(seconds=interval_for(kind))
+                    row.next_check_at = utcnow()
     db.flush()
 
 
@@ -239,9 +241,19 @@ def work_complete(db, work):
             )
         )
     )
+    # 被用户阻止重新下载的媒体算作已处理，否则作品会永远停在“待补齐”。
+    blocked = int(
+        db.scalar(
+            select(func.count(MediaRedownloadBlock.id)).where(
+                MediaRedownloadBlock.platform == "instagram",
+                MediaRedownloadBlock.work_id == work.id,
+            )
+        )
+        or 0
+    )
     return bool(
         work.expected_media_count
-        and len(assets) == work.expected_media_count
+        and len(assets) + blocked >= work.expected_media_count
         and all(
             Path(asset.file_path).is_file()
             and Path(asset.file_path).stat().st_size == asset.size_bytes

@@ -247,7 +247,8 @@ export interface LibraryMedia {
   key: string;
   platform: string;
   id: number;
-  task_key: string;
+  task_key: string | null;
+  library_status?: "indexed" | "orphaned";
   work_id?: number;
   author_id?: number;
   author_name?: string;
@@ -286,6 +287,8 @@ export interface AutomationRun {
   key?: string;
   platform?: string;
   content_kind?: string;
+  author_id?: number | null;
+  author_name?: string | null;
   downloaded_files?: number;
   id: number;
   status: string;

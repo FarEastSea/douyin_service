@@ -48,7 +48,13 @@ from app.services.archive_rules import (
 from app.services.work_manager import recalc_author_counts, refresh_work_download_state
 from app.services.work_metadata import apply_work_payload
 from app.services.work_factory import ensure_work_async
-from app.services.unified_task_operations import TaskOperationError, operate_task, delete_douyin_tasks
+from app.services.unified_task_operations import (
+    TaskOperationError,
+    delete_douyin_tasks,
+    delete_task_with_files,
+    deletion_summary,
+    operate_task,
+)
 from app.services.download_state_lock import lock_works
 from app.services.download_lifecycle import prepare_download_retry
 from app.services.douyin_account import get_request_context
@@ -740,14 +746,18 @@ async def force_retry_task(task_id: int, db: AsyncSession = Depends(get_async_db
 
 
 @router.delete("/{task_id}", response_model=MessageResponse)
-async def delete_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
+async def delete_task(
+    task_id: int,
+    delete_files: bool = Query(False, description="同时删除已完整下载的文件；不完整文件总会清理"),
+    db: AsyncSession = Depends(get_async_db),
+):
     """删除下载任务"""
     try:
-        await operate_task(db, f"douyin:{task_id}", "delete")
+        files = await delete_task_with_files(db, f"douyin:{task_id}", delete_files=delete_files)
     except TaskOperationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    return MessageResponse(success=True, message="任务已删除")
+    summary = deletion_summary(files)
+    return MessageResponse(success=True, message="任务已删除" + (f"，{summary}" if summary else ""), data=files)
 
 
 @router.post("/force-retry-all-downloading", response_model=MessageResponse)
@@ -835,6 +845,9 @@ async def get_all_failed_errors(db: AsyncSession = Depends(get_async_db)):
     )
 
 
+BATCH_DELETE_SIZE = 100
+
+
 @router.post("/batch-delete", response_model=MessageResponse)
 async def batch_delete_tasks(
     status: str = Query(..., description="要删除的任务状态"),
@@ -850,11 +863,16 @@ async def batch_delete_tasks(
     if not tasks:
         return MessageResponse(success=True, message="没有可删除的任务", data={"count": 0})
 
-    try:
-        count = await delete_douyin_tasks(db, [task.id for task in tasks])
-    except TaskOperationError as exc:
-        await db.rollback()
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    ids = [task.id for task in tasks]
+    count = 0
+    # 每批独立提交：删除时还要隔离不完整文件，单个长事务会拉长锁持有时间并放大回滚范围。
+    for start in range(0, len(ids), BATCH_DELETE_SIZE):
+        try:
+            count += await delete_douyin_tasks(db, ids[start:start + BATCH_DELETE_SIZE])
+        except TaskOperationError as exc:
+            await db.rollback()
+            detail = f"已删除 {count} 个任务后停止：{exc}" if count else str(exc)
+            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
 
     await asyncio.to_thread(
         redis_client.append_activity_log,

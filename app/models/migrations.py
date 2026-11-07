@@ -151,6 +151,9 @@ ADD_COLUMN_MIGRATIONS = [
 
 INDEX_MIGRATIONS = [
     _create_index("0130_platform_media_identity", "平台媒体稳定身份去重", "uq_platform_media_identity", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_platform_media_identity ON platform_media_assets (platform, external_media_id)", "CREATE UNIQUE INDEX uq_platform_media_identity ON platform_media_assets (platform, external_media_id)"),
+    # 媒体库按路径比对无索引媒体与已索引记录；hash 索引只做等值匹配，不受长路径长度限制。
+    _create_index("0131_idx_download_task_file_path", "下载任务文件路径等值索引", "idx_download_task_file_path", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_task_file_path ON download_tasks USING hash (file_path)", "CREATE INDEX idx_download_task_file_path ON download_tasks (file_path(255))"),
+    _create_index("0132_idx_platform_media_file_path", "平台媒体文件路径等值索引", "idx_platform_media_file_path", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_platform_media_file_path ON platform_media_assets USING hash (file_path)", "CREATE INDEX idx_platform_media_file_path ON platform_media_assets (file_path(255))"),
     _create_index("0101_idx_status_created", "下载任务状态与创建时间索引", "idx_status_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_status_created ON download_tasks (status, created_at)", "CREATE INDEX idx_status_created ON download_tasks (status, created_at)"),
     _create_index("0102_idx_work_status", "下载任务作品与状态索引", "idx_work_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_work_status ON download_tasks (work_id, status)", "CREATE INDEX idx_work_status ON download_tasks (work_id, status)"),
     _create_index("0103_idx_x_status_created", "X 任务状态与创建时间索引", "idx_x_status_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_x_status_created ON x_download_tasks (status, created_at)", "CREATE INDEX idx_x_status_created ON x_download_tasks (status, created_at)"),

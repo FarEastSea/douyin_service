@@ -116,25 +116,45 @@ export function statusPresentation(status?: string) {
   return { label: value?.[0] || "状态未确认", tone: value?.[1] || "neutral" };
 }
 
+export interface ConfirmationOption {
+  label: string;
+  help?: string;
+}
 export interface Confirmation {
   title: string;
   message: string;
   confirmLabel: string;
   danger: boolean;
+  option?: ConfirmationOption;
 }
 export const confirmation = shallowRef<Confirmation | null>(null);
+// 确认框附加选项的勾选状态；每次打开都重置为未勾选，避免沿用上次的危险选择。
+export const confirmationChecked = ref(false);
 let resolveConfirmation: ((value: boolean) => void) | null = null;
+function openConfirmation(value: Confirmation): Promise<boolean> {
+  if (resolveConfirmation) return Promise.resolve(false);
+  confirmationChecked.value = false;
+  confirmation.value = value;
+  return new Promise((resolve) => {
+    resolveConfirmation = resolve;
+  });
+}
 export function confirmAction(
   message: string,
   title = "确认操作",
   confirmLabel = "确认继续",
   danger = true,
 ): Promise<boolean> {
-  if (resolveConfirmation) return Promise.resolve(false);
-  confirmation.value = { title, message, confirmLabel, danger };
-  return new Promise((resolve) => {
-    resolveConfirmation = resolve;
-  });
+  return openConfirmation({ title, message, confirmLabel, danger });
+}
+export async function confirmWithOption(
+  message: string,
+  option: ConfirmationOption,
+  title = "确认操作",
+  confirmLabel = "确认继续",
+): Promise<{ confirmed: boolean; checked: boolean }> {
+  const confirmed = await openConfirmation({ title, message, confirmLabel, danger: true, option });
+  return { confirmed, checked: confirmed && confirmationChecked.value };
 }
 export function settleConfirmation(value: boolean) {
   const resolve = resolveConfirmation;

@@ -413,6 +413,15 @@ def update_subscription(
     return author_payload(db, author)
 
 
+def release_waiting_task(db, state):
+    """手动触发时解除该 stream 旧任务的延期，否则调度会一直停在这个 stream。"""
+    task = db.get(PlatformDownloadTask, state.task_id) if state.task_id else None
+    if task and task.status == "pending" and task.celery_task_id is None:
+        options = options_for(task)
+        if options.pop("not_before", None) is not None:
+            task.instagram_options = json.dumps(options)
+
+
 @router.post("/authors/{author_id}/scan")
 def scan_author(author_id: int, db=Depends(session)):
     require_enabled()
@@ -427,6 +436,7 @@ def scan_author(author_id: int, db=Depends(session)):
     for row in rows:
         row.blocked_code = None
         row.next_check_at, row.manual = utcnow(), True
+        release_waiting_task(db, row)
     db.commit()
     notify_dispatch()
     return {"success": True, "message": "检查已排入调度，仍遵守全局预算与冷却"}
@@ -455,6 +465,7 @@ def history_author(author_id: int, request: HistoryUpdate, db=Depends(session)):
         if row.enabled:
             row.blocked_code = None
             row.history_complete, row.next_check_at = False, utcnow()
+            release_waiting_task(db, row)
     db.commit()
     notify_dispatch()
     return {"success": True}

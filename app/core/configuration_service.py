@@ -234,7 +234,8 @@ async def _save_configuration(db: AsyncSession, values: dict, *, preview: bool =
             "x_media": 0,
             "platform_tasks": 0,
             "platform_media": 0,
-            "unresolved": {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0},
+            "orphan_media": 0,
+            "unresolved": {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0, "orphan_media": 0},
             "unresolved_total": 0,
         }
         if (

@@ -151,7 +151,13 @@ async function copyDiagnostic() {
 }
 function sourceLabel(report: AutomationRun) {
   const labels: Record<string, string> = {posts:'Posts',reels:'Reels',stories:'Stories',highlights:'Highlights',session:'会话',work:'作品',profile:'作者'};
-  return report.platform === 'instagram' ? `Instagram${report.content_kind ? ' · ' + (labels[report.content_kind] || report.content_kind) : ''}` : '抖音';
+  if (report.platform !== 'instagram') return '抖音';
+  if (report.content_kind === 'session') return 'Instagram · 会话检测';
+  return `Instagram${report.content_kind ? ' · ' + (labels[report.content_kind] || report.content_kind) : ''}`;
+}
+function runSubject(report: AutomationRun) {
+  if (report.content_kind === "session") return "登录会话";
+  return report.author_name || (report.author_id ? `作者 #${report.author_id}` : "作者未确认");
 }
 function trigger(value?: string) {
   if (value === "session") return "会话检测";
@@ -286,7 +292,7 @@ onBeforeUnmount(() => {
         <thead>
           <tr>
             <th>时间 / 来源</th>
-            <th>检查人数</th>
+            <th>检查范围</th>
             <th>新作品</th>
             <th>下载文件</th>
             <th>待续检</th>
@@ -304,15 +310,21 @@ onBeforeUnmount(() => {
             <td data-label="时间">
               <button class="record-link" @click="openRun(report.key || report.id)">
                 {{ dateTime(report.started_at) }}</button
-              ><span>{{ sourceLabel(report) }} · {{ trigger(report.trigger_type) }}</span>
+              ><span>{{ sourceLabel(report) }}<template v-if="report.trigger_type !== 'session'"> · {{ trigger(report.trigger_type) }}</template></span>
             </td>
-            <td data-label="检查人数">
-              {{ report.checked_authors
-              }}<small> / {{ report.total_authors }}</small>
+            <td data-label="检查范围">
+              <template v-if="report.platform === 'instagram'"
+                ><span class="run-subject">{{ runSubject(report) }}</span></template
+              ><template v-else
+                >{{ report.checked_authors
+                }}<small> / {{ report.total_authors }} 位作者</small></template
+              >
             </td>
             <td data-label="新作品">{{ report.new_works }}</td>
             <td data-label="下载文件">{{ report.downloaded_files ?? '—' }}</td>
-            <td data-label="待续检">{{ report.remaining_authors }}</td>
+            <td data-label="待续检">
+              {{ report.platform === "instagram" ? (report.remaining_authors ? "续检中" : "—") : report.remaining_authors }}
+            </td>
             <td data-label="耗时">
               {{
                 report.status === "running"
@@ -364,7 +376,11 @@ onBeforeUnmount(() => {
         ><StatusIndicator :status="detail.status" />
         <p class="detail-summary">{{ detail.summary || "本次检查结果" }}</p>
         <dl class="detail-grid">
-          <div>
+          <div v-if="detail.platform === 'instagram'">
+            <dt>对象</dt>
+            <dd>{{ runSubject(detail) }}</dd>
+          </div>
+          <div v-else>
             <dt>检查</dt>
             <dd>{{ detail.checked_authors }} 位</dd>
           </div>
@@ -374,7 +390,7 @@ onBeforeUnmount(() => {
           </div>
           <div>
             <dt>下载文件</dt><dd>{{ detail.downloaded_files ?? '—' }}</dd>
-          </div><div>
+          </div><div v-if="detail.platform !== 'instagram'">
             <dt>待续检</dt>
             <dd>{{ detail.remaining_authors }} 位</dd>
           </div>

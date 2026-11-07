@@ -47,6 +47,18 @@ const {
   saveAndTestNotification,
   toggleArchiveValue,
 } = componentProps.controller;
+// 秒数配置附带可读时长，避免把 21600 这类值误读。
+function durationHint(label: string, value: unknown) {
+  const seconds = Number(value);
+  if (!/（秒）|\(秒\)/.test(label) || !Number.isFinite(seconds) || seconds < 120) return "";
+  const units: [number, string][] = [[86400, "天"], [3600, "小时"], [60, "分钟"]];
+  for (const [size, unit] of units)
+    if (seconds >= size) {
+      const amount = seconds / size;
+      return `约 ${Number.isInteger(amount) ? amount : amount.toFixed(1)} ${unit}`;
+    }
+  return "";
+}
 </script>
 <template>
   <div class="settings-sections">
@@ -113,6 +125,7 @@ const {
                   )
                 "
               />
+              <small v-if="field.kind === 'number' && durationHint(field.label, fieldValue(field))" class="field-help">{{ durationHint(field.label, fieldValue(field)) }}</small>
               <span v-if="fieldErrors[field.key]" :id="'setting-error-'+field.key" class="field-error">{{fieldErrors[field.key]}}</span>
             </span>
           </label>
@@ -420,6 +433,7 @@ const {
                   )
                 "
               />
+              <small v-if="field.kind === 'number' && durationHint(field.label, fieldValue(field))" class="field-help">{{ durationHint(field.label, fieldValue(field)) }}</small>
               <span v-if="fieldErrors[field.key]" :id="'setting-error-'+field.key" class="field-error">{{fieldErrors[field.key]}}</span>
             </span>
           </label>

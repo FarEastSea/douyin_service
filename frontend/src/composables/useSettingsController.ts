@@ -810,6 +810,9 @@ export function useSettingsController(props: {
       jobs.push(loadLogs());
     } else if (activePage.value.id === "update") {
       jobs.push(loadUpdateInfo());
+    } else if (activePage.value.id === "exclusions") {
+      // 排除项目组件自行加载数据；页头刷新通过事件通知它重新读取。
+      window.dispatchEvent(new CustomEvent("app:exclusions-refresh"));
     }
     const results = await Promise.allSettled(jobs);
     if (current !== pageLoadSequence) return;

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.models import (
     DownloadHistory,
     DownloadTask,
+    OrphanMediaFile,
     PlatformDownloadTask,
     PlatformMediaAsset,
     XDownloadTask,
@@ -230,6 +231,12 @@ def run_storage_audit(
                 known.add(str(candidate.resolve(strict=False)))
             except (OSError, RuntimeError, ValueError):
                 known.add(str(path_value))
+    # 已登记的无索引媒体由媒体库管理，不再算作未登记文件。
+    for path_value in db.execute(select(OrphanMediaFile.file_path)).scalars():
+        try:
+            known.add(str(Path(str(path_value)).expanduser().resolve(strict=False)))
+        except (OSError, RuntimeError, ValueError):
+            known.add(str(path_value))
     if progress:
         progress({
             "phase": "files",

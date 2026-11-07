@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import (
     DownloadHistory,
     DownloadTask,
+    OrphanMediaFile,
     PlatformDownloadTask,
     PlatformMediaAsset,
     XDownloadTask,
@@ -120,7 +121,7 @@ async def _is_referenced(db: AsyncSession, root: Path, raw_path: str, resolved_p
         values.update({relative, relative.replace("\\", "/")})
     except ValueError:
         pass
-    for model, column in RECORD_MODELS.values():
+    for model, column in (*RECORD_MODELS.values(), (OrphanMediaFile, OrphanMediaFile.file_path)):
         if int((await db.scalar(select(func.count(model.id)).where(column.in_(values)))) or 0):
             return True
     return False
@@ -241,11 +242,36 @@ async def build_storage_repair_plan(
                     raise ValueError("文件已变化或不是可识别媒体")
                 if await _is_referenced(db, root, raw_path, str(path)):
                     raise ValueError("文件已经被数据库记录引用")
-                item.update(eligible=True, action="quarantine_orphan")
+                # 未登记媒体纳入媒体库的“无索引媒体”统一管理，不再移入隔离区。
+                item.update(eligible=True, action="adopt_orphan")
         except (OSError, RuntimeError, ValueError) as exc:
             item["reason"] = str(exc)
         plan.append(item)
     return plan
+
+
+async def _adopt_orphan(db: AsyncSession, path: Path) -> None:
+    """按文件所在的平台目录登记为无索引媒体，文件保持原位。"""
+    from app.core.config import settings
+    from app.services.media_library import PLATFORMS, VIDEO_EXTENSIONS, media_root
+    from app.services.task_file_cleanup import adopt_orphans
+
+    config = settings.snapshot()
+    roots = {
+        name: Path(media_root(config, name)).expanduser().resolve(strict=False) for name in PLATFORMS
+    }
+    # 目录可能嵌套，取最深的匹配目录作为归属平台。
+    matches = [name for name, root in roots.items() if path.is_relative_to(root)]
+    platform = max(matches, key=lambda name: len(roots[name].parts), default=None)
+    if platform is None:
+        raise ValueError("文件不在任何平台下载目录内，无法归类")
+    entry = {
+        "file_path": str(path),
+        "media_type": "video" if path.suffix.lower() in VIDEO_EXTENSIONS else "image",
+    }
+    await db.run_sync(lambda session: adopt_orphans(
+        session, platform, [entry], origin="storage_audit", source_task_key=None,
+    ))
 
 
 async def _mark_related_task_failed(
@@ -363,6 +389,7 @@ async def _apply_storage_repair_plan(
     relinked: list[dict[str, Any]] = []
     marked_tasks: list[str] = []
     apply_errors: list[dict[str, str]] = []
+    adopted: list[str] = []
     moved_sources: set[str] = set()
     manifest = {
         "state": "prepared", "created_at": datetime.now(timezone.utc).isoformat(),
@@ -389,6 +416,9 @@ async def _apply_storage_repair_plan(
                     moved[-1].update(quarantine=str(moved_path), state="moved")
                     await asyncio.to_thread(atomic_json, manifest_path, manifest)
                     moved_sources.add(source_key)
+            if item["action"] == "adopt_orphan":
+                await _adopt_orphan(db, Path(item["path"]).expanduser().resolve(strict=False))
+                adopted.append(str(item["path"]))
             if item["action"] in {"mark_task_failed", "quarantine_and_mark_task_failed"}:
                 task_key = await _mark_related_task_failed(
                     db, item.get("record_kind"), item.get("record_id"),
@@ -447,6 +477,8 @@ async def _apply_storage_repair_plan(
         "moved": [move for move in moved if move["state"] == "moved"],
         "relinked": relinked,
         "marked_tasks": sorted(set(marked_tasks)),
+        # 纳入无索引媒体不移动文件，维护清单的“恢复”不撤销登记；需要时在媒体库中删除。
+        "adopted_orphans": adopted,
         "apply_errors": apply_errors,
         "quarantine_root": str(quarantine_root) if eligible else None,
         "recoverable": True,
