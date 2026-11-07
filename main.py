@@ -21,7 +21,7 @@ import time
 import traceback
 
 from app.api import bootstrap
-from app.core.diagnostics import get_runtime_errors
+from app.core.diagnostics import get_runtime_errors, mark_startup_recovered
 from app.core.env_config import validate_env
 from app.core.error_handling import register_exception_handlers
 from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware
@@ -90,11 +90,13 @@ async def activate_runtime(app: FastAPI) -> bool:
         initialized = Path(__file__).resolve().parent / ".runtime" / "initialized"
         initialized.parent.mkdir(parents=True, exist_ok=True)
         initialized.touch(exist_ok=True)
+        await asyncio.to_thread(mark_startup_recovered, initialized.parent / "startup-failure.json",
+                                get_runtime_identity())
         return True
     except Exception as exc:
         from app.core.error_handling import sanitize_text
         # 只持久化程序阶段和异常类型，不把配置、业务参数或异常原文写入诊断清单。
-        diagnostic = {"stage": stage, "error_type": type(exc).__name__,
+        diagnostic = {"state": "failed", "stage": stage, "error_type": type(exc).__name__,
                       "checked_at": time.time(), "runtime": get_runtime_identity()}
         diagnostic["frames"] = [{"file": os.path.basename(frame.filename), "line": frame.lineno,
                                  "function": frame.name}
