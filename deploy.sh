@@ -1065,9 +1065,25 @@ fi
 
 echo "Preparing ${PROJECT_NAME} deployment for BT Panel..."
 PREVIOUS_SHA="$(git rev-parse HEAD)"
-git fetch origin "$BRANCH"
-if [ -z "$TARGET_SHA" ]; then
-    TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+# Jenkins 已获取并固定目标时直接使用本地对象，不能再次联网阻断发布。
+# 直接调用脚本时仍需刷新分支；指定目标但对象缺失时尝试补齐。
+if [ -z "$TARGET_SHA" ] || ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+    for attempt in 1 2 3; do
+        if git fetch --no-tags origin "refs/heads/$BRANCH"; then
+            break
+        else
+            fetch_status=$?
+        fi
+        if [ "$attempt" -eq 3 ]; then
+            echo "Deploy failed: unable to fetch the target branch after 3 attempts." >&2
+            exit "$fetch_status"
+        fi
+        echo "Target branch fetch failed; retrying ($attempt/3)..." >&2
+        sleep "$((attempt * 3))"
+    done
+    if [ -z "$TARGET_SHA" ]; then
+        TARGET_SHA="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+    fi
 fi
 if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
     echo "Deploy failed: target commit ${TARGET_SHA} is unavailable." >&2

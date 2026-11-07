@@ -52,8 +52,22 @@ BRANCH="$2"
 PYTHON_ENV="$3"
 cd "$SERVICE_DIR"
 
-git fetch origin "$BRANCH"
-TARGET_SHA="$(git rev-parse "origin/$BRANCH")"
+# 只重试获取代码，不重试可能已经修改数据库或切换代码的整个发布流程。
+for attempt in 1 2 3; do
+    if git fetch --no-tags origin "refs/heads/$BRANCH"; then
+        break
+    else
+        fetch_status=$?
+    fi
+    if [ "$attempt" -eq 3 ]; then
+        echo "Deploy failed: unable to fetch the target branch after 3 attempts." >&2
+        exit "$fetch_status"
+    fi
+    echo "Target branch fetch failed; retrying ($attempt/3)..." >&2
+    sleep "$((attempt * 3))"
+done
+# FETCH_HEAD 对应本次成功拉取，不依赖可能过期的远程跟踪分支。
+TARGET_SHA="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
 TEMP_DEPLOY="$(mktemp "${TMPDIR:-/tmp}/douyin-deploy.XXXXXX")"
 trap 'rm -f "$TEMP_DEPLOY"' EXIT
 git show "${TARGET_SHA}:deploy.sh" > "$TEMP_DEPLOY"

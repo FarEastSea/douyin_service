@@ -83,9 +83,13 @@ def reconcile_service(failures: int, retry_after: float) -> tuple[int, float]:
         if not executable.is_file():
             raise RuntimeError("隔离引擎尚未安装；下次项目部署将自动预置锁定版本")
         if process is None:
-            environment = {**os.environ, "VENV_DIR": str(Path(sys.executable).parent.parent)}
-            completed = subprocess.run(["bash", str(ROOT / "start.sh"), "--xhs-start-once"],
-                                       cwd=ROOT, env=environment, timeout=45, check=False)
+            # 与托管 Celery 一致，不传 env，避免宝塔拦截 Python 的显式环境 execve。
+            # 由子 shell 设置环境，路径仅通过位置参数传递，不拼接为 shell 代码。
+            completed = subprocess.run(
+                ["bash", "-c", 'export VENV_DIR="$1"; exec bash "$2" --xhs-start-once',
+                 "xhs-start", str(Path(sys.executable).parent.parent), str(ROOT / "start.sh")],
+                cwd=ROOT, timeout=45, check=False,
+            )
             if completed.returncode:
                 raise RuntimeError("隔离服务启动失败，将自动重试")
             process = _process()
