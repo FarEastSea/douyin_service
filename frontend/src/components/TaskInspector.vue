@@ -3,7 +3,7 @@ import { ref, watch, onBeforeUnmount, onMounted } from "vue";
 import { api } from "../api";
 import { mediaPreviewType, openMedia } from "../media";
 import { useAppStore } from "../stores/app";
-import { bytes, confirmAction, dateTime, platformNames } from "../workspace";
+import { bytes, confirmWithOption, dateTime, platformNames } from "../workspace";
 import type { TaskDetail } from "../types";
 import InspectorPanel from "./InspectorPanel.vue";
 import StatusIndicator from "./StatusIndicator.vue";
@@ -164,14 +164,16 @@ async function copyDiagnostic() {
 async function deleteRecord() {
   const item = task.value;
   if (!item || props.busy || deleting.value) return;
-  if (
-    !(await confirmAction(
-      `删除任务 ${item.key} 的记录？保留已保存的磁盘文件。记录删除不可撤销。`,
-      "删除任务记录",
-      "删除记录",
-    ))
-  )
-    return;
+  const choice = await confirmWithOption(
+    `删除任务 ${item.key}？${["pending", "downloading", "paused"].includes(item.status) ? "进行中的任务会先取消。" : ""}损坏、未下载完成的文件和残留分片会一并清理。记录删除不可撤销。`,
+    {
+      label: "同时删除已下载完成的文件",
+      help: "默认保留。保留的文件归入媒体库的“无索引媒体”，仍可查看、下载和删除。",
+    },
+    "删除任务",
+    "删除",
+  );
+  if (!choice.confirmed) return;
   deleting.value = true;
   const endpoint =
     item.platform === "douyin"
@@ -180,8 +182,11 @@ async function deleteRecord() {
         ? `/x/tasks/${item.id}`
         : `/platform-downloads/${item.platform}/tasks/${item.id}`;
   try {
-    await api(endpoint, { method: "DELETE" });
-    store.notify("任务记录已删除");
+    const result = await api<{ message?: string }>(
+      `${endpoint}?delete_files=${choice.checked}`,
+      { method: "DELETE" },
+    );
+    store.notify(result.message || "任务已删除");
     emit("changed");
     emit("close");
   } catch (e: any) {

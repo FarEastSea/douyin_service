@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { confirmation, modalDepth, settleConfirmation } from "../workspace";
+import {
+  confirmation,
+  confirmationChecked,
+  modalDepth,
+  settleConfirmation,
+} from "../workspace";
 import {
   focusFirst,
   restoreFocus,
@@ -57,6 +62,14 @@ onBeforeUnmount(() => {
       >
         <h2 id="confirm-title">{{ confirmation.title }}</h2>
         <p id="confirm-message">{{ confirmation.message }}</p>
+        <label v-if="confirmation.option" class="confirm-option"
+          ><input v-model="confirmationChecked" type="checkbox" /><span
+            ><strong>{{ confirmation.option.label }}</strong
+            ><small v-if="confirmation.option.help">{{
+              confirmation.option.help
+            }}</small></span
+          ></label
+        >
         <footer>
           <button class="btn ghost" @click="settleConfirmation(false)">
             取消</button

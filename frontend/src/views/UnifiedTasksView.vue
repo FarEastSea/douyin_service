@@ -31,7 +31,7 @@ import PageHeader from "../components/PageHeader.vue";
 import StatusIndicator from "../components/StatusIndicator.vue";
 import StateView from "../components/StateView.vue";
 import TaskInspector from "../components/TaskInspector.vue";
-import { confirmAction, dateTime, useContextActions } from "../workspace";
+import { confirmAction, confirmWithOption, dateTime, useContextActions } from "../workspace";
 import { mediaPreviewType, openMedia } from "../media";
 import { focusFirst, restoreFocus, trapFocus } from "../focus";
 import { useAppStore } from "../stores/app";
@@ -344,20 +344,29 @@ async function runAction(taskKeys: string[], action: TaskAction) {
     ))
   )
     return;
-  if (
-    action === "delete" &&
-    !(await confirmAction(
-      `删除 ${taskKeys.length} 个失败或已取消任务？\n删除任务及关联下载历史，不删除磁盘文件、作者或作品。\n后续订阅扫描若再次发现该作品，会补建缺失任务并重新下载；本次不立即重试。\n其他平台已保存部分媒体的任务会保留并说明原因。任务记录删除不可撤销。`,
-    ))
-  )
-    return;
+  let deleteFiles = false;
+  if (action === "delete") {
+    const choice = await confirmWithOption(
+      `删除 ${taskKeys.length} 个已结束的任务？
+损坏、未下载完成的文件和残留分片会一并清理。
+后续订阅扫描若再次发现该作品，会补建任务并重新下载。任务记录删除不可撤销。`,
+      {
+        label: "同时删除已下载完成的文件",
+        help: "默认保留。保留的文件归入媒体库的“无索引媒体”，仍可查看、下载和删除。",
+      },
+      "删除任务",
+      "删除",
+    );
+    if (!choice.confirmed) return;
+    deleteFiles = choice.checked;
+  }
   actionBusy.value = true;
   try {
     const result = await api<UnifiedTaskActionResult>(
       "/operations/tasks/actions",
       {
         method: "POST",
-        ...jsonBody({ action, task_keys: taskKeys }),
+        ...jsonBody({ action, task_keys: taskKeys, delete_files: deleteFiles }),
       },
     );
     const failed = result.data?.failed || [];
@@ -416,7 +425,7 @@ async function deleteAllFailed() {
     }
     if (
       !(await confirmAction(
-        `删除${scope}的全部 ${preview.total.toLocaleString()} 个失败任务？\n跨所有分页，不受搜索和当前选择限制，不包含已取消任务。\n删除任务及关联下载历史，保留磁盘文件、作者和作品；任务记录删除不可撤销。\n后续订阅再次发现作品时，会补建缺失任务重新下载。状态已变化或保存部分媒体的任务会跳过并说明原因。`,
+        `删除${scope}的全部 ${preview.total.toLocaleString()} 个失败任务？\n跨所有分页，不受搜索和当前选择限制，不包含已取消任务。\n删除任务及关联下载历史，保留完整的磁盘文件、作者和作品；损坏或未下载完成的文件会一并清理。任务记录删除不可撤销。\n后续订阅再次发现作品时，会补建缺失任务重新下载。状态已变化的任务会跳过并说明原因。`,
       ))
     )
       return;

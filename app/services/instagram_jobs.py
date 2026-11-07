@@ -9,6 +9,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.runtime_config import get_runtime_config_sync
 from app.models.models import (
     InstagramAccountState,
     PlatformAuthor,
@@ -80,6 +81,7 @@ def dispatch_due(db):
 
         cleanup_records(db)
         now, current = utcnow(), settings.snapshot()
+        auto_check = bool(get_runtime_config_sync(db).get("auto_check_enabled", True))
         # 已登记但未开始的消息同样占用通道；故障回收只针对过期本项目任务。
         inflight = list(
             db.scalars(
@@ -162,7 +164,7 @@ def dispatch_due(db):
                     state.manual
                     or author
                     and author.is_subscribed
-                    and current.AUTO_CHECK_ENABLED
+                    and auto_check
                 )
             ):
                 eligible.append(task)
@@ -208,7 +210,7 @@ def dispatch_due(db):
                         PlatformSubscriptionState.blocked_code.is_(None),
                         (
                             PlatformAuthor.is_subscribed.is_(True)
-                            & bool(current.AUTO_CHECK_ENABLED)
+                            & auto_check
                         )
                         | PlatformSubscriptionState.manual.is_(True),
                         PlatformSubscriptionState.next_check_at <= now,

@@ -9,8 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from typing import Optional
 import asyncio
-import os
-import signal
 
 from app.models.database import get_async_db
 from app.models.models import XDownloadTask, XAuthor, XMediaAsset, SystemConfig
@@ -34,7 +32,12 @@ from app.services.x_task_service import (
 )
 from app.core import redis_client
 from app.core.config import settings
-from app.services.unified_task_operations import TaskOperationError, operate_task
+from app.services.unified_task_operations import (
+    TaskOperationError,
+    delete_task_with_files,
+    deletion_summary,
+    operate_task,
+)
 
 router = APIRouter(prefix="/x", tags=["X/Twitter 下载"])
 
@@ -250,23 +253,19 @@ async def get_x_task_log(
 
 
 @router.delete("/tasks/{task_id}", response_model=MessageResponse)
-async def delete_x_task(task_id: int, db: AsyncSession = Depends(get_async_db)):
-    """删除 X 下载任务"""
-    result = await db.execute(
-        select(XDownloadTask).where(XDownloadTask.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    if task.status == "downloading":
-        await asyncio.to_thread(_kill_x_task, task_id)
-
+async def delete_x_task(
+    task_id: int,
+    delete_files: bool = Query(False, description="同时删除已完整下载的文件；不完整文件总会清理"),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """删除 X 下载任务；进行中的任务先取消。"""
+    try:
+        files = await delete_task_with_files(db, f"x:{task_id}", delete_files=delete_files)
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await asyncio.to_thread(_clear_x_task_runtime, task_id, True)
-
-    await db.delete(task)
-    await db.commit()
-    return MessageResponse(success=True, message="任务已删除")
+    summary = deletion_summary(files)
+    return MessageResponse(success=True, message="任务已删除" + (f"，{summary}" if summary else ""), data=files)
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=MessageResponse)
@@ -486,15 +485,6 @@ async def check_x_cookie(db: AsyncSession = Depends(get_async_db)):
     return {"configured": configured}
 
 
-def _kill_x_task(task_id: int):
-    """尝试终止 X 下载子进程"""
-    pid = redis_client.get_x_task_pid(task_id)
-    if pid:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        redis_client.delete_x_task_pid(task_id)
 
 
 def _clear_x_task_runtime(task_id: int, include_pid: bool) -> None:

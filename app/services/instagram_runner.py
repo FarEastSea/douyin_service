@@ -4,11 +4,13 @@
 不加载用户 gallery-dl 配置，不启动引擎自带的无界重试或外部下载进程。
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -29,6 +31,7 @@ from app.models.models import (
     PlatformMediaAsset,
     PlatformSubscriptionRun,
     PlatformSubscriptionState,
+    MediaRedownloadBlock,
     PlatformTaskWork,
     PlatformWork,
     SystemConfig,
@@ -49,6 +52,8 @@ from app.services.instagram_runtime import (
     reserve_request,
     utcnow,
 )
+from app.services.instagram_input import resolve_instagram_input
+from app.services.platform_task_service import create_platform_task
 from app.services.instagram_store import (
     configure_subscription,
     ensure_work_task,
@@ -57,6 +62,71 @@ from app.services.instagram_store import (
     upsert_author,
     work_complete,
 )
+
+
+def query_cache_key(opname):
+    # system_config.key 只有 64 字符；较长的 GraphQL 操作名改用稳定摘要，避免写入失败被判为终态。
+    name = "instagram:query:v2:" + str(opname)
+    if len(name) <= 64:
+        return name
+    return "instagram:query:v2:" + hashlib.sha256(str(opname).encode()).hexdigest()[:40]
+
+
+MALFORMED_WORK_ERRORS = (KeyError, TypeError, ValueError, AttributeError, IndexError)
+MALFORMED_STREAK_LIMIT = 5
+
+
+def queue_work_retry(db, raw):
+    """把解析失败的单条帖子交给独立作品任务稍后重试；再次失败也只影响这一条。"""
+    code = raw.get("code") or raw.get("shortcode") if isinstance(raw, dict) else None
+    if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", code):
+        return False
+    resolved = resolve_instagram_input(f"https://www.instagram.com/p/{code}/")
+    # 已有任何状态的同帖任务就不再新建：失败的那条保留在任务列表，由用户决定是否重试。
+    existing = db.scalar(
+        select(PlatformDownloadTask.id)
+        .where(
+            PlatformDownloadTask.platform == "instagram",
+            PlatformDownloadTask.source_key == resolved.source_key,
+        )
+        .limit(1)
+    )
+    if existing is None:
+        task = create_platform_task(
+            "instagram", resolved.source_key, resolved.source_url, resolved.source_type
+        )
+        task.instagram_options = json.dumps(
+            {"not_before": (utcnow() + timedelta(minutes=30)).isoformat()}
+        )
+        db.add(task)
+        db.commit()
+    return True
+
+
+def history_pending(db, state):
+    """同作者同内容的历史补齐仍会继续时，首次增量检查才可以提前结束。"""
+    history = db.scalar(
+        select(PlatformSubscriptionState).where(
+            PlatformSubscriptionState.author_id == state.author_id,
+            PlatformSubscriptionState.content_kind == state.content_kind,
+            PlatformSubscriptionState.scan_mode == "history",
+        )
+    )
+    return bool(history and history.enabled and not history.history_complete)
+
+
+_auto_check_cache = {"value": True, "until": 0.0}
+
+
+def auto_check_enabled(db):
+    # 与抖音一致，以网页保存的运行时配置为准，不读 .env 快照；10 秒短缓存只为减少逐请求查询。
+    now = time.monotonic()
+    if now >= _auto_check_cache["until"]:
+        _auto_check_cache["value"] = bool(
+            get_runtime_config_sync(db).get("auto_check_enabled", True)
+        )
+        _auto_check_cache["until"] = now + 10
+    return _auto_check_cache["value"]
 
 
 def emit(message, **values):
@@ -156,6 +226,7 @@ class Runtime:
     def __init__(self, task_id, token, lease):
         self.db = get_sync_db()
         self.gate_db = get_sync_db()
+        self.malformed_streak = self.skipped_works = self.unretried_works = 0
         self.task_id, self.token, self.lease = task_id, token, lease
         self.task = self.db.get(PlatformDownloadTask, task_id)
         bind_download_attempt(self.db, task_id, token, PlatformDownloadTask)
@@ -197,7 +268,7 @@ class Runtime:
                 or not state.manual
                 and (
                     not author.is_subscribed
-                    or not settings.snapshot().AUTO_CHECK_ENABLED
+                    or not auto_check_enabled(self.gate_db)
                 )
             ):
                 raise InstagramStop(
@@ -452,7 +523,7 @@ class Runtime:
                 and key is not ...
                 and info is not None
             ):
-                name = "instagram:query:v2:" + str(key)
+                name = query_cache_key(key)
                 row = self.gate_db.scalar(
                     select(SystemConfig).where(SystemConfig.key == name)
                 )
@@ -472,7 +543,7 @@ class Runtime:
             if func.__name__ == "_extract_opname_info" and args:
                 row = self.gate_db.scalar(
                     select(SystemConfig).where(
-                        SystemConfig.key == "instagram:query:v2:" + str(args[0])
+                        SystemConfig.key == query_cache_key(args[0])
                     )
                 )
                 if row:
@@ -523,6 +594,14 @@ class Runtime:
         media_id = str(file["media_id"]).split("_")[0]
         if not media_id.isdigit():
             raise ValueError("媒体 ID 无效")
+        if self.db.scalar(
+            select(MediaRedownloadBlock.id).where(
+                MediaRedownloadBlock.platform == "instagram",
+                MediaRedownloadBlock.media_key == media_id,
+            )
+        ):
+            # 用户在媒体库删除时选择了阻止重新下载。
+            return False
         asset = self.db.scalar(
             select(PlatformMediaAsset).where(
                 PlatformMediaAsset.platform == "instagram",
@@ -675,50 +754,75 @@ class Runtime:
         else:
             posts = [raw]
         for post in posts:
-            data = extr._parse_post(post)
-            files = [file for file in data.pop("_files") if not file.get("audio_url")]
-            if not files:
-                raise ValueError("上游作品缺少可下载媒体")
-            user = post.get("user") or extr._user
-            if not user:
-                user = {
-                    "pk": data["owner_id"],
-                    "username": data["username"],
-                    "full_name": data.get("fullname"),
-                }
-            author = upsert_author(self.db, user)
-            is_story = data.get("type") in {"story", "highlight"}
-            expected = (
-                1
-                if is_story
-                else int(
-                    post.get("carousel_media_count")
-                    or len(post.get("carousel_media") or [post])
+            try:
+                indexed = self.index_post(extr, post, stream_kind)
+            except MALFORMED_WORK_ERRORS:
+                self.db.rollback()
+                # 单条作品任务本身就是重试入口，异常必须如实失败，不能静默跳过。
+                if self.task.source_type != "profile":
+                    raise
+                self.malformed_streak += 1
+                # 连续多条失败说明上游结构整体变化，继续跳过会把整页误记为已补齐。
+                if self.malformed_streak >= MALFORMED_STREAK_LIMIT:
+                    raise
+                retried = queue_work_retry(self.db, post)
+                self.skipped_works += 1
+                self.unretried_works += int(not retried)
+                emit(
+                    "一条作品结构异常，已跳过"
+                    + ("并单独排队重试" if retried else "，无法单独重试"),
+                    event="work_skipped",
                 )
+                continue
+            self.malformed_streak = 0
+            yield indexed
+
+    def index_post(self, extr, post, stream_kind):
+        """解析并索引单条作品；结构异常由调用方逐条跳过。"""
+        data = extr._parse_post(post)
+        files = [file for file in data.pop("_files") if not file.get("audio_url")]
+        if not files:
+            raise ValueError("上游作品缺少可下载媒体")
+        user = post.get("user") or extr._user
+        if not user:
+            user = {
+                "pk": data["owner_id"],
+                "username": data["username"],
+                "full_name": data.get("fullname"),
+            }
+        author = upsert_author(self.db, user)
+        is_story = data.get("type") in {"story", "highlight"}
+        expected = (
+            1
+            if is_story
+            else int(
+                post.get("carousel_media_count")
+                or len(post.get("carousel_media") or [post])
             )
-            merged = {**data, **files[0]}
-            merged["collection_position"] = post.get("collection_position", 0)
-            if data.get("type") == "story":
-                item = post["items"][0]
-                expiry = item.get("expiring_at") or int(item["taken_at"]) + 86400
-                merged["expires"] = datetime.fromtimestamp(int(expiry), UTC).replace(
-                    tzinfo=None
-                )
-            if stream_kind == "reels":
-                merged["is_reel"] = True
-            work, is_new = persist_work(self.db, author, merged, expected)
-            child = ensure_work_task(self.db, work, self.task)
-            if self.db.get(PlatformTaskWork, (self.task_id, work.id)) is None:
-                self.db.add(PlatformTaskWork(task_id=self.task_id, work_id=work.id))
-            self.db.commit()
-            emit(
-                "已发现并索引一个作品",
-                event="work_discovered",
-                work_id=work.external_work_id,
-                is_new=is_new,
-                expected_media=expected,
+        )
+        merged = {**data, **files[0]}
+        merged["collection_position"] = post.get("collection_position", 0)
+        if data.get("type") == "story":
+            item = post["items"][0]
+            expiry = item.get("expiring_at") or int(item["taken_at"]) + 86400
+            merged["expires"] = datetime.fromtimestamp(int(expiry), UTC).replace(
+                tzinfo=None
             )
-            yield work, child, is_new, data, files
+        if stream_kind == "reels":
+            merged["is_reel"] = True
+        work, is_new = persist_work(self.db, author, merged, expected)
+        child = ensure_work_task(self.db, work, self.task)
+        if self.db.get(PlatformTaskWork, (self.task_id, work.id)) is None:
+            self.db.add(PlatformTaskWork(task_id=self.task_id, work_id=work.id))
+        self.db.commit()
+        emit(
+            "已发现并索引一个作品",
+            event="work_discovered",
+            work_id=work.external_work_id,
+            is_new=is_new,
+            expected_media=expected,
+        )
+        return work, child, is_new, data, files
 
     def close(self):
         self.db.close()
@@ -922,7 +1026,19 @@ def scan(runtime):
                 ):
                     boundary = True
                     break
-                if count >= settings.snapshot().INSTAGRAM_BATCH_ITEMS:
+                batch_items = settings.snapshot().INSTAGRAM_BATCH_ITEMS
+                if (
+                    mode == "recent"
+                    and kind in {"posts", "reels"}
+                    and state
+                    and state.last_success_at is None
+                    and count >= batch_items
+                    and history_pending(db, state)
+                ):
+                    # 首次增量检查只建立最新边界，更早的作品交给历史补齐，避免重复翻页耗尽预算。
+                    boundary = True
+                    break
+                if count >= batch_items:
                     raise InstagramStop(
                         "batch_limit",
                         "本片作品数已达上限，保存断点续跑",
@@ -935,13 +1051,21 @@ def scan(runtime):
                 raise ValueError("引擎未完成完整扫描")
         if task.source_type == "work" and not count:
             raise InstagramStop("not_found", "作品已失效或当前账号无法访问")
-        run.status = "partial" if partial else "completed"
+        skipped, unretried = runtime.skipped_works, runtime.unretried_works
+        # 异常作品不阻止历史补齐完成，否则永久异常的一条会让主页每轮从头重扫；
+        # 无法单独重试的条目把本次运行标为部分完成，提醒人工查看。
+        run.status = "partial" if partial or unretried else "completed"
         run.message = (
             "扫描完成；部分媒体等待补齐"
             if partial
             else "扫描完成；没有新增内容"
             if not discovered
             else "扫描完成"
+        ) + (
+            f"；跳过 {skipped} 条结构异常的作品"
+            + (f"，其中 {unretried} 条无法单独重试" if unretried else "，已单独排队重试")
+            if skipped
+            else ""
         )
         if state:
             state.checkpoint = "{}"
@@ -1024,6 +1148,14 @@ def scan(runtime):
             if state:
                 state.blocked_code, state.manual = stop.code, False
         task.status = "failed" if terminal else "pending"
+        if stop.code == "subscription_paused":
+            # 暂停后调度不会再投递该任务；保留断点并结束任务，恢复订阅时由调度重新创建。
+            run.status = task.status = "cancelled"
+            if state:
+                # 不留暂停原因和延期，恢复订阅后立即按调度检查。
+                state.next_check_at, state.deferred_reason = utcnow(), None
+                if state.task_id == task.id:
+                    state.task_id = None
         task.phase, task.error_code, task.error_message = (
             stop.code,
             stop.code,
@@ -1049,13 +1181,19 @@ def scan(runtime):
             )
         )
         task.celery_task_id = None if not terminal else task.celery_task_id
+    except SystemExit:
+        # 取消时的 SIGTERM：丢弃半截改动，只把运行记录标为中断，避免界面长期显示执行中。
+        db.rollback()
+        run = db.get(PlatformSubscriptionRun, run.id)
+        run.status, run.message = "interrupted", "执行已取消"
+        raise
     finally:
         run.discovered, run.saved, run.finished_at = discovered, saved, utcnow()
         db.commit()
     emit(
         run.message,
         event="scan_incomplete"
-        if run.status in {"deferred", "failed"}
+        if run.status in {"deferred", "failed", "cancelled"}
         else "scan_completed",
         checked=count,
         discovered=discovered,
@@ -1171,6 +1309,15 @@ def engine_failure(exc):
         )
     if isinstance(exc, exception.NotFoundError):
         return "not_found", "内容不存在或当前会话无法访问"
+    from redis.exceptions import RedisError
+    from sqlalchemy.exc import InterfaceError, OperationalError
+
+    if isinstance(exc, (OperationalError, InterfaceError, RedisError)):
+        # 基础设施抖动不是内容或引擎问题，不能写入阻塞码，让调度在下个周期重试。
+        return (
+            "infrastructure_unavailable",
+            "数据库或协调服务暂时不可用，已停止本次执行，稍后自动重试",
+        )
     location = ""
     trace = exc.__traceback__
     while trace:
@@ -1232,7 +1379,7 @@ def run(task_id, token):
                         PlatformSubscriptionState.manual.is_(True)
                         | (
                             PlatformAuthor.is_subscribed.is_(True)
-                            & bool(settings.snapshot().AUTO_CHECK_ENABLED)
+                            & auto_check_enabled(runtime.gate_db)
                         ),
                         PlatformSubscriptionState.task_id.in_(
                             select(PlatformDownloadTask.id).where(
@@ -1276,7 +1423,7 @@ def run(task_id, token):
                             or not (
                                 pending_state.manual
                                 or pending_author.is_subscribed
-                                and settings.snapshot().AUTO_CHECK_ENABLED
+                                and auto_check_enabled(runtime.gate_db)
                             )
                         ):
                             continue
@@ -1330,8 +1477,13 @@ def run(task_id, token):
                     "network_error",
                 }
             )
+            paused = stop.code == "subscription_paused"
             state = record_unstarted_scan(
-                db, task, started, "failed" if terminal else "deferred", stop.message
+                db,
+                task,
+                started,
+                "cancelled" if paused else "failed" if terminal else "deferred",
+                stop.message,
             )
             if state:
                 if terminal:
@@ -1349,6 +1501,12 @@ def run(task_id, token):
             )
             if not terminal:
                 task.celery_task_id = None
+            if paused:
+                task.status = "cancelled"
+                if state:
+                    state.next_check_at, state.deferred_reason = utcnow(), None
+                    if state.task_id == task.id:
+                        state.task_id = None
             if task.source_type == "session":
                 account = account_state(db)
                 account.last_error = stop.message
@@ -1382,7 +1540,7 @@ def run(task_id, token):
                     )
                 ):
                     record.status, record.message, record.finished_at = (
-                        "failed",
+                        "deferred" if code == "infrastructure_unavailable" else "failed",
                         message,
                         utcnow(),
                     )
@@ -1394,7 +1552,11 @@ def run(task_id, token):
                     message,
                 )
                 state = record_unstarted_scan(
-                    runtime.db, task, started, "failed", message
+                    runtime.db,
+                    task,
+                    started,
+                    "deferred" if code == "infrastructure_unavailable" else "failed",
+                    message,
                 )
                 if state and code in TERMINAL_SCAN_ERRORS:
                     state.blocked_code, state.manual, state.deferred_reason = (
@@ -1403,7 +1565,18 @@ def run(task_id, token):
                         message,
                     )
                 task.completed_at, task.output_log = datetime.now(), message
-                if runtime.testing:
+                transient = code == "infrastructure_unavailable"
+                if transient:
+                    # 基础设施恢复后自动重试，不计为失败，也不改变会话检测结论。
+                    options = json.loads(task.instagram_options or "{}")
+                    options["not_before"] = (utcnow() + timedelta(minutes=5)).isoformat()
+                    task.instagram_options = json.dumps(options)
+                    task.status, task.celery_task_id, task.completed_at = (
+                        "pending",
+                        None,
+                        None,
+                    )
+                if runtime.testing and not transient:
                     account = account_state(runtime.db)
                     account.last_error = message
                     if code in {"auth_required", "checkpoint"}:
@@ -1437,5 +1610,11 @@ def run(task_id, token):
                 runtime.close()
 
 
+def _exit_on_terminate(signum, frame):
+    # 取消任务时父进程会发送 SIGTERM；转为 SystemExit 才能执行 finally，释放通道锁与临时文件。
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _exit_on_terminate)
     sys.exit(run(int(sys.argv[1]), sys.argv[2]))

@@ -15,6 +15,7 @@ import {
   X,
 } from "@lucide/vue";
 import IssueDetail from "./IssueDetail.vue";
+import ExclusionMaintenance from "./ExclusionMaintenance.vue";
 import type { SettingsController } from "../composables/useSettingsController";
 const componentProps = defineProps<{ controller: SettingsController }>();
 const {
@@ -290,7 +291,7 @@ const {
               storageAudit.issue_counts?.orphan_files ??
               storageAudit.orphan_files.length
             }}</b
-            ><span>未关联媒体</span>
+            ><span>未登记媒体</span>
           </div>
         </div>
         <div v-if="storageAudit" class="storage-actions">
@@ -486,11 +487,12 @@ const {
             }}
             项可处理。</strong
           >
-          文件只移动到可恢复隔离区，真正缺失的媒体任务会标记为失败以便重试。
+          未登记的媒体会归入媒体库的“无索引媒体”，文件保持原位；临时文件只移动到可恢复隔离区，真正缺失的媒体任务会标记为失败以便重试。
         </div>
       </section>
     </section>
 
+    <ExclusionMaintenance v-else-if="activePage.id === 'exclusions'" />
     <section v-else-if="activePage.id === 'logs'" class="maintenance-page">
       <section class="setting-section">
         <header>

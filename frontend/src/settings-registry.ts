@@ -332,6 +332,11 @@ export const maintenancePages: Record<string, SettingsPageDefinition> = {
     title: "存储巡检与维护",
     description: "扫描数据库与媒体文件，并采用可恢复方式处理问题。",
   },
+  exclusions: {
+    id: "exclusions",
+    title: "排除项目",
+    description: "管理删除后不再下载的作品与媒体，需要时恢复下载。",
+  },
   logs: {
     id: "logs",
     title: "活动日志",
@@ -406,7 +411,10 @@ export const maintenanceNavigation: SettingsNavGroup[] = [
   {
     id: "storage",
     label: "存储",
-    items: [{ id: "storage", label: "存储巡检与维护" }],
+    items: [
+      { id: "storage", label: "存储巡检与维护" },
+      { id: "exclusions", label: "排除项目" },
+    ],
   },
   {
     id: "diagnostics",

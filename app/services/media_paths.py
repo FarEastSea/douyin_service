@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import (
     DownloadHistory,
     DownloadTask,
+    MediaRedownloadBlock,
+    OrphanMediaFile,
     PlatformDownloadTask,
     PlatformMediaAsset,
     XDownloadTask,
@@ -72,8 +74,8 @@ async def migrate_download_paths(
     platform_download_dirs: dict[str, tuple[str, str]],
 ) -> dict:
     """同步迁移所有已存在任务、历史记录和各平台任务中的持久化路径。"""
-    changed = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0}
-    unresolved = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0}
+    changed = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0, "orphan_media": 0}
+    unresolved = {"tasks": 0, "history": 0, "x_tasks": 0, "x_media": 0, "platform_tasks": 0, "platform_media": 0, "orphan_media": 0}
     batch_size = 1000
     if any(old != new for old, new in [(old_download_dir, new_download_dir),
                                       (old_x_download_dir, new_x_download_dir),
@@ -224,6 +226,52 @@ async def migrate_download_paths(
                 changed["x_media"] += 1
         last_id = x_media[-1].id
         await db.flush()
+
+    # 无索引媒体按各自来源平台的目录迁移，保证切换目录后媒体库仍可预览与删除。
+    roots = {
+        "douyin": (old_download_dir, new_download_dir),
+        "x": (old_x_download_dir, new_x_download_dir),
+        **platform_download_dirs,
+    }
+    last_id = 0
+    while True:
+        orphans = (await db.execute(
+            select(OrphanMediaFile)
+            .where(OrphanMediaFile.id > last_id)
+            .order_by(OrphanMediaFile.id)
+            .limit(batch_size)
+        )).scalars().all()
+        if not orphans:
+            break
+        for orphan in orphans:
+            old_root, new_root = roots.get(orphan.platform, (None, None))
+            if not old_root or old_root == new_root:
+                continue
+            file_path, path_unresolved = _rebase_path_result(orphan.file_path, old_root, new_root)
+            if path_unresolved and not _resolved_path(orphan.file_path).exists():
+                # 无索引媒体没有任务可补回；文件在新旧目录都已不存在时移除这条失效登记，不阻止目录切换。
+                await db.delete(orphan)
+                changed["orphan_media"] += 1
+                continue
+            if path_unresolved:
+                unresolved["orphan_media"] += 1
+            if file_path != orphan.file_path:
+                orphan.file_path = file_path
+                changed["orphan_media"] += 1
+        last_id = orphans[-1].id
+        await db.flush()
+
+    # 排除记录中的下载归档路径同样随目录迁移；找不到时保留原值，恢复时会如实提示，不阻止目录切换。
+    blocks = (await db.execute(
+        select(MediaRedownloadBlock).where(MediaRedownloadBlock.archive_path.is_not(None))
+    )).scalars().all()
+    for block in blocks:
+        old_root, new_root = roots.get(block.platform, (None, None))
+        if not old_root or old_root == new_root:
+            continue
+        archive_path, path_unresolved = _rebase_path_result(block.archive_path, old_root, new_root)
+        if not path_unresolved and archive_path != block.archive_path:
+            block.archive_path = archive_path
 
     await db.flush()
     return {

@@ -42,6 +42,7 @@ const router = useRouter(),
 const mode = ref(props.intent),
   input = ref(""),
   manualPlatform = ref(props.platform),
+  instagramKinds = ref<string[]>(["posts", "reels"]),
   manualOpen = ref(false);
 const field = ref<HTMLTextAreaElement | null>(null),
   panel = ref<HTMLElement | null>(null);
@@ -118,6 +119,18 @@ const submitLabel = computed(() =>
         ? "下载作者作品"
         : "开始下载",
 );
+const instagramKindOptions = [
+  { id: "posts", label: "Posts" },
+  { id: "reels", label: "Reels" },
+  { id: "stories", label: "Stories" },
+  { id: "highlights", label: "Highlights" },
+];
+function toggleInstagramKind(id: string) {
+  const next = instagramKinds.value.includes(id)
+    ? instagramKinds.value.filter((item) => item !== id)
+    : [...instagramKinds.value, id];
+  if (next.length) instagramKinds.value = next;
+}
 function close() {
   if (!submitting.value) emit("close");
 }
@@ -220,7 +233,7 @@ async function submit() {
     }
     if (mode.value === "subscribe" && target === "instagram") {
       const result = await api<any>("/platform-downloads/instagram/authors", {
-        method: "POST", ...jsonBody({ source }),
+        method: "POST", ...jsonBody({ source, kinds: instagramKinds.value }),
       });
       success.value = { message: result.message, path: "/operations/tasks", query: { platform: "instagram", task_key: `instagram:${result.task_id}` } };
       window.dispatchEvent(new CustomEvent("app:authors-changed", { detail: { platform: target } }));
@@ -483,6 +496,26 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </div>
+        <fieldset
+          v-if="mode === 'subscribe' && platform === 'instagram' && !blocked"
+          class="capture-kinds"
+          :disabled="submitting"
+        >
+          <legend>采集内容</legend>
+          <div class="ig-kind-picker-inline">
+            <button
+              v-for="item in instagramKindOptions"
+              :key="item.id"
+              type="button"
+              class="ig-kind-option"
+              :aria-pressed="instagramKinds.includes(item.id)"
+              @click="toggleInstagramKind(item.id)"
+            >
+              <strong>{{ item.label }}</strong>
+            </button>
+          </div>
+          <small class="field-help">Stories 只能收取当前仍可访问的内容；之后可在作者详情中调整。</small>
+        </fieldset>
         <p
           v-if="mode === 'download' && kind === 'author' && !blocked"
           class="capture-profile-note"

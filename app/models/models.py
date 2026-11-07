@@ -622,6 +622,53 @@ class PlatformTaskWork(Base):
     work_id = Column(Integer, ForeignKey("platform_works.id", ondelete="CASCADE"), primary_key=True)
 
 
+class OrphanMediaFile(Base):
+    """无索引媒体：失去任务记录但仍保留在下载目录中的文件，媒体库照常查看与删除。
+
+    来源包括删除任务时选择保留的完整文件，以及存储审计纳入的未登记文件。
+    """
+    __tablename__ = "orphan_media_files"
+    __table_args__ = (
+        Index("idx_orphan_media_platform", "platform", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False)
+    media_type = Column(String(16), nullable=False)
+    file_path = Column(Text, nullable=False, unique=True)
+    filename = Column(Text, nullable=False)
+    size_bytes = Column(BigInteger, default=0)
+    title = Column(Text)
+    author_name = Column(String(255))
+    published_at = Column(DateTime)
+    width = Column(Integer)
+    height = Column(Integer)
+    duration_ms = Column(Integer)
+    origin = Column(String(16), nullable=False, default="task_deleted")
+    source_task_key = Column(String(64))
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class MediaRedownloadBlock(Base):
+    """用户在媒体库删除媒体时选择“阻止重新下载”的记录；下载器遇到后跳过且视为已处理。"""
+    __tablename__ = "media_redownload_blocks"
+    __table_args__ = (
+        UniqueConstraint("platform", "media_key", name="uq_media_redownload_block"),
+        Index("idx_media_redownload_work", "work_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False)
+    # Instagram 为媒体 ID；gallery-dl / yt-dlp 平台为下载归档键，恢复时据此移除归档条目。
+    media_key = Column(String(255), nullable=False)
+    work_id = Column(Integer, ForeignKey("platform_works.id", ondelete="CASCADE"), nullable=True)
+    archive_path = Column(Text)
+    filename = Column(Text)
+    title = Column(Text)
+    author_name = Column(String(255))
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class PlatformCredential(Base):
     """非抖音平台的加密登录凭据；接口永不返回密文。"""
     __tablename__ = "platform_credentials"

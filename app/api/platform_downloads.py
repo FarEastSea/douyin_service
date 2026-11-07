@@ -1,8 +1,6 @@
 """平台注册表驱动的主页媒体下载 API。"""
 
 import asyncio
-import os
-import signal
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -56,7 +54,12 @@ from app.services.xhs_profile import (
     get_login_qrcode,
 )
 from app.tasks.platform_download_tasks import download_platform_profile
-from app.services.unified_task_operations import TaskOperationError, operate_task
+from app.services.unified_task_operations import (
+    TaskOperationError,
+    delete_task_with_files,
+    deletion_summary,
+    operate_task,
+)
 
 router = APIRouter(prefix="/platform-downloads", tags=["多平台下载"])
 
@@ -285,14 +288,6 @@ async def get_task_log(platform: str, task_id: int, start: int = Query(0, ge=0))
     return {"task_id": task_id, "start": start, "lines": lines, "total": total}
 
 
-def _kill_task(platform: str, task_id: int) -> None:
-    pid = redis_client.get_platform_task_pid(platform, task_id)
-    if pid:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        redis_client.delete_platform_task_pid(platform, task_id)
 
 
 def _clear_runtime(platform: str, task_id: int, include_log: bool = False) -> None:
@@ -321,24 +316,20 @@ async def retry_task(platform: str, task_id: int, db: AsyncSession = Depends(get
 
 
 @router.delete("/{platform}/tasks/{task_id}", response_model=MessageResponse)
-async def delete_task(platform: str, task_id: int, db: AsyncSession = Depends(get_async_db)):
+async def delete_task(
+    platform: str,
+    task_id: int,
+    delete_files: bool = Query(False, description="同时删除已完整下载的文件；不完整文件总会清理"),
+    db: AsyncSession = Depends(get_async_db),
+):
     spec = _require_platform(platform)
-    task = (await db.execute(select(PlatformDownloadTask).where(
-        PlatformDownloadTask.id == task_id,
-        PlatformDownloadTask.platform == spec.id,
-    ))).scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if task.status in ACTIVE_PLATFORM_TASK_STATUSES:
-        if spec.id == "instagram":
-            await operate_task(db, f"instagram:{task.id}", "cancel")
-            await db.refresh(task)
-        else:
-            await asyncio.to_thread(_kill_task, spec.id, task.id)
-    await asyncio.to_thread(_clear_runtime, spec.id, task.id, True)
-    await db.delete(task)
-    await db.commit()
-    return MessageResponse(success=True, message="任务已删除")
+    try:
+        files = await delete_task_with_files(db, f"{spec.id}:{task_id}", delete_files=delete_files)
+    except TaskOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    await asyncio.to_thread(_clear_runtime, spec.id, task_id, True)
+    summary = deletion_summary(files)
+    return MessageResponse(success=True, message="任务已删除" + (f"，{summary}" if summary else ""), data=files)
 
 
 @router.get("/{platform}/config/cookie")

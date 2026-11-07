@@ -3,6 +3,8 @@
 import json
 from datetime import datetime, timedelta
 
+from app.core.time_basis import local_iso
+
 
 def douyin_report_payload(
     report, newest_id: int | None, global_interval: int, include_details: bool = True
@@ -50,11 +52,12 @@ def douyin_report_payload(
         "remaining_authors": report.remaining_authors or 0,
         "summary": display_summary,
         "details": details,
-        "started_at": report.started_at.isoformat() if report.started_at else None,
-        "finished_at": report.finished_at.isoformat() if report.finished_at else None,
+        # 抖音记录以服务器本地时间存储；输出带偏移，避免浏览器按自身时区误读。
+        "started_at": local_iso(report.started_at),
+        "finished_at": local_iso(report.finished_at),
         "global_interval_seconds": global_interval,
         "expected_next_cycle_at": (
-            (report.started_at + timedelta(seconds=global_interval)).isoformat()
+            local_iso(report.started_at + timedelta(seconds=global_interval))
             if report.started_at and report.trigger_type == "auto"
             else None
         ),

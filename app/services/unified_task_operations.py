@@ -7,13 +7,12 @@ from datetime import datetime
 import os
 import signal
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis_client
 from app.models.models import (
-    Author, Work, DownloadHistory, DownloadTask, PlatformDownloadTask,
-    PlatformMediaAsset, XDownloadTask, XMediaAsset,
+    Author, Work, DownloadHistory, DownloadTask, PlatformDownloadTask, XDownloadTask,
 )
 from app.services.platform_registry import platform_registry
 from app.services.platform_task_service import prepare_platform_task_for_retry
@@ -52,6 +51,13 @@ def _terminate_pid(pid: int | None) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
+        return
+    # 最多等 5 秒让进程收尾，避免随后的文件清理移走它仍在写入的分片。
+    try:
+        import psutil
+
+        psutil.Process(pid).wait(timeout=5)
+    except Exception:
         pass
 
 
@@ -203,6 +209,8 @@ async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None
             state.blocked_code = None
             state.enabled = state.manual = True
             state.next_check_at, state.deferred_reason = utcnow(), None
+            # 暂停取消时会清空 task_id；重试后重新绑定，手动检查才能找到并解除它的延期。
+            state.task_id = task.id
         task.instagram_options = json.dumps(options)
         await db.commit()
         await asyncio.to_thread(dispatch_instagram.delay)
@@ -213,18 +221,23 @@ async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None
     )
 
 
-async def _delete_failed_task(db: AsyncSession, platform: str, task_id: int) -> None:
-    """删除失败/取消记录，保留磁盘文件；不允许和正在执行的重试竞争。"""
+async def _delete_failed_task(
+    db: AsyncSession, platform: str, task_id: int, delete_files: bool = False,
+) -> dict:
+    """删除已结束任务；完整文件默认保留，损坏或未完成的文件随任务清理。"""
     model = DownloadTask if platform == "douyin" else XDownloadTask if platform == "x" else PlatformDownloadTask
     conditions = (PlatformDownloadTask.platform == platform,) if model is PlatformDownloadTask else ()
     task = await _load_for_update(db, model, task_id, *conditions)
-    deletable = RETRYABLE_STATUSES | ({"completed", "skipped"} if platform == "douyin" else set())
-    if task.status not in deletable:
+    if task.status not in RETRYABLE_STATUSES | {"completed", "skipped"}:
         raise TaskOperationError("只可删除已结束任务；排队、下载或暂停任务请先取消", 409)
-    if platform != "douyin":
-        asset_model = XMediaAsset if platform == "x" else PlatformMediaAsset
-        if await db.scalar(select(func.count(asset_model.id)).where(asset_model.task_id == task_id)):
-            raise TaskOperationError("此任务已保存部分媒体，删除会移除其预览记录；请保留任务并在平台专项页管理媒体", 409)
+    from app.services.task_file_cleanup import stage_task_files
+
+    try:
+        files = await db.run_sync(
+            lambda session: stage_task_files(session, platform, task, delete_files=delete_files)
+        )
+    except (ValueError, OSError) as exc:
+        raise TaskOperationError(f"文件未删除：{exc}", 409) from exc
     old_token = task.celery_task_id
     if old_token:
         if platform == "douyin":
@@ -241,7 +254,14 @@ async def _delete_failed_task(db: AsyncSession, platform: str, task_id: int) -> 
         await refresh_work_download_state(db, work)
         await recalc_author_counts(db, await db.get(Author, work.author_id))
     else:
+        x_author_id = getattr(task, "x_author_id", None) if platform == "x" else None
         await db.delete(task)
+        if x_author_id:
+            # 任务的媒体随任务级联删除，立即重算作者下载数。
+            from app.services.media_removal import refresh_media_counts
+
+            await db.flush()
+            await refresh_media_counts(db, "x", task_id=None, x_author_id=x_author_id)
     await db.commit()
     # 缓存清理失败不改变数据库操作已经成功的事实。
     try:
@@ -256,15 +276,51 @@ async def _delete_failed_task(db: AsyncSession, platform: str, task_id: int) -> 
     except Exception:
         import logging
         logging.getLogger(__name__).warning("任务 %s:%s 已删除，但缓存清理失败", platform, task_id, exc_info=True)
+    return files
 
 
-async def operate_task(db: AsyncSession, task_key: str, action: str) -> None:
+def deletion_summary(files: dict | None) -> str:
+    """把文件处理结果转成给用户看的说明。"""
+    files = files or {}
+    parts = []
+    if files.get("removed"):
+        parts.append(f"已清理 {files['removed']} 个文件")
+    if files.get("kept"):
+        parts.append(f"保留 {files['kept']} 个完整文件，已归入媒体库的无索引媒体")
+    return "，".join(parts)
+
+
+async def delete_task_with_files(db: AsyncSession, task_key: str, *, delete_files: bool = False) -> dict:
+    """单任务删除入口：X 与通用平台进行中的任务先取消，再按文件完整性处理。"""
+    platform, task_id = parse_task_key(task_key)
+    if platform != "douyin":
+        model = XDownloadTask if platform == "x" else PlatformDownloadTask
+        status = await db.scalar(select(model.status).where(model.id == task_id))
+        if status is None:
+            raise TaskOperationError("任务不存在", 404)
+        if status in ACTIVE_STATUSES:
+            try:
+                await operate_task(db, task_key, "cancel")
+            except TaskOperationError:
+                # 读取状态后任务可能刚好结束；已结束就直接删除，否则如实报错。
+                if await db.scalar(select(model.status).where(model.id == task_id)) in ACTIVE_STATUSES:
+                    raise
+            try:
+                return await operate_task(db, task_key, "delete", delete_files=delete_files) or {}
+            except TaskOperationError as exc:
+                raise TaskOperationError(f"任务已取消，但删除未完成：{exc}", exc.status_code) from exc
+    return await operate_task(db, task_key, "delete", delete_files=delete_files) or {}
+
+
+async def operate_task(
+    db: AsyncSession, task_key: str, action: str, *, delete_files: bool = False,
+) -> dict | None:
     platform, task_id = parse_task_key(task_key)
     if action not in {"retry", "cancel", "pause", "resume", "refresh_retry", "delete"}:
         raise TaskOperationError(f"不支持的任务操作：{action}")
     try:
         if action == "delete":
-            await _delete_failed_task(db, platform, task_id)
+            return await _delete_failed_task(db, platform, task_id, delete_files)
         elif platform == "douyin":
             if action == "cancel":
                 await _cancel_douyin(db, task_id)
@@ -308,8 +364,14 @@ async def delete_douyin_tasks(db: AsyncSession, task_ids: list[int]) -> int:
     if any(task.status not in {"failed", "cancelled", "completed", "skipped"} for task in tasks):
         raise TaskOperationError("排队、下载或暂停任务请先取消，再删除", 409)
     from app.services.work_manager import refresh_work_download_state, recalc_author_counts
+    from app.services.task_file_cleanup import stage_task_files
     owner_ids = set()
     for task in tasks:
+        # 批量删除不提供删除完整文件的选项，但损坏或未完成的文件同样随任务清理。
+        try:
+            await db.run_sync(lambda session, item=task: stage_task_files(session, "douyin", item, delete_files=False))
+        except (ValueError, OSError) as exc:
+            raise TaskOperationError(f"文件未删除：{exc}", 409) from exc
         if task.celery_task_id:
             await asyncio.to_thread(redis_client.invalidate_download_attempt, task.id, task.celery_task_id)
         await db.execute(delete(DownloadHistory).where(DownloadHistory.task_id == task.id))
