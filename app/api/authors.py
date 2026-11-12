@@ -19,6 +19,7 @@ from typing import List, Literal, Optional, Union
 from datetime import date, datetime, time as datetime_time, timedelta
 
 from app.models.database import get_async_db
+from app.core.security import media_cookie
 from app.models.models import (
     Author, Work, DownloadTask, SubscriptionCheckReport, AuthorProfileHistory, SystemConfig,
 )
@@ -618,6 +619,7 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
 
 
 @router.get("/{author_id}/avatar")
+@media_cookie
 async def get_author_avatar(author_id: int, db: AsyncSession = Depends(get_async_db)):
     """返回本地头像；仅在缓存缺失时访问一次头像源地址。"""
     result = await db.execute(select(Author).where(Author.id == author_id))

@@ -19,6 +19,7 @@ import mimetypes
 from pathlib import Path
 
 from app.models.database import get_async_db
+from app.core.security import media_cookie
 from app.models.models import Author, Work, DownloadTask, DownloadHistory
 from app.models.schemas import (
     DownloadTaskCreate, DownloadTaskResponse, TaskProgressResponse,
@@ -546,6 +547,7 @@ async def get_failed_errors_for_toolbar(db: AsyncSession = Depends(get_async_db)
 
 
 @router.get("/{task_id}/preview")
+@media_cookie
 async def preview_task_video(
     task_id: int,
     request: Request,

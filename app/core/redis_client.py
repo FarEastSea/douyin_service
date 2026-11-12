@@ -698,21 +698,72 @@ def clear_external_attempt(platform: str, task_id: int, token: str) -> None:
 
 
 def set_external_attempt_pid(platform: str, task_id: int, token: str, process_id: int) -> None:
+    from app.services.child_process import download_process_identity
+    identity = download_process_identity(process_id, token, platform=platform, task_id=task_id)
     key = f"{X_TASK_PID_PREFIX}{task_id}" if platform == "x" else _platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id)
     accepted = redis_client.eval("""
         if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
         redis.call('SET', KEYS[2], ARGV[2], 'EX', 86400)
         return 1
-    """, 2, f"execution:{platform}:{task_id}", key, token, process_id)
+    """, 2, f"execution:{platform}:{task_id}", key, token, json.dumps(identity, separators=(",", ":")))
     if not accepted:
-        # 取消可能发生在进程创建和 PID 登记之间，不能遗留子进程。
-        import os, signal
-        try:
-            os.kill(process_id, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        # 调用方的 finally 仍持有容器句柄，负责完整收尾，不信任裸 PID。
         from app.services.download_lifecycle import StaleDownloadAttempt
         raise StaleDownloadAttempt("下载执行已结束，子进程未登记")
+
+
+def _external_process_key(platform: str, task_id: int) -> str:
+    return (f"{X_TASK_PID_PREFIX}{task_id}" if platform == "x"
+            else _platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id))
+
+
+def get_external_process(platform: str, task_id: int) -> Optional[dict]:
+    identities = get_external_processes(platform, task_id)
+    return identities[-1] if identities else None
+
+
+def get_external_processes(platform: str, task_id: int, token: str | None = None) -> list[dict]:
+    """本地凭证保留容器归属；Redis 重启不使进程变成不可确认的裸 PID。"""
+    from app.services.child_process import find_download_identities
+    identities = find_download_identities(platform, task_id, token)
+    value = redis_client.get(_external_process_key(platform, task_id))
+    try:
+        identity = json.loads(value) if value else None
+    except (TypeError, ValueError):
+        identity = None
+    # 兼容旧纯 PID 登记，但它不提供发送信号所需的身份凭证。
+    if (isinstance(identity, dict) and identity.get("version") == 1
+            and identity.get("platform") == platform and identity.get("task_id") == task_id
+            and (token is None or identity.get("token") == token)
+            and not any(item.get("nonce") == identity.get("nonce") for item in identities)):
+        identities.append(identity)
+    return identities
+
+
+def revoke_external_attempt(platform: str, task_id: int, token: str) -> list[dict]:
+    """原子撤销执行权；保留容器登记直到确认停止，供重试/删除重新核验。"""
+    state = f"{X_TASK_STATE_PREFIX}{task_id}" if platform == "x" else _platform_task_key(PLATFORM_TASK_STATE_PREFIX, platform, task_id)
+    key = _external_process_key(platform, task_id)
+    value = redis_client.eval("""
+        if redis.call('GET', KEYS[1]) ~= ARGV[1] then return nil end
+        local process = redis.call('GET', KEYS[3])
+        redis.call('DEL', KEYS[1], KEYS[2])
+        return process
+    """, 3, f"execution:{platform}:{task_id}", state, key, token)
+    # 只读明确取消的这一代；不能在提交取消后找到并发新任务再终止它。
+    return get_external_processes(platform, task_id, token)
+
+
+def clear_external_process(platform: str, task_id: int, identity: dict) -> None:
+    """只清理已确认停止的这一代容器，不能删除并发新执行的登记。"""
+    redis_client.eval("""
+        local value = redis.call('GET', KEYS[1])
+        if not value then return 0 end
+        local ok, process = pcall(cjson.decode, value)
+        if not ok or type(process) ~= 'table' then return 0 end
+        if process.token ~= ARGV[1] or process.nonce ~= ARGV[2] then return 0 end
+        return redis.call('DEL', KEYS[1])
+    """, 1, _external_process_key(platform, task_id), identity["token"], identity["nonce"])
 
 
 def _write_external_state(platform: str, task_id: int, key: str, data: dict) -> None:
@@ -862,7 +913,13 @@ def set_x_task_pid(task_id: int, pid: int) -> None:
 def get_x_task_pid(task_id: int) -> Optional[int]:
     """获取 X 下载任务的子进程 PID"""
     val = redis_client.get(f"{X_TASK_PID_PREFIX}{task_id}")
-    return int(val) if val else None
+    if not val:
+        return None
+    try:
+        value = json.loads(val)
+        return int(value["pid"] if isinstance(value, dict) else value)
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def delete_x_task_pid(task_id: int) -> None:
@@ -941,7 +998,13 @@ def set_platform_task_pid(platform: str, task_id: int, pid: int) -> None:
 
 def get_platform_task_pid(platform: str, task_id: int) -> Optional[int]:
     value = redis_client.get(_platform_task_key(PLATFORM_TASK_PID_PREFIX, platform, task_id))
-    return int(value) if value else None
+    if not value:
+        return None
+    try:
+        identity = json.loads(value)
+        return int(identity["pid"] if isinstance(identity, dict) else identity)
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def delete_platform_task_pid(platform: str, task_id: int) -> None:

@@ -13,8 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.core import env_config
 from app.core.config import settings
-from app.core.config_transaction import atomic_json
 from app.models.models import Author, DownloadTask, SystemConfig, Work
+from app.services.filesystem_durability import (
+    sync_directory as _sync_directory,
+    write_journal as _write_journal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,20 +29,6 @@ def deletion_directory() -> Path:
 def _identity(path: Path) -> list[int]:
     stat = path.stat()
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
-
-
-def _sync_directory(path: Path) -> None:
-    if os.name != "nt":
-        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-
-def _write_journal(path: Path, entry: dict) -> None:
-    atomic_json(path, entry)
-    _sync_directory(path.parent)
 
 
 def _finish_journal(db, journal: Path, marker: str) -> None:

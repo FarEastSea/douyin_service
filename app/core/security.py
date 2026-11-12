@@ -2,26 +2,48 @@
 
 from __future__ import annotations
 
-import re
+import asyncio
 import secrets
+from typing import Callable, TypeVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute, iter_route_contexts
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Match
 
 from app.core.env_config import parse_cors_origins, read_env_file
 
 
 AUTH_COOKIE_NAME = "douyin_admin_media"
 _PUBLIC_PAGE_PATHS = {"/", "/legacy", "/docs", "/redoc", "/docs/oauth2-redirect"}
-_MEDIA_PATH_PATTERNS = (
-    re.compile(r"^/api/operations/media/[a-z0-9_-]+/\d+/thumbnail$"),
-    re.compile(r"^/api/works/\d+/cover$"),
-    re.compile(r"^/api/tasks/\d+/preview$"),
-    re.compile(r"^/api/authors/\d+/avatar$"),
-    re.compile(r"^/api/x/media/\d+/(?:preview|download)$"),
-    re.compile(r"^/api/platform-downloads/[a-z0-9_-]+/media/\d+/(?:preview|download)$"),
-)
+_Endpoint = TypeVar("_Endpoint", bound=Callable)
+_MEDIA_COOKIE_ATTRIBUTE = "_allows_media_cookie"
+_REQUEST_CONFIG_KEY = "douyin.security_configuration"
+
+
+def media_cookie(endpoint: _Endpoint) -> _Endpoint:
+    """在只读媒体端点上声明 Cookie 权限，不包装函数或改变接口签名。"""
+    setattr(endpoint, _MEDIA_COOKIE_ATTRIBUTE, True)
+    return endpoint
+
+
+def register_media_cookie_routes(app) -> None:
+    """从实际路由生成权限；任何写方法上的误用都会使注册失败。"""
+    routes = []
+    for route in iter_route_contexts(app.router.routes):
+        allowed = isinstance(route.original_route, APIRoute) and getattr(route.endpoint, _MEDIA_COOKIE_ATTRIBUTE, False)
+        if allowed and (not route.methods or not route.methods <= {"GET", "HEAD"}):
+            raise ValueError(f"媒体 Cookie 仅允许只读路由：{route.path}")
+        routes.append((route.matches, allowed))
+    app.state.media_cookie_routes = tuple(routes)
+
+
+async def _request_configuration(request: Request) -> dict[str, str]:
+    """同一请求的鉴权与 CORS 共用一次读取；下一次请求重新获取持久化值。"""
+    if _REQUEST_CONFIG_KEY not in request.scope:
+        request.scope[_REQUEST_CONFIG_KEY] = await asyncio.to_thread(read_env_file)
+    return request.scope[_REQUEST_CONFIG_KEY]
 
 
 def _unauthorized(message: str, code: str) -> JSONResponse:
@@ -55,9 +77,14 @@ def _is_public_page_or_asset(path: str) -> bool:
 
 
 def _is_media_request(request: Request) -> bool:
-    return request.method in {"GET", "HEAD"} and any(
-        pattern.fullmatch(request.url.path) for pattern in _MEDIA_PATH_PATTERNS
-    )
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    # 保持实际路由的匹配顺序；后面的媒体声明不能给前面的普通接口授权。
+    for matches, allowed in getattr(request.app.state, "media_cookie_routes", ()):
+        match, _ = matches(request.scope)
+        if match == Match.FULL:
+            return allowed
+    return False
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
@@ -68,7 +95,8 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         if path in {"/api/health", "/api/ready"} or _is_public_page_or_asset(path):
             return await call_next(request)
 
-        admin_token = str(read_env_file().get("ADMIN_TOKEN") or "").strip()
+        values = await _request_configuration(request)
+        admin_token = str(values.get("ADMIN_TOKEN") or "").strip()
         if not admin_token:
             if path.startswith("/api/bootstrap/"):
                 return await call_next(request)
@@ -116,7 +144,8 @@ class DynamicCORSMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         origin = request.headers.get("origin", "").rstrip("/")
         try:
-            allowed_origins = set(parse_cors_origins(read_env_file().get("CORS_ALLOWED_ORIGINS", "")))
+            values = await _request_configuration(request) if origin else {}
+            allowed_origins = set(parse_cors_origins(values.get("CORS_ALLOWED_ORIGINS", "")))
         except ValueError:
             # 手工损坏该配置时按“不开放跨域”降级，避免管理页本身失联。
             allowed_origins = set()

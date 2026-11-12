@@ -17,6 +17,7 @@ from typing import List
 import asyncio
 
 from app.models.database import get_async_db
+from app.core.security import media_cookie
 from app.models.models import Work, WorkStatsSnapshot, DownloadTask
 from app.models.schemas import MessageResponse, WorkStatsSnapshotResponse
 from app.services import work_manager
@@ -72,6 +73,7 @@ async def get_work_detail(work_id: int, db: AsyncSession = Depends(get_async_db)
 
 
 @router.get("/{work_id}/cover")
+@media_cookie
 async def get_work_cover(work_id: int, db: AsyncSession = Depends(get_async_db)):
     """返回本地缓存的作品封面；缓存缺失时仅请求已入库的受信任图片地址。"""
     work = await db.scalar(select(Work).where(Work.id == work_id))

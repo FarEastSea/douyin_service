@@ -11,6 +11,8 @@ import sys
 from typing import Callable, Optional, Protocol
 from urllib.parse import urlsplit
 
+from app.services.child_process import release_download_process, start_download_process
+
 
 MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".avif", ".mp4", ".webm", ".mov", ".m4v"}
 
@@ -100,16 +102,11 @@ class GalleryDlXDownloadEngine:
         before = set(list_media_files(user_folder))
         process = None
         try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            process = start_download_process(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, encoding="utf-8", errors="replace", bufsize=1)
             if on_process is not None:
                 on_process(process.pid)
-            elif task_id is not None:
-                try:
-                    from app.core import redis_client
-                    redis_client.set_x_task_pid(task_id, process.pid)
-                except Exception:
-                    pass
+            release_download_process(process)
             from app.services.child_process import iter_download_output
             for line in iter_download_output(process, check_running):
                 log(line.rstrip())

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-import os
-import signal
 
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +24,7 @@ from app.services.download_state_lock import lock_task_graph
 
 ACTIVE_STATUSES = {"pending", "downloading", "paused"}
 RETRYABLE_STATUSES = {"failed", "cancelled"}
+_LOOKUP_PROCESS = object()
 
 
 class TaskOperationError(Exception):
@@ -45,20 +44,21 @@ def parse_task_key(task_key: str) -> tuple[str, int]:
     return platform, int(raw_id)
 
 
-def _terminate_pid(pid: int | None) -> None:
-    if not pid:
+async def _stop_external_process(platform: str, task_id: int, identity=_LOOKUP_PROCESS) -> None:
+    """提交取消后再等待进程退出，避免持有任务锁阻塞旧 Worker 的退出检查。"""
+    from app.services.child_process import DownloadProcessError, retire_download_identity, terminate_download_identity
+    if identity is _LOOKUP_PROCESS:
+        identity = await asyncio.to_thread(redis_client.get_external_processes, platform, task_id)
+    if not identity:
+        # 旧纯 PID 记录不提供创建身份，不能据此发送信号。
         return
     try:
-        os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    # 最多等 5 秒让进程收尾，避免随后的文件清理移走它仍在写入的分片。
-    try:
-        import psutil
-
-        psutil.Process(pid).wait(timeout=5)
-    except Exception:
-        pass
+        for record in identity if isinstance(identity, list) else [identity]:
+            await asyncio.to_thread(terminate_download_identity, record, record.get("token"))
+            await asyncio.to_thread(retire_download_identity, record)
+            await asyncio.to_thread(redis_client.clear_external_process, platform, task_id, record)
+    except (DownloadProcessError, OSError) as exc:
+        raise TaskOperationError("下载执行权已撤销，但进程尚未安全结束，请稍后重试", 409) from exc
 
 
 async def _load_for_update(db: AsyncSession, model, task_id: int, *conditions):
@@ -129,20 +129,20 @@ async def _cancel_x(db: AsyncSession, task_id: int) -> None:
     task = await _load_for_update(db, XDownloadTask, task_id)
     if task.status not in ACTIVE_STATUSES:
         raise TaskOperationError(f"任务状态为 {task.status}，无法取消")
-    pid = await asyncio.to_thread(redis_client.get_x_task_pid, task.id)
-    await asyncio.to_thread(_terminate_pid, pid)
-    cancel_x_task(task)
     old_token = task.celery_task_id
+    identity = (await asyncio.to_thread(redis_client.revoke_external_attempt, "x", task.id, old_token)
+                if old_token else None)
+    cancel_x_task(task)
     task.celery_task_id = None
-    if old_token:
-        await asyncio.to_thread(redis_client.clear_external_attempt, "x", task.id, old_token)
     await db.commit()
+    await _stop_external_process("x", task_id, identity)
 
 
 async def _retry_x(db: AsyncSession, task_id: int) -> None:
     task = await _load_for_update(db, XDownloadTask, task_id)
     if task.status not in RETRYABLE_STATUSES:
         raise TaskOperationError(f"任务状态为 {task.status}，无需重试")
+    await _stop_external_process("x", task_id)
     prepare_x_task_for_retry(task)
     await asyncio.to_thread(redis_client.delete_x_task_state, task.id)
     await asyncio.to_thread(redis_client.delete_x_task_pid, task.id)
@@ -156,15 +156,13 @@ async def _cancel_platform(db: AsyncSession, platform: str, task_id: int) -> Non
     )
     if task.status not in ACTIVE_STATUSES:
         raise TaskOperationError(f"任务状态为 {task.status}，无法取消")
-    pid = await asyncio.to_thread(redis_client.get_platform_task_pid, platform, task.id)
-    await asyncio.to_thread(_terminate_pid, pid)
+    old_token = task.celery_task_id
+    identity = (await asyncio.to_thread(redis_client.revoke_external_attempt, platform, task.id, old_token)
+                if old_token else None)
     task.status = "cancelled"
     task.phase = "cancelled"
     task.completed_at = datetime.now()
-    old_token = task.celery_task_id
     task.celery_task_id = None
-    if old_token:
-        await asyncio.to_thread(redis_client.clear_external_attempt, platform, task.id, old_token)
     if platform == "instagram":
         from datetime import timedelta
         from app.models.models import PlatformSubscriptionState
@@ -183,6 +181,7 @@ async def _cancel_platform(db: AsyncSession, platform: str, task_id: int) -> Non
             state.next_check_at = utcnow() + timedelta(seconds=interval_for(state.content_kind))
             state.deferred_reason = "本次检查已取消，等待下个周期"
     await db.commit()
+    await _stop_external_process(platform, task_id, identity)
 
 
 async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None:
@@ -191,6 +190,7 @@ async def _retry_platform(db: AsyncSession, platform: str, task_id: int) -> None
     )
     if task.status not in RETRYABLE_STATUSES:
         raise TaskOperationError(f"任务状态为 {task.status}，无需重试")
+    await _stop_external_process(platform, task_id)
     if platform == "xhs" and task.source_type == "profile":
         raise TaskOperationError("小红书作者主页批量采集已搁置；当前仅保留单条笔记下载", 410)
     prepare_platform_task_for_retry(task)
@@ -230,6 +230,8 @@ async def _delete_failed_task(
     task = await _load_for_update(db, model, task_id, *conditions)
     if task.status not in RETRYABLE_STATUSES | {"completed", "skipped"}:
         raise TaskOperationError("只可删除已结束任务；排队、下载或暂停任务请先取消", 409)
+    if platform != "douyin":
+        await _stop_external_process(platform, task_id)
     from app.services.task_file_cleanup import stage_task_files
 
     try:

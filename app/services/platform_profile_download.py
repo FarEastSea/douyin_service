@@ -17,6 +17,7 @@ from typing import Callable, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from app.core.config import settings
+from app.services.child_process import release_download_process, start_download_process
 from app.services.platform_credentials import get_platform_cookie_sync
 from app.services.x_downloader import (
     convert_cookie_header_to_netscape,
@@ -430,7 +431,7 @@ class GalleryDlProfileDownloadEngine:
         before = set(list_media_files(user_folder))
         process = None
         try:
-            process = subprocess.Popen(
+            process = start_download_process(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -441,6 +442,7 @@ class GalleryDlProfileDownloadEngine:
             )
             if on_process:
                 on_process(process.pid)
+            release_download_process(process)
             from app.services.child_process import iter_download_output
             for line in iter_download_output(process, check_running):
                 log(line.rstrip())
@@ -531,7 +533,7 @@ class YtDlpProfileDownloadEngine:
         before = set(list_media_files(user_folder))
         process = None
         try:
-            process = subprocess.Popen(
+            process = start_download_process(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -542,6 +544,7 @@ class YtDlpProfileDownloadEngine:
             )
             if on_process:
                 on_process(process.pid)
+            release_download_process(process)
             from app.services.child_process import iter_download_output
             for line in iter_download_output(process, check_running):
                 log(line.rstrip())

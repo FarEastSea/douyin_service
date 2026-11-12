@@ -267,7 +267,7 @@ def dispatch_due(db):
 def execute_instagram_task(celery_task, db, task):
     from app.core import redis_client
     from app.core.traffic_control import global_download_slot
-    from app.services.child_process import close_download_process, iter_download_output
+    from app.services.child_process import close_download_process, iter_download_output, release_download_process, start_download_process
     from app.services.download_lifecycle import lock_download_attempt
     from app.services.external_download_coordination import (
         check_external_execution,
@@ -283,7 +283,7 @@ def execute_instagram_task(celery_task, db, task):
 
     try:
         with global_download_slot(token):
-            process = subprocess.Popen(
+            process = start_download_process(
                 [
                     sys.executable,
                     "-m",
@@ -300,6 +300,7 @@ def execute_instagram_task(celery_task, db, task):
                 bufsize=1,
             )
             register_external_process("instagram", task.id, token, process.pid)
+            release_download_process(process)
             for line in iter_download_output(process, check):
                 try:
                     event = json.loads(line)

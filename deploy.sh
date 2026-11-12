@@ -31,6 +31,8 @@ DEPENDENCIES_CHANGED=0
 DEPENDENCY_BACKUP=""
 DATABASE_BACKUP=""
 DATABASE_MIGRATED=0
+CSV_SIDECAR_BACKUP=""
+CSV_SIDECARS_STARTED=0
 MAINTENANCE_STARTED=0
 RUNTIME_PREVIOUS_BUILD=""
 OLD_RUNTIME_STATE=""
@@ -449,6 +451,11 @@ stop_running_instances() {
 
 deployment_action() {
     (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.deployment "$@" --root "$SERVICE_ROOT")
+}
+
+csv_sidecar_action() {
+    (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.csv_sidecar_migration "$1" \
+        --root "$SERVICE_ROOT" --backup-dir "$CSV_SIDECAR_BACKUP")
 }
 
 panel_action() {
@@ -1011,6 +1018,14 @@ rollback() {
             exit "$exit_code"
         }
     fi
+    if [ "$CSV_SIDECARS_STARTED" -eq 1 ]; then
+        assert_release_exclusion || exit "$exit_code"
+        record_stage restore-csv-sidecars
+        csv_sidecar_action restore || {
+            echo "CSV sidecar recovery failed; maintenance and backups retained." >&2
+            exit "$exit_code"
+        }
+    fi
     restore_xhs_engine
     assert_release_exclusion || exit "$exit_code"
     git reset --hard "$PREVIOUS_SHA"
@@ -1141,6 +1156,11 @@ if [ "$PREVIOUS_SHA" != "$TARGET_SHA" ] || [ -L "$SERVICE_ROOT/.current" ]; then
     assert_release_exclusion
     record_stage migrate
     (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -c 'from app.models.database import init_db_sync; init_db_sync(); print("Database migrations OK")')
+    assert_release_exclusion
+    record_stage sanitize-csv-sidecars
+    CSV_SIDECAR_BACKUP="$DEPENDENCY_BACKUP/csv-sidecars"
+    CSV_SIDECARS_STARTED=1
+    csv_sidecar_action sanitize
     RESTART_REQUIRED=1
     assert_release_exclusion
     record_stage install-dependencies

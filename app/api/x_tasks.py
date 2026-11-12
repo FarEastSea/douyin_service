@@ -11,6 +11,7 @@ from typing import Optional
 import asyncio
 
 from app.models.database import get_async_db
+from app.core.security import media_cookie
 from app.models.models import XDownloadTask, XAuthor, XMediaAsset, SystemConfig
 from app.models.schemas import (
     XDownloadRequest, XDownloadTaskResponse, PaginatedXTasksResponse,
@@ -215,6 +216,7 @@ def _safe_x_media_path(asset: XMediaAsset):
 
 
 @router.get("/media/{asset_id}/preview")
+@media_cookie
 async def preview_x_media(asset_id: int, db: AsyncSession = Depends(get_async_db)):
     asset = (await db.execute(select(XMediaAsset).where(XMediaAsset.id == asset_id))).scalar_one_or_none()
     if not asset:
@@ -224,6 +226,7 @@ async def preview_x_media(asset_id: int, db: AsyncSession = Depends(get_async_db
 
 
 @router.get("/media/{asset_id}/download")
+@media_cookie
 async def download_x_media(asset_id: int, db: AsyncSession = Depends(get_async_db)):
     asset = (await db.execute(select(XMediaAsset).where(XMediaAsset.id == asset_id))).scalar_one_or_none()
     if not asset:

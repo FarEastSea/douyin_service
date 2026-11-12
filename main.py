@@ -24,7 +24,7 @@ from app.api import bootstrap
 from app.core.diagnostics import get_runtime_errors, mark_startup_recovered
 from app.core.env_config import validate_env
 from app.core.error_handling import register_exception_handlers
-from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware
+from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware, register_media_cookie_routes
 
 
 from app.core.config_transaction import recover_config_change, journal_path
@@ -80,6 +80,7 @@ async def activate_runtime(app: FastAPI) -> bool:
             for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "instagram", "platform_downloads", "operations", "subscription_runs"):
                 module = importlib.import_module("app.api." + name)
                 app.include_router(module.router, prefix="/api")
+            register_media_cookie_routes(app)
             app.state.runtime_routes_loaded = True
             app.openapi_schema = None
         stage = "process_reconcile"

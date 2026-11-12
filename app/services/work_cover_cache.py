@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
-import threading
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import requests
 
 from app.core.network_security import get_douyin_media_response, validate_douyin_media_url
+from app.services.cache_lock import cache_resource_lock
 
 
 _CACHE_DIR_NAME = "_work_covers"
@@ -22,7 +23,6 @@ _CONTENT_EXTENSIONS = {
     "image/webp": ".webp",
     "image/avif": ".avif",
 }
-_cache_lock = threading.Lock()
 
 
 def _source_digest(source_url: str) -> str:
@@ -70,8 +70,8 @@ def ensure_work_cover_cached(
         return find_cached_work_cover(work_id, download_dir)
     validate_douyin_media_url(source_url)
 
-    with _cache_lock:
-        cache_dir = _cache_dir(download_dir)
+    cache_dir = _cache_dir(download_dir)
+    with cache_resource_lock(cache_dir, str(work_id)):
         digest = _source_digest(source_url)
         source_path = _source_path(cache_dir, work_id)
         cached = find_cached_work_cover(work_id, download_dir, source_url)
@@ -82,6 +82,7 @@ def ensure_work_cover_cached(
             session, source_url, timeout=timeout,
         )
         temp_path: Path | None = None
+        source_temp_path: Path | None = None
         try:
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -90,7 +91,7 @@ def ensure_work_cover_cached(
                 raise ValueError(f"作品封面不是受支持的图片格式: {content_type or 'unknown'}")
 
             target_path = cache_dir / f"{work_id}{extension}"
-            temp_path = cache_dir / f".{work_id}.{threading.get_ident()}.tmp"
+            temp_path = cache_dir / f".{work_id}.{uuid4().hex}.tmp"
             total = 0
             with temp_path.open("wb") as output:
                 for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -102,9 +103,13 @@ def ensure_work_cover_cached(
                     output.write(chunk)
             if total == 0:
                 raise ValueError("作品封面响应为空")
+            # 清除旧来源绑定后再替换图片，失败时不会将新图片误标记为旧来源。
+            source_path.unlink(missing_ok=True)
             os.replace(temp_path, target_path)
-            source_path.write_text(digest, encoding="ascii")
-            for old_extension in _CONTENT_EXTENSIONS.values():
+            source_temp_path = cache_dir / f".{work_id}.{uuid4().hex}.source.tmp"
+            source_temp_path.write_text(digest, encoding="ascii")
+            os.replace(source_temp_path, source_path)
+            for old_extension in set(_CONTENT_EXTENSIONS.values()):
                 old_path = cache_dir / f"{work_id}{old_extension}"
                 if old_path != target_path and old_path.is_file():
                     old_path.unlink()
@@ -113,3 +118,5 @@ def ensure_work_cover_cached(
             response.close()
             if temp_path and temp_path.exists():
                 temp_path.unlink()
+            if source_temp_path and source_temp_path.exists():
+                source_temp_path.unlink()

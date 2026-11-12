@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.core import redis_client
 from app.core.config import settings
 from app.models.database import get_async_db
+from app.core.security import media_cookie
 from app.models.models import (
     PlatformAuthor,
     PlatformDownloadTask,
@@ -265,12 +266,14 @@ async def _load_media(platform: str, asset_id: int, db: AsyncSession):
 
 
 @router.get("/{platform}/media/{asset_id}/preview")
+@media_cookie
 async def preview_media(platform: str, asset_id: int, db: AsyncSession = Depends(get_async_db)):
     asset, path = await _load_media(platform, asset_id, db)
     return FileResponse(path, media_type=asset.mime_type)
 
 
 @router.get("/{platform}/media/{asset_id}/download")
+@media_cookie
 async def download_media(platform: str, asset_id: int, db: AsyncSession = Depends(get_async_db)):
     asset, path = await _load_media(platform, asset_id, db)
     return FileResponse(path, media_type=asset.mime_type, filename=asset.filename)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import math
@@ -18,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.models.models import Author, SystemConfig, Work
+from app.services.csv_metadata import metadata_csv_bytes
 
 
 CONFIG_KEY = "archive:rules"
@@ -291,10 +291,7 @@ def write_metadata_sidecars(
         if file_format == "json":
             temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
-            with temporary.open("w", encoding="utf-8-sig", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=list(data))
-                writer.writeheader()
-                writer.writerow({**data, "hashtags": ",".join(data["hashtags"])})
+            temporary.write_bytes(metadata_csv_bytes(data))
         os.replace(temporary, sidecar)
         written.append(str(sidecar))
     return written

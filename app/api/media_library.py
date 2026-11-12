@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.security import media_cookie
 from app.models.database import get_async_db
 from app.models.models import DownloadTask, OrphanMediaFile, PlatformMediaAsset, XMediaAsset
 from app.models.schemas import MessageResponse
@@ -85,6 +86,7 @@ async def _orphan_file(db: AsyncSession, orphan_id: int):
 
 
 @router.get("/orphan/{orphan_id}/thumbnail")
+@media_cookie
 async def orphan_thumbnail(orphan_id: int, db: AsyncSession = Depends(get_async_db)):
     orphan, path, root = await _orphan_file(db, orphan_id)
     try:
@@ -99,12 +101,14 @@ async def orphan_thumbnail(orphan_id: int, db: AsyncSession = Depends(get_async_
 
 
 @router.get("/orphan/{orphan_id}/preview")
+@media_cookie
 async def orphan_preview(orphan_id: int, db: AsyncSession = Depends(get_async_db)):
     orphan, path, _ = await _orphan_file(db, orphan_id)
     return FileResponse(path, media_type=mimetypes.guess_type(orphan.filename)[0])
 
 
 @router.get("/orphan/{orphan_id}/download")
+@media_cookie
 async def orphan_download(orphan_id: int, db: AsyncSession = Depends(get_async_db)):
     orphan, path, _ = await _orphan_file(db, orphan_id)
     return FileResponse(path, media_type=mimetypes.guess_type(orphan.filename)[0], filename=orphan.filename)
@@ -167,6 +171,7 @@ async def delete_indexed(
 
 
 @router.get("/{platform}/{resource_id}/thumbnail")
+@media_cookie
 async def media_thumbnail(platform: str, resource_id: int, db: AsyncSession = Depends(get_async_db)):
     if platform not in PLATFORMS or resource_id < 1:
         raise HTTPException(404, "媒体资源不存在")
