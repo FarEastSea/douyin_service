@@ -454,7 +454,7 @@ deployment_action() {
 }
 
 csv_sidecar_action() {
-    (cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.csv_sidecar_migration "$1" \
+    (trap - ERR; cd "$CANDIDATE_DIR" && "$BUILD_VENV/bin/python" -m app.core.csv_sidecar_migration "$1" \
         --root "$SERVICE_ROOT" --backup-dir "$CSV_SIDECAR_BACKUP")
 }
 

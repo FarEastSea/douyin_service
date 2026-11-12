@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 from datetime import datetime
 import hashlib
 import io
@@ -53,6 +54,9 @@ def _is_link(path: Path) -> bool:
 
 def _no_links(path: Path, *, missing: bool = False) -> None:
     """Check every component, including parents outside the download directory."""
+    if hasattr(os, "O_PATH"):
+        _no_links_by_descriptor(path, missing=missing)
+        return
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
@@ -64,6 +68,38 @@ def _no_links(path: Path, *, missing: bool = False) -> None:
             raise
         if stat.S_ISLNK(mode) or _is_link(current):
             raise RuntimeError("CSV recovery refuses symbolic links or junctions")
+
+
+def _no_links_by_descriptor(path: Path, *, missing: bool) -> None:
+    # O_DIRECTORY | O_NOFOLLOW verifies directory traversal without requiring
+    # ancestor attributes, which can be stale on an otherwise usable NFS mount.
+    # The final entry still requires metadata and must never be a symbolic link.
+    descriptor = os.open(path.anchor, os.O_PATH | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            try:
+                child = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            except FileNotFoundError:
+                if missing:
+                    return
+                raise
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise RuntimeError("CSV recovery refuses symbolic links or non-directory ancestors") from exc
+                raise
+            os.close(descriptor)
+            descriptor = child
+        if len(path.parts) > 1:
+            try:
+                mode = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                if missing:
+                    return
+                raise
+            if stat.S_ISLNK(mode):
+                raise RuntimeError("CSV recovery refuses symbolic links or junctions")
+    finally:
+        os.close(descriptor)
 
 
 def _inside(path: Path, directory: Path) -> None:
