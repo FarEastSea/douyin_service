@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 import asyncio
 import json
+import logging
 
 from app.models.database import get_async_db
 from app.models.models import Author, Work, DownloadTask, DownloadHistory, SystemConfig
@@ -91,7 +92,9 @@ class CompleteConfigUpdate(BaseModel):
 
 
 class NotificationTestRequest(BaseModel):
-    channel: Literal["all", "webhook", "bark", "email", "gotify"] = "all"
+    channel: Literal[
+        "all", "webhook", "bark", "email", "gotify", "telegram", "wecom", "dingtalk", "feishu",
+    ] = "all"
 
 
 class DouyinAccountUpdate(BaseModel):
@@ -378,8 +381,22 @@ async def _read_live_stats(db: AsyncSession) -> dict[str, int]:
 
 @router.get("/status/stats")
 async def get_live_stats(db: AsyncSession = Depends(get_async_db)):
-    """供页面轮询的轻量实时统计接口。"""
-    return await _read_live_stats(db)
+    """供页面轮询的统计接口。
+
+    五个计数都要扫描任务与作者表，页面每 30 秒轮询一次；结果短时间复用，缓存不可用时直接读库。
+    """
+    try:
+        cached = await asyncio.to_thread(redis_client.get_stats_cached)
+    except Exception:
+        cached = None
+    if cached:
+        return cached
+    stats = await _read_live_stats(db)
+    try:
+        await asyncio.to_thread(redis_client.set_stats_cached, stats)
+    except Exception:
+        logging.getLogger(__name__).warning("统计缓存写入失败，下次轮询直接读库")
+    return stats
 
 
 @router.get("/status", response_model=SystemStatus)
@@ -442,6 +459,30 @@ async def test_notification(request: NotificationTestRequest):
         message=f"已成功发送 {result['sent']} 个通知渠道" if success else "没有渠道发送成功，请检查已保存的通知配置",
         data=result,
     )
+
+
+@router.post("/notifications/digest", response_model=MessageResponse)
+async def send_digest_now():
+    """立即生成并发送昨天的每日摘要，用于核对内容与渠道；不受摘要开关和发送时间限制。"""
+    from app.tasks.notification_tasks import send_digest
+
+    outcome = await asyncio.to_thread(send_digest, force=True)
+    result, digest = outcome["result"], outcome["digest"]
+    success = result["sent"] > 0
+    await asyncio.to_thread(
+        redis_client.append_activity_log,
+        "info" if success else "warning",
+        "system",
+        "每日摘要已手动发送" if success else "每日摘要未发送",
+        json.dumps(result.get("channels", {}), ensure_ascii=False),
+    )
+    return MessageResponse(
+        success=success,
+        message=f"摘要已发送到 {result['sent']} 个通知渠道" if success else "没有渠道发送成功，请先启用并测试通知渠道",
+        data={"title": digest["title"], "body": digest["body"], "channels": result.get("channels", {})},
+    )
+
+
 @router.get("/status/readiness")
 async def get_readiness(request: Request):
     """返回与发布验收一致的核心依赖状态。"""
@@ -627,7 +668,8 @@ async def purge_old_queues():
 @router.get("/worker-log")
 async def get_worker_log(lines: int = Query(100, ge=1, le=1000)):
     """读取 Worker 日志文件的最后 N 行"""
-    log_path = "logs/download_tasks.log"
+    # 以项目根目录为基准，不依赖 Web 进程启动时的工作目录。
+    log_path = Path(__file__).resolve().parents[2] / "logs" / "download_tasks.log"
     if not Path(log_path).exists():
         return {"lines": [], "message": "日志文件不存在"}
 

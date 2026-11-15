@@ -80,6 +80,19 @@ celery_app.conf.update(
             "task": "app.tasks.download_tasks.detect_stuck_tasks",
             "schedule": crontab(minute="*/5"),
         },
+        # 阈值与开关在任务执行时读取最新网页配置，调度本身保持固定。
+        "check-disk-space": {
+            "task": "app.tasks.notification_tasks.check_disk_space",
+            "schedule": crontab(minute="*/10"),
+        },
+        "send-daily-digest": {
+            "task": "app.tasks.notification_tasks.send_daily_digest",
+            "schedule": crontab(minute=5),
+        },
+        "cleanup-thumbnails-daily": {
+            "task": "app.tasks.notification_tasks.cleanup_thumbnails",
+            "schedule": crontab(hour=3, minute=15),
+        },
     },
 )
 

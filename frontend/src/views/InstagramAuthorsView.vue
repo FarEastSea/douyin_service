@@ -40,7 +40,8 @@ const selected = computed(() => Number(route.query.author) || 0);
 const withZone = (value: string) => /Z$|[+-]\d\d:\d\d$/.test(value) ? value : value + "Z";
 const utc = (value?: string | null) => dateTime(value ? withZone(value) : undefined);
 const epoch = (value?: string | null) => value ? Date.parse(withZone(value)) : NaN;
-let timer: number | undefined, searchTimer: number | undefined, loadSequence = 0, detailSequence = 0;
+let timer: number | undefined, searchTimer: number | undefined, loadSequence = 0, detailSequence = 0,
+  workSequence = 0, collectionSequence = 0;
 
 const sessionIssue = computed(() => {
   const value = session.value;
@@ -121,6 +122,7 @@ function syncQuery() {
   void router.replace({ query: { ...route.query, page: page.value > 1 ? String(page.value) : undefined, q: search.value || undefined, subscribed: subscribed.value || undefined } });
 }
 async function load() {
+  if (busyIds.value.length) return;
   const sequence = ++loadSequence;
   loading.value = true; error.value = "";
   try {
@@ -128,7 +130,7 @@ async function load() {
     if (search.value.trim()) query.set("q", search.value.trim());
     if (subscribed.value) query.set("subscribed", subscribed.value);
     const [data, account] = await Promise.all([api(`${root}/authors?${query}`), api<Session>(`${root}/session`)]);
-    if (sequence !== loadSequence) return;
+    if (sequence !== loadSequence || busyIds.value.length) return;
     authors.value = data.items;
     const refreshed = authors.value.find(a => a.id === detail.value?.id);
     if (refreshed && detail.value) detail.value = { ...detail.value, ...refreshed };
@@ -146,6 +148,7 @@ function openAuthor(id: number, view: Tab = "overview") { tab.value = view; void
 function closeAuthor() { void router.replace({ query: { ...route.query, author: undefined } }); }
 async function loadDetail() {
   const id = selected.value, sequence = ++detailSequence;
+  ++workSequence; ++collectionSequence;
   detail.value = undefined; detailError.value = "";
   if (!id) return;
   workPage.value = collectionPage.value = 1;
@@ -159,16 +162,20 @@ async function loadDetail() {
   } catch (e: any) { if (sequence === detailSequence) detailError.value = e.message; }
 }
 async function loadWorks() {
-  const id = selected.value;
-  const result = await api(`${root}/authors/${id}/works?page=${workPage.value}`);
-  if (id !== selected.value) return;
-  works.value = result.items; workPages.value = result.pages; workTotal.value = result.total;
+  const id = selected.value, sequence = ++workSequence;
+  try {
+    const result = await api(`${root}/authors/${id}/works?page=${workPage.value}`);
+    if (id !== selected.value || sequence !== workSequence) return;
+    works.value = result.items; workPages.value = result.pages; workTotal.value = result.total;
+  } catch (e: any) { if (id === selected.value && sequence === workSequence) detailError.value = e.message || "作品读取失败"; }
 }
 async function loadCollections() {
-  const id = selected.value;
-  const result = await api(`${root}/authors/${id}/collections?page=${collectionPage.value}`);
-  if (id !== selected.value) return;
-  collections.value = result.items; collectionPages.value = result.pages; collectionTotal.value = result.total;
+  const id = selected.value, sequence = ++collectionSequence;
+  try {
+    const result = await api(`${root}/authors/${id}/collections?page=${collectionPage.value}`);
+    if (id !== selected.value || sequence !== collectionSequence) return;
+    collections.value = result.items; collectionPages.value = result.pages; collectionTotal.value = result.total;
+  } catch (e: any) { if (id === selected.value && sequence === collectionSequence) detailError.value = e.message || "精选读取失败"; }
 }
 async function mutate(path: string, body?: object, fallback = "已保存") {
   busy.value = true; detailError.value = error.value = "";
@@ -183,6 +190,8 @@ async function mutate(path: string, body?: object, fallback = "已保存") {
 }
 async function toggleSubscription(author: Author) {
   if (busyIds.value.includes(author.id)) return;
+  ++loadSequence;
+  loading.value = false;
   busyIds.value = [...busyIds.value, author.id];
   try {
     const next = await api<Author>(`${root}/authors/${author.id}/subscription`, { method: "POST", ...jsonBody({ is_subscribed: !author.is_subscribed }) });
@@ -213,7 +222,7 @@ function toggleKind(kind: Kind) {
 watch(selected, () => void loadDetail(), { immediate: true });
 function authorsChanged() { void load(); }
 onMounted(() => { if (route.query.view === "reports") { void router.replace("/automation"); return; } void load(); window.addEventListener("app:authors-changed", authorsChanged); timer = window.setInterval(() => { if (!document.hidden && !busy.value) void load(); }, 15000); });
-onBeforeUnmount(() => { ++loadSequence; ++detailSequence; window.clearInterval(timer); window.clearTimeout(searchTimer); window.removeEventListener("app:authors-changed", authorsChanged); });
+onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++collectionSequence; window.clearInterval(timer); window.clearTimeout(searchTimer); window.removeEventListener("app:authors-changed", authorsChanged); });
 </script>
 <template>
   <section class="workspace-page authors-page">

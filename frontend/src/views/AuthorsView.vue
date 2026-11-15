@@ -49,7 +49,8 @@ const detail = ref<AuthorRecord>(),
   resourceError = ref(""),
   resourceBusy = ref(false),
   interval = ref(0),
-  busyIds = ref<number[]>([]);
+  busyIds = ref<number[]>([]),
+  checkBusy = ref(false);
 let sequence = 0,
   detailSequence = 0,
   resourceSequence = 0,
@@ -136,16 +137,18 @@ function closeAuthor() {
     },
   });
 }
-async function loadDetail() {
+async function loadDetail(preserve = false) {
   const current = ++detailSequence;
   ++resourceSequence;
-  detail.value = undefined;
+  if (!preserve) detail.value = undefined;
   detailError.value = "";
-  tab.value = "overview";
-  automation.value = undefined;
-  history.value = [];
+  if (!preserve) tab.value = "overview";
+  if (!preserve) {
+    automation.value = undefined;
+    history.value = [];
+  }
   if (!selected.value) return;
-  detailBusy.value = true;
+  detailBusy.value = !preserve;
   try {
     const data = await api<AuthorRecord>(`${prefix.value}/${selected.value}`);
     if (current === detailSequence) {
@@ -180,7 +183,7 @@ async function loadResource() {
   }
 }
 async function action(item: AuthorRecord, verb: string, method = "POST") {
-  if (busyIds.value.includes(item.id)) return;
+  if (busyIds.value.includes(item.id)) return false;
   if (
     !isX.value &&
     store.risk.active &&
@@ -197,10 +200,12 @@ async function action(item: AuthorRecord, verb: string, method = "POST") {
     store.notify(result.message || "操作完成");
     if (requestedPlatform === props.platform) {
       await load();
-      if (selected.value === item.id) await loadDetail();
+      if (selected.value === item.id && method !== "DELETE") await loadDetail(true);
     }
+    return true;
   } catch (e: any) {
     store.notify(e.message || "操作失败", "error");
+    return false;
   } finally {
     busyIds.value = busyIds.value.filter((id) => id !== item.id);
   }
@@ -210,9 +215,7 @@ async function remove(item: AuthorRecord) {
     ? `删除 ${name(item)} 的订阅、用户和关联数据库记录？已下载的磁盘文件保留。`
     : `删除作者“${name(item)}”、其作品、任务和已下载文件？文件删除不可恢复。`;
   if (!(await confirmAction(message, "删除作者", "删除作者"))) return;
-  await action(item, "", "DELETE");
-  if (!authors.value.some((author) => author.id === item.id) && !error.value)
-    closeAuthor();
+  if (await action(item, "", "DELETE")) closeAuthor();
 }
 function openAdd() {
   window.dispatchEvent(
@@ -225,7 +228,8 @@ function authorsChanged(event: Event) {
   if ((event as CustomEvent).detail?.platform === props.platform) void load();
 }
 async function checkAll() {
-  if (!isX.value && store.risk.active) return;
+  if (checkBusy.value || (!isX.value && store.risk.active)) return;
+  checkBusy.value = true;
   try {
     const data = await api<any>(prefix.value + "/check-all", {
       method: "POST",
@@ -233,20 +237,27 @@ async function checkAll() {
     store.notify(data.message);
   } catch (e: any) {
     store.notify(e.message, "error");
+  } finally {
+    checkBusy.value = false;
   }
 }
 async function saveInterval() {
   if (!detail.value || !Number.isFinite(interval.value) || interval.value <= 0)
     return;
+  const item = detail.value;
+  if (busyIds.value.includes(item.id)) return;
+  busyIds.value.push(item.id);
   try {
-    await api(`${prefix.value}/${detail.value.id}`, {
-      method: "PUT",
+    await api(`${prefix.value}/${item.id}`, {
+      method: "PATCH",
       ...jsonBody({ check_interval: interval.value }),
     });
     store.notify("检查间隔已保存");
-    await loadDetail();
+    if (selected.value === item.id) await loadDetail(true);
   } catch (e: any) {
     store.notify(e.message, "error");
+  } finally {
+    busyIds.value = busyIds.value.filter((id) => id !== item.id);
   }
 }
 useContextActions(() => [
@@ -282,10 +293,10 @@ useContextActions(() => [
     id: "author-check",
     label: "检查当前平台订阅",
     run: checkAll,
-    disabled: !isX.value && store.risk.active,
+    disabled: checkBusy.value || (!isX.value && store.risk.active),
   },
 ]);
-watch(selected, loadDetail);
+watch(selected, () => loadDetail());
 watch(tab, loadResource);
 watch(
   () => props.platform,
@@ -303,7 +314,7 @@ watch(
   },
 );
 watch(
-  () => route.query,
+  () => JSON.stringify([route.query.page, route.query.q, route.query.subscribed, route.query.account]),
   () => {
     const nextPage = Number(route.query.page) || 1,
       nextSearch = String(route.query.q || ""),
@@ -346,12 +357,12 @@ onBeforeUnmount(() => {
       refreshable
       @refresh="load"
       ><MoreActions label="作者操作"
-        ><button :disabled="!isX && store.risk.active" @click="checkAll">
+        ><button :disabled="checkBusy || (!isX && store.risk.active)" @click="checkAll">
           检查当前平台订阅</button
         ><RouterLink to="/automation">查看自动化运行</RouterLink></MoreActions
       ><button
         class="btn primary"
-        :disabled="!isX && store.risk.active"
+        :disabled="checkBusy || (!isX && store.risk.active)"
         @click="openAdd"
       >
         <Plus :size="15" />订阅作者
@@ -611,7 +622,7 @@ onBeforeUnmount(() => {
             :to="`/authors/douyin/${detail.id}/works`"
           >浏览全部作品</RouterLink
           >
-          <RouterLink class="btn ghost" :to="{path:'/library',query:{platform:props.platform,author:name(detail)}}">查看已保存媒体</RouterLink>
+          <RouterLink class="btn ghost" :to="{path:'/library',query:{platform:props.platform,author_id:String(detail.id),author:name(detail)}}">查看已保存媒体</RouterLink>
           <div v-if="automation?.history?.length" class="result-list">
             <h3>最近检查轨迹</h3>
             <article v-for="item in automation.history" :key="item.report_id">

@@ -27,6 +27,7 @@ from app.models.models import (
 )
 from app.core.config_transaction import atomic_json
 from app.services.download_state_lock import lock_task_graph, lock_works
+from app.services.storage_health import require_readable_storage
 
 
 PARTIAL_SUFFIXES = {".part", ".tmp", ".downloading"}
@@ -128,6 +129,8 @@ async def _is_referenced(db: AsyncSession, root: Path, raw_path: str, resolved_p
 
 
 async def _active_path(db: AsyncSession, path: Path) -> bool:
+    if path.name.endswith(".downloading.json"):
+        path = path.with_suffix("")
     # 暂停下载的临时文件也是可恢复状态，不能当作垃圾隔离。
     active = bool(await db.scalar(select(DownloadTask.id).where(
         DownloadTask.status.in_(("pending", "downloading", "paused")),
@@ -136,11 +139,13 @@ async def _active_path(db: AsyncSession, path: Path) -> bool:
     if active:
         return True
     for model in (XDownloadTask, PlatformDownloadTask):
-        directories = (await db.execute(select(model.download_dir).where(
-            model.status.in_(("pending", "downloading", "paused"))))).scalars().all()
-        for directory in directories:
-            if directory and path.is_relative_to(Path(directory).resolve(strict=False)):
-                return True
+        ancestors = {str(parent) for parent in (path, *path.parents)}
+        ancestors.update(value + os.sep for value in tuple(ancestors))
+        if await db.scalar(select(model.id).where(
+            model.status.in_(("pending", "downloading", "paused")),
+            model.download_dir.in_(ancestors),
+        ).limit(1)):
+            return True
     return False
 
 
@@ -155,6 +160,12 @@ async def build_storage_repair_plan(
     now = datetime.now(timezone.utc).timestamp()
     plan: list[dict[str, Any]] = []
     seen: set[tuple[str, str, int | None]] = set()
+    storage_error = None
+    if any(item.get("issue_type") == "missing_record" for item in targets):
+        try:
+            await asyncio.to_thread(require_readable_storage, root)
+        except (OSError, ValueError) as exc:
+            storage_error = str(exc)
     for target in targets:
         issue_type = str(target.get("issue_type") or "")
         record_kind = str(target.get("record_kind") or "") or None
@@ -214,6 +225,8 @@ async def build_storage_repair_plan(
                     relative_path=str(candidate.relative_to(root)),
                 )
             elif issue_type == "missing_record":
+                if storage_error:
+                    raise ValueError(storage_error)
                 if path.exists():
                     raise ValueError("文件已经恢复，无需处理")
                 if find_rebase_candidate(root, raw_path) is not None:
@@ -230,7 +243,7 @@ async def build_storage_repair_plan(
             elif issue_type == "partial_file":
                 if await _active_path(db, path):
                     raise ValueError("临时文件属于活跃或暂停任务，跳过维护")
-                if not path.is_file() or path.is_symlink() or path.suffix.lower() not in PARTIAL_SUFFIXES:
+                if not path.is_file() or path.is_symlink() or (path.suffix.lower() not in PARTIAL_SUFFIXES and not path.name.endswith(".downloading.json")):
                     raise ValueError("文件已变化或不是临时文件")
                 if now - path.stat().st_mtime < partial_stale_seconds:
                     raise ValueError("临时文件仍在安全观察期内")
@@ -275,11 +288,22 @@ async def _adopt_orphan(db: AsyncSession, path: Path) -> None:
 
 
 async def _mark_related_task_failed(
-    db: AsyncSession, record_kind: str | None, record_id: int | None,
+    db: AsyncSession, record_kind: str | None, record_id: int | None, *, verified_empty: bool = False,
 ) -> str | None:
     record, task = await _lock_record_and_task(db, record_kind or "", record_id)
     if record is None or task is None:
         return None
+    from app.core.config import settings
+    if not verified_empty:
+        await asyncio.to_thread(require_readable_storage, Path(settings.DOWNLOAD_ROOT).expanduser().resolve())
+    record_path = _record_path(record)
+    path = _normalized_record_path(Path(settings.DOWNLOAD_ROOT).expanduser().resolve(), record_path) if record_path else None
+    if record_path:
+        parent = path.parent
+        if parent.is_dir() and not verified_empty:
+            await asyncio.to_thread(require_readable_storage, parent)
+    if path and path.is_file() and path.stat().st_size:
+        raise ValueError("文件已经恢复，未标记任务失败")
     if task.status in {"pending", "downloading", "paused"}:
         raise ValueError("任务已经进入活跃状态，未标记失败")
     task.status = "failed"
@@ -422,6 +446,7 @@ async def _apply_storage_repair_plan(
             if item["action"] in {"mark_task_failed", "quarantine_and_mark_task_failed"}:
                 task_key = await _mark_related_task_failed(
                     db, item.get("record_kind"), item.get("record_id"),
+                    verified_empty=item["action"] == "quarantine_and_mark_task_failed",
                 )
                 if not task_key:
                     raise ValueError("关联任务不存在，无法标记文件缺失")

@@ -183,6 +183,9 @@ async def list_x_task_media(
     statement = select(XMediaAsset).where(XMediaAsset.task_id == task.id).order_by(XMediaAsset.created_at, XMediaAsset.id)
     if page is not None:
         statement = statement.offset((page - 1) * page_size).limit(page_size)
+    else:
+        # 不分页的旧调用方式也设上限，作者任务可能有数万条媒体。
+        statement = statement.limit(2000)
     assets = (await db.execute(statement)).scalars().all()
     items = [XMediaAssetResponse(
         id=item.id, task_id=item.task_id, media_type=item.media_type,

@@ -144,8 +144,11 @@ export function useSettingsController(props: {
   const updateBusy = ref(false);
   const notificationTestBusy = ref(false);
   const notificationTestChannel = ref<
-    "all" | "webhook" | "bark" | "email" | "gotify"
+    | "all" | "webhook" | "bark" | "email" | "gotify"
+    | "telegram" | "wecom" | "dingtalk" | "feishu"
   >("all");
+  const digestBusy = ref(false);
+  const digestPreview = ref<{ title: string; body: string } | null>(null);
   const notificationTestResult = ref<Record<string, any>>({});
   let logTimer: number | undefined;
   let storageAuditTimer: number | undefined;
@@ -746,8 +749,12 @@ export function useSettingsController(props: {
   }
 
   async function loadStorageJournals() {
-    storageJournals.value =
-      (await api<any>("/operations/storage-journals")).items || [];
+    try {
+      storageJournals.value =
+        (await api<any>("/operations/storage-journals")).items || [];
+    } catch (error: any) {
+      store.notify(error.message || "存储恢复记录读取失败", "error");
+    }
   }
   async function restoreStorage(journalId: string, apply = false) {
     if (
@@ -1144,6 +1151,26 @@ export function useSettingsController(props: {
       notificationTestBusy.value = false;
     }
   }
+  async function sendDigestNow() {
+    if (digestBusy.value) return;
+    digestBusy.value = true;
+    try {
+      if (!(await saveCurrentPage({ silentSuccess: true }))) return;
+      const result = await api<any>("/notifications/digest", { method: "POST" });
+      digestPreview.value = result.data?.title
+        ? { title: result.data.title, body: result.data.body || "" }
+        : null;
+      notificationTestResult.value = result.data?.channels || {};
+      store.notify(
+        result.message || "每日摘要已发送",
+        result.success ? "success" : "error",
+      );
+    } catch (error: any) {
+      store.notify(error.message || "每日摘要发送失败", "error");
+    } finally {
+      digestBusy.value = false;
+    }
+  }
   function toggleArchiveValue(
     key: "work_types" | "metadata_formats",
     value: string,
@@ -1173,9 +1200,13 @@ export function useSettingsController(props: {
       !(await confirmAction("确定清空活动日志？"))
     )
       return;
-    await api("/logs", { method: "DELETE" });
-    logs.value = [];
-    store.notify("日志已清空");
+    try {
+      await api("/logs", { method: "DELETE" });
+      logs.value = [];
+      store.notify("日志已清空");
+    } catch (error: any) {
+      store.notify(error.message || "日志清空失败", "error");
+    }
   }
   async function copyLogs() {
     if (!resourceState.value.logs.loaded) return;
@@ -1198,8 +1229,14 @@ export function useSettingsController(props: {
             : ""),
       )
       .join("\n\n");
-    await navigator.clipboard.writeText(text);
-    store.notify("日志已复制（敏感值已脱敏）");
+    try {
+      // 非 HTTPS 的自托管地址没有 navigator.clipboard，直接调用会抛出 TypeError。
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      store.notify("日志已复制（敏感值已脱敏）");
+    } catch {
+      store.notify("复制失败：浏览器未允许访问剪贴板（需要 HTTPS 或 localhost）", "error");
+    }
   }
   async function checkUpdate() {
     updateBusy.value = true;
@@ -1240,7 +1277,11 @@ export function useSettingsController(props: {
     event.returnValue = "";
   }
   onBeforeRouteLeave(() => confirmDiscard());
-  onBeforeRouteUpdate(() => confirmDiscard());
+  onBeforeRouteUpdate(async () => {
+    if (!(await confirmDiscard())) return false;
+    discardActiveChanges();
+    return true;
+  });
   watch(
     () => [props.mode, props.section] as const,
     async () => {
@@ -1422,6 +1463,9 @@ export function useSettingsController(props: {
     refreshActivePage,
     saveCurrentPage,
     saveAndTestNotification,
+    digestBusy,
+    digestPreview,
+    sendDigestNow,
     toggleArchiveValue,
     processAction,
     clearLogs,

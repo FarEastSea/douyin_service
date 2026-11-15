@@ -4,6 +4,7 @@
 网页持久化的 .env 为权威来源；system_config 保留兼容旧数据及事务记录。
 """
 
+import asyncio
 from typing import Any, Dict, Optional
 
 from sqlalchemy import select
@@ -232,7 +233,7 @@ async def get_runtime_config(db: AsyncSession) -> Dict[str, Any]:
     try:
         from app.core import redis_client
 
-        redis_client.set_runtime_config(config)
+        await asyncio.to_thread(redis_client.set_runtime_config, config)
     except Exception:
         pass
     return config

@@ -29,22 +29,24 @@ const selected = ref<string[]>([]), busy = ref(false), failures = ref<RestoreRes
 const failureLabels = ref<Record<string, string>>({});
 const restorableKeys = computed(() => items.value.filter((item) => item.restorable).map((item) => item.key));
 const kindLabels: Record<ExclusionItem["kind"], string> = { work: "整个作品", file: "单张图片", media: "单个媒体" };
-let searchTimer: number | undefined;
+let searchTimer: number | undefined, sequence = 0;
 
 async function load() {
+  const current = ++sequence;
   loading.value = true;
   const params = new URLSearchParams({ page: String(page.value), page_size: "50" });
   if (platform.value) params.set("platform", platform.value);
   if (search.value.trim()) params.set("q", search.value.trim());
   try {
     const data = await api<{ items: ExclusionItem[]; total: number; page: number; pages: number }>(`/operations/exclusions?${params}`);
+    if (current !== sequence) return;
     items.value = data.items; total.value = data.total; pages.value = data.pages; page.value = data.page;
     selected.value = selected.value.filter((key) => data.items.some((item) => item.key === key));
     loaded.value = true; error.value = "";
   } catch (reason: any) {
-    error.value = reason.message || "排除项目读取失败";
+    if (current === sequence) error.value = reason.message || "排除项目读取失败";
   } finally {
-    loading.value = false;
+    if (current === sequence) loading.value = false;
   }
 }
 function filters() { page.value = 1; selected.value = []; void load(); }
@@ -82,7 +84,7 @@ function label(key: string) {
   return item ? item.title || item.detail || key : key;
 }
 onMounted(() => { void load(); window.addEventListener("app:exclusions-refresh", load); });
-onBeforeUnmount(() => { window.clearTimeout(searchTimer); window.removeEventListener("app:exclusions-refresh", load); });
+onBeforeUnmount(() => { ++sequence; window.clearTimeout(searchTimer); window.removeEventListener("app:exclusions-refresh", load); });
 </script>
 
 <template>

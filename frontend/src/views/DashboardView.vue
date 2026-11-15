@@ -21,6 +21,7 @@ import MediaThumbnail from "../components/MediaThumbnail.vue";
 import { mediaPreviewType, openMedia } from "../media";
 import { reportSummary } from "../presentation";
 import { api } from "../api";
+import { bytes, platformNames } from "../workspace";
 import { useAppStore } from "../stores/app";
 import type { UnifiedTask, UnifiedTaskPage, LibraryMedia, PageData } from "../types";
 
@@ -61,6 +62,17 @@ const counts = ref<Record<string, number> | null>(null);
 const report = ref<SubscriptionReport | null>(null);
 const storage = ref<StorageState | null>(null);
 const risk = ref<any>(null);
+interface DiskState {
+  available: boolean;
+  free_bytes: number | null;
+  used_percent: number | null;
+  warn_free_bytes: number;
+  low: boolean;
+}
+const disk = ref<DiskState | null>(null);
+// 接口只返回有记录的状态；已读取到摘要时缺失的状态就是 0，只有摘要本身未读取到才显示“-”。
+const statusCount = (status: string) =>
+  counts.value === null ? "-" : Number(counts.value[status] || 0).toLocaleString();
 const errors = ref<string[]>([]);
 const loading = ref(true);
 const refreshedAt = ref<Date | null>(null);
@@ -139,6 +151,13 @@ const attention = computed(() => {
       to: "/automation",
       tone: "warning",
     });
+  if (disk.value?.available && disk.value.low)
+    items.push({
+      title: `下载磁盘仅剩 ${bytes(disk.value.free_bytes)}`,
+      detail: `已低于预警线 ${bytes(disk.value.warn_free_bytes)}；空间耗尽会导致下载失败，请清理媒体或扩容。`,
+      to: "/insights",
+      tone: "critical",
+    });
   if (storage.value?.status === "failed")
     items.push({
       title: "存储巡检未完成",
@@ -164,14 +183,6 @@ const statusNames: Record<string, string> = {
   skipped: "已跳过",
   failed: "失败",
   cancelled: "已取消",
-};
-const platformNames: Record<string, string> = {
-  douyin: "抖音",
-  x: "X",
-  tiktok: "TikTok",
-  weibo: "微博",
-  bilibili: "B站",
-  xhs: "小红书",
 };
 function formatTime(value?: string) {
   if (!value) return "暂无记录";
@@ -208,7 +219,8 @@ async function load() {
     api<UnifiedTaskPage>(
       "/operations/tasks?page=1&page_size=5&status=downloading",
     ),
-    api<PageData<LibraryMedia>>("/operations/media?page=1&page_size=6&sort_by=created_desc"),
+    api<PageData<LibraryMedia>>("/operations/media?page=1&page_size=6&sort_by=created_desc&with_counts=false"),
+    api<DiskState>("/operations/insights/disk"),
   ]);
   inFlight = false;
   if (current !== sequence) return;
@@ -220,7 +232,9 @@ async function load() {
     "抖音风控",
     "活动队列",
     "媒体库",
+    "磁盘空间",
   ];
+  if (results[7].status === "fulfilled") disk.value = results[7].value;
   results.forEach((result,index) => { if (result.status === 'fulfilled') freshness.value[messages[index]!] = new Date().toISOString(); });
   if (results[6].status === 'fulfilled') media.value = results[6].value.items;
   activeTasks.value =
@@ -277,18 +291,18 @@ onBeforeUnmount(() => {
       <section class="kpi-grid" aria-label="全部平台任务摘要">
         <RouterLink to="/operations/tasks?status=downloading" class="kpi-card" data-tone="active">
           <span class="kpi-label"><Activity :size="15" />正在下载</span>
-          <strong>{{ counts?.downloading ?? '-' }}</strong>
+          <strong>{{ statusCount('downloading') }}</strong>
           <small>{{ activeTasks.length ? `平均进度 ${averageProgress}%` : '队列当前空闲' }}</small>
           <span v-if="activeTasks.length" class="kpi-meter" :style="{ '--progress': averageProgress + '%' }" aria-hidden="true" />
         </RouterLink>
         <RouterLink to="/operations/tasks?status=pending" class="kpi-card">
           <span class="kpi-label"><Clock3 :size="15" />等待下载</span>
-          <strong>{{ counts?.pending ?? '-' }}</strong>
+          <strong>{{ statusCount('pending') }}</strong>
           <small>按调度规则依次执行</small>
         </RouterLink>
         <RouterLink to="/operations/tasks?status=failed" class="kpi-card" :data-tone="failedCount > 0 ? 'danger' : undefined">
           <span class="kpi-label"><AlertCircle :size="15" />失败待复核</span>
-          <strong>{{ counts?.failed ?? '-' }}</strong>
+          <strong>{{ statusCount('failed') }}</strong>
           <small>{{ failedCount > 0 ? '打开查看失败原因' : '没有失败任务' }}</small>
         </RouterLink>
         <RouterLink to="/authors/douyin" class="kpi-card">
@@ -341,6 +355,6 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </template>
-    <footer class="dashboard-footer"><HardDrive :size="15" /><span>存储巡检{{errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? '更新于 '+formatTime(storage.updated_at) : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录'}}</span><RouterLink to="/operations/maintenance/storage">打开存储维护 <ArrowRight :size="14" /></RouterLink></footer>
+    <footer class="dashboard-footer"><HardDrive :size="15" /><span>存储巡检{{errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? '更新于 '+formatTime(storage.updated_at) : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录'}}</span><RouterLink to="/operations/maintenance/storage">打开存储维护 <ArrowRight :size="14" /></RouterLink><span v-if="disk?.available" class="dashboard-disk" :class="{ 'danger-text': disk.low }">磁盘剩余 {{ bytes(disk.free_bytes) }}（已用 {{ disk.used_percent }}%）</span><RouterLink to="/insights">查看洞察 <ArrowRight :size="14" /></RouterLink></footer>
   </div>
 </template>

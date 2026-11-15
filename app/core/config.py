@@ -150,7 +150,25 @@ class Settings(BaseModel):
     GOTIFY_ENABLED: bool = False
     GOTIFY_SERVER_URL: str = ""
     GOTIFY_TOKEN: str = ""
-    
+    TELEGRAM_ENABLED: bool = False
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_API_BASE: str = "https://api.telegram.org"
+    WECOM_ENABLED: bool = False
+    WECOM_WEBHOOK_URL: str = ""
+    DINGTALK_ENABLED: bool = False
+    DINGTALK_WEBHOOK_URL: str = ""
+    DINGTALK_SECRET: str = ""
+    FEISHU_ENABLED: bool = False
+    FEISHU_WEBHOOK_URL: str = ""
+    FEISHU_SECRET: str = ""
+
+    # 磁盘空间预警与每日摘要；阈值为 0 表示不预警。
+    DISK_WARN_FREE_GB: float = Field(5, ge=0, le=1000000)
+    NOTIFY_ON_LOW_DISK: bool = True
+    NOTIFY_DAILY_DIGEST: bool = False
+    NOTIFY_DAILY_DIGEST_HOUR: int = Field(9, ge=0, le=23)
+
     # Cookie 配置（可通过环境变量或API设置）
     DOUYIN_COOKIE: Optional[str] = None
     

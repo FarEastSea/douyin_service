@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import threading
+import time
 from uuid import uuid4
 import warnings
 
@@ -20,6 +21,25 @@ class ThumbnailUnavailable(ValueError):
 
 _generation_slots = threading.BoundedSemaphore(2)
 _resource_locks = [threading.Lock() for _ in range(64)]
+
+
+def cleanup_thumbnail_cache(root_value: str, *, retention_seconds: int = 30 * 86400) -> int:
+    """后台逐项清理30天未使用的缩略图，不在页面请求中遍历整个缓存。"""
+    cache = Path(root_value).expanduser().resolve() / ".thumbnails"
+    if not cache.is_dir() or cache.is_symlink():
+        return 0
+    removed = 0
+    cutoff = time.time() - retention_seconds
+    with os.scandir(cache) as entries:
+        for entry in entries:
+            if entry.name.endswith(".jpg") and not entry.is_symlink():
+                try:
+                    if entry.is_file() and entry.stat().st_mtime < cutoff:
+                        Path(entry.path).unlink(missing_ok=True)
+                        removed += 1
+                except FileNotFoundError:
+                    pass
+    return removed
 
 
 def ensure_media_thumbnail(path_value: str, root_value: str, platform: str, resource_id: int, media_type: str) -> Path:
@@ -38,6 +58,8 @@ def ensure_media_thumbnail(path_value: str, root_value: str, platform: str, reso
     lock_index = int(hashlib.sha256(prefix.encode()).hexdigest()[:8], 16) % len(_resource_locks)
     with _resource_locks[lock_index]:
         if target.is_file() and target.stat().st_size:
+            if time.time() - target.stat().st_mtime > 86400:
+                target.touch()
             return target
         if not _generation_slots.acquire(timeout=3):
             raise ThumbnailUnavailable("缩略图正在生成，请稍后重试")

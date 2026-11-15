@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from billiard.exceptions import SoftTimeLimitExceeded
 
-from sqlalchemy import literal, select, union_all
+from sqlalchemy import func, literal, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import redis_client
@@ -30,7 +30,7 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def failed_task_keys(db: AsyncSession, platform: str = "") -> list[str]:
+def failed_task_statement(platform: str = ""):
     statements = []
     if not platform or platform == "douyin":
         statements.append(select(literal("douyin").label("platform"), DownloadTask.id.label("id"))
@@ -45,7 +45,22 @@ async def failed_task_keys(db: AsyncSession, platform: str = "") -> list[str]:
             statement = statement.where(PlatformDownloadTask.platform == platform)
         statements.append(statement)
     combined = statements[0] if len(statements) == 1 else union_all(*statements)
-    return [f"{row.platform}:{row.id}" for row in (await db.execute(combined)).all()]
+    return combined
+
+
+async def failed_task_count(db: AsyncSession, platform: str = "") -> int:
+    return int(await db.scalar(select(func.count()).select_from(failed_task_statement(platform).subquery())) or 0)
+
+
+async def failed_task_batches(db: AsyncSession, platform: str):
+    # 单条流式 SELECT 保留提交时快照；新失败的任务不会混入正在执行的作业。
+    rows = await db.stream(failed_task_statement(platform).execution_options(yield_per=500))
+    try:
+        async for batch in rows.partitions(500):
+            yield [f"{row.platform}:{row.id}" for row in batch]
+    finally:
+        await rows.close()
+
 
 
 def get_job(job_id: str | None = None, *, action: str = "retry") -> dict:
@@ -71,28 +86,42 @@ def release_lock(job_id: str) -> None:
     )
 
 
-def create_job(keys: list[str], platform: str, *, action: str = "retry") -> tuple[dict, bool]:
+async def create_job(db: AsyncSession, platform: str, *, action: str = "retry") -> tuple[dict, bool]:
     if action not in {"retry", "delete"}:
         raise ValueError("不支持的全部失败任务操作")
     client = redis_client.redis_client
     job_id = uuid4().hex
-    if not client.set(PREFIX + "lock", job_id, nx=True, ex=LOCK_TTL):
-        active_id = client.get(PREFIX + "lock")
-        state = get_job(active_id) if active_id else {"status": "idle"}
+    if not await asyncio.to_thread(client.set, PREFIX + "lock", job_id, nx=True, ex=LOCK_TTL):
+        active_id = await asyncio.to_thread(client.get, PREFIX + "lock")
+        state = await asyncio.to_thread(get_job, active_id) if active_id else {"status": "idle"}
         if state["status"] == "idle" or state.get("action", "retry") != action or state.get("platform") != platform:
             raise TaskOperationError("另一个失败任务批量作业正在执行，请稍后刷新", 409)
         return state, False
     state = {"job_id": job_id, "platform": platform, "action": action, "status": "queued", "created_at": now(),
-             "updated_at": now(), "total": len(keys), "processed": 0, "succeeded": 0,
+             "updated_at": now(), "total": 0, "processed": 0, "succeeded": 0,
              "skipped": 0, "failed": 0, "failures": [], "error": None}
+    key = PREFIX + job_id + ":keys"
+    def append_batch(batch):
+        # 与锁续期原子执行；不能在丢失所有权后继续发布快照。
+        accepted = client.eval(
+            "if redis.call('get',KEYS[1]) ~= ARGV[1] then return 0 end "
+            "redis.call('rpush',KEYS[2],unpack(ARGV,4)); "
+            "redis.call('expire',KEYS[1],ARGV[2]); "
+            "redis.call('expire',KEYS[2],ARGV[3]); return 1",
+            2, PREFIX + "lock", key, job_id, LOCK_TTL, TTL, *batch,
+        )
+        if not accepted:
+            raise RuntimeError("失败任务快照的执行权已失效")
     try:
-        with client.pipeline(transaction=True) as pipe:
-            pipe.set(PREFIX + job_id + ":keys", json.dumps(keys), ex=TTL)
-            pipe.set(PREFIX + job_id, json.dumps(state, ensure_ascii=False), ex=TTL)
-            pipe.set(PREFIX + ("latest" if action == "retry" else "latest:delete"), job_id, ex=TTL)
-            pipe.execute()
-    except Exception:
-        release_lock(job_id)
+        await asyncio.to_thread(save_job, state)
+        async for batch in failed_task_batches(db, platform):
+            await asyncio.to_thread(append_batch, batch)
+            state["total"] += len(batch)
+        await asyncio.to_thread(save_job, state)
+        await asyncio.to_thread(client.set, PREFIX + ("latest" if action == "retry" else "latest:delete"), job_id, ex=TTL)
+    except BaseException:
+        await asyncio.to_thread(client.delete, key, PREFIX + job_id)
+        await asyncio.to_thread(release_lock, job_id)
         raise
     return state, True
 
@@ -125,7 +154,22 @@ async def run_job(job_id: str, token: str) -> dict:
     action = state.get("action", "retry")
     if action not in {"retry", "delete"}:
         raise ValueError("后台作业操作无效")
-    keys = json.loads(redis_client.redis_client.get(PREFIX + job_id + ":keys") or "[]")
+    async def batches():
+        client = redis_client.redis_client
+        key = PREFIX + job_id + ":keys"
+        # 兼容发布前已排队的旧 JSON 快照，新作业只写分块 Redis List。
+        kind = await asyncio.to_thread(client.type, key)
+        if kind in ("string", b"string"):
+            legacy = json.loads(await asyncio.to_thread(client.get, key) or "[]")
+            for start in range(state["processed"], len(legacy), 500):
+                yield legacy[start:start + 500]
+        else:
+            while state["processed"] < state["total"]:
+                batch = await asyncio.to_thread(client.lrange, key, state["processed"], state["processed"] + 499)
+                if not batch:
+                    raise RuntimeError("失败任务快照已过期，已停止作业，请重新预演")
+                yield batch
+
     engine = create_isolated_async_engine()
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     state.update(status="running", updated_at=now())
@@ -140,44 +184,45 @@ async def run_job(job_id: str, token: str) -> dict:
                     "message": "上次执行中断，投递结果不确定；本轮未再次操作，请核对任务状态。"})
             state.pop("in_flight")
             save_job(state)
-        for key in keys[state["processed"]:]:
-            if not await asyncio.to_thread(renew_job, job_id, token):
-                raise RuntimeError("后台作业执行权已失效，停止以避免重复操作")
-            try:
-                async with sessions() as db:
-                    platform, task_id = parse_task_key(key)
-                    model = DownloadTask if platform == "douyin" else XDownloadTask if platform == "x" else PlatformDownloadTask
-                    conditions = [model.id == task_id]
-                    if model == PlatformDownloadTask:
-                        conditions.append(model.platform == platform)
-                    if model is DownloadTask:
-                        task = await lock_task_graph(db, task_id)
-                        task_status = task.status if task is not None else None
-                    else:
-                        task_status = await db.scalar(select(model.status).where(*conditions).with_for_update())
-                    if task_status != "failed":
-                        state["skipped"] += 1
-                        await db.rollback()
-                    else:
-                        state["in_flight"] = key
-                        await asyncio.to_thread(save_job, state)
-                        await asyncio.wait_for(operate_task(db, key, action), timeout=60)
-                        state["succeeded"] += 1
-            except (SoftTimeLimitExceeded, TimeoutError):
-                raise
-            except Exception as exc:
-                state["failed"] += 1
-                if len(state["failures"]) < 200:
-                    state["failures"].append({"task_key": key, "message": sanitize_text(str(exc), limit=500)})
-                # A queue outage must not reset thousands of tasks to pending without delivery.
-                if isinstance(exc, TaskOperationError) and exc.status_code == 503:
-                    state["processed"] += 1
-                    state.pop("in_flight", None)
+        async for batch in batches():
+            for key in batch:
+                if not await asyncio.to_thread(renew_job, job_id, token):
+                    raise RuntimeError("后台作业执行权已失效，停止以避免重复操作")
+                try:
+                    async with sessions() as db:
+                        platform, task_id = parse_task_key(key)
+                        model = DownloadTask if platform == "douyin" else XDownloadTask if platform == "x" else PlatformDownloadTask
+                        conditions = [model.id == task_id]
+                        if model == PlatformDownloadTask:
+                            conditions.append(model.platform == platform)
+                        if model is DownloadTask:
+                            task = await lock_task_graph(db, task_id)
+                            task_status = task.status if task is not None else None
+                        else:
+                            task_status = await db.scalar(select(model.status).where(*conditions).with_for_update())
+                        if task_status != "failed":
+                            state["skipped"] += 1
+                            await db.rollback()
+                        else:
+                            state["in_flight"] = key
+                            await asyncio.to_thread(save_job, state)
+                            await asyncio.wait_for(operate_task(db, key, action), timeout=60)
+                            state["succeeded"] += 1
+                except (SoftTimeLimitExceeded, TimeoutError):
                     raise
-            state["processed"] += 1
-            state.pop("in_flight", None)
-            state["updated_at"] = now()
-            await asyncio.to_thread(save_job, state)
+                except Exception as exc:
+                    state["failed"] += 1
+                    if len(state["failures"]) < 200:
+                        state["failures"].append({"task_key": key, "message": sanitize_text(str(exc), limit=500)})
+                    # A queue outage must not reset thousands of tasks to pending without delivery.
+                    if isinstance(exc, TaskOperationError) and exc.status_code == 503:
+                        state["processed"] += 1
+                        state.pop("in_flight", None)
+                        raise
+                state["processed"] += 1
+                state.pop("in_flight", None)
+                state["updated_at"] = now()
+                await asyncio.to_thread(save_job, state)
         state.update(status="partial" if state["failed"] or state["failures"] else "completed", updated_at=now())
     except BaseException as exc:
         state.update(status="interrupted", updated_at=now(), error=sanitize_text(f"{type(exc).__name__}: {exc}", limit=500))
