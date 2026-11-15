@@ -56,12 +56,24 @@ def _scan_storage_files(
     allow_orphans: bool,
     progress: ProgressCallback | None,
     sample_limit: int,
+    registered: Callable[[list[str]], set[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], int, int, int]:
     partials: list[dict[str, Any]] = []
     orphan_files: list[str] = []
     scanned_files = 0
     partial_count = 0
     orphan_count = 0
+    candidates: list[str] = []
+
+    def flush_candidates():
+        nonlocal orphan_count
+        referenced = registered(candidates) if registered else set()
+        for candidate in candidates:
+            if candidate not in referenced:
+                orphan_count += 1
+                if len(orphan_files) < sample_limit:
+                    orphan_files.append(candidate)
+        candidates.clear()
     if not root.is_dir():
         return partials, orphan_files, scanned_files, partial_count, orphan_count
     for path in _storage_files(root):
@@ -74,7 +86,7 @@ def _scan_storage_files(
             if progress and scanned_files % 1000 == 0:
                 progress({"phase": "files", "scanned_files": scanned_files})
             resolved = str(path.resolve(strict=False))
-            if path.suffix.lower() in {".part", ".tmp", ".downloading"}:
+            if path.suffix.lower() in {".part", ".tmp", ".downloading"} or path.name.endswith(".downloading.json"):
                 stat = path.stat()
                 age_seconds = max(0, datetime.now().timestamp() - stat.st_mtime)
                 if age_seconds < 6 * 3600:
@@ -95,11 +107,12 @@ def _scan_storage_files(
                 }
                 and resolved not in known
             ):
-                orphan_count += 1
-                if len(orphan_files) < sample_limit:
-                    orphan_files.append(resolved)
+                candidates.append(resolved)
+                if len(candidates) >= 200:
+                    flush_candidates()
         except OSError:
             continue
+    flush_candidates()
     return partials, orphan_files, scanned_files, partial_count, orphan_count
 
 
@@ -142,7 +155,7 @@ def run_storage_audit(
         remaining = max_records - scanned_records
         if remaining <= 0:
             return
-        rows = db.execute(statement.limit(remaining)).all()
+        rows = db.execute(statement.limit(remaining).execution_options(yield_per=500))
         for row in rows:
             record_id, path_value = row[:2]
             task_status = row[2] if len(row) > 2 else "completed"
@@ -217,26 +230,23 @@ def run_storage_audit(
     ).join(PlatformDownloadTask, PlatformMediaAsset.task_id == PlatformDownloadTask.id))
 
     records_truncated = total_records > scanned_records
-    if not records_truncated:
-        # Non-completed tasks are not repair candidates, but their existing
-        # files still belong to them and must not be classified as orphans.
-        other_paths = db.execute(select(DownloadTask.file_path).where(
-            DownloadTask.status != "completed", DownloadTask.file_path.is_not(None),
-        )).scalars()
-        for path_value in other_paths:
-            try:
-                candidate = Path(str(path_value)).expanduser()
-                if not candidate.is_absolute():
-                    candidate = root / candidate
-                known.add(str(candidate.resolve(strict=False)))
-            except (OSError, RuntimeError, ValueError):
-                known.add(str(path_value))
-    # 已登记的无索引媒体由媒体库管理，不再算作未登记文件。
-    for path_value in db.execute(select(OrphanMediaFile.file_path)).scalars():
-        try:
-            known.add(str(Path(str(path_value)).expanduser().resolve(strict=False)))
-        except (OSError, RuntimeError, ValueError):
-            known.add(str(path_value))
+    def registered_candidates(paths: list[str]) -> set[str]:
+        # 只查本批磁盘候选，不把未完成任务或无索引媒体整表搬入内存。
+        variants: dict[str, str] = {}
+        for value in paths:
+            relative = str(Path(value).relative_to(root))
+            for variant in (value, relative, relative.replace("\\", "/")):
+                variants[variant] = value
+        registered = set()
+        for model, column in (
+            (DownloadTask, DownloadTask.file_path), (DownloadHistory, DownloadHistory.file_path),
+            (XMediaAsset, XMediaAsset.file_path), (PlatformMediaAsset, PlatformMediaAsset.file_path),
+            (OrphanMediaFile, OrphanMediaFile.file_path),
+        ):
+            for value in db.scalars(select(column).where(column.in_(variants))):
+                registered.add(variants[value])
+        return registered
+
     if progress:
         progress({
             "phase": "files",
@@ -245,7 +255,7 @@ def run_storage_audit(
             "scanned_files": 0,
         })
     partials, orphan_files, scanned_files, partial_count, orphan_count = _scan_storage_files(
-        root, known, max_files, not records_truncated, progress, sample_limit,
+        root, known, max_files, not records_truncated, progress, sample_limit, registered_candidates,
     )
     disk_target = root
     while not disk_target.exists() and disk_target != disk_target.parent:

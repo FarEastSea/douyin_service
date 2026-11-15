@@ -63,6 +63,7 @@ from app.services.unified_task_operations import (
 )
 
 router = APIRouter(prefix="/platform-downloads", tags=["多平台下载"])
+UNPAGED_MEDIA_LIMIT = 2000
 
 
 def _require_platform(platform: str):
@@ -75,10 +76,10 @@ def _require_platform(platform: str):
 async def _dispatch_download(task: PlatformDownloadTask, db: AsyncSession) -> None:
     """投递失败时落库为明确失败，避免留下无人认领的 pending 任务。"""
     try:
-        await asyncio.to_thread(download_platform_profile.delay, task.id)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="任务队列暂不可用，下载任务未投递") from exc
-    await db.refresh(task)
+        from app.services.unified_task_operations import _dispatch_or_fail
+        await _dispatch_or_fail(db, task, download_platform_profile, "任务队列暂不可用，下载任务未投递")
+    except TaskOperationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
 
 def _require_xhs(platform: str) -> None:
@@ -170,7 +171,6 @@ async def list_tasks(
         conditions.append(PlatformDownloadTask.source_key.contains(search_text, autoescape=True))
     query = (
         select(PlatformDownloadTask, func.count(PlatformDownloadTask.id).over().label("_total"))
-        .options(selectinload(PlatformDownloadTask.media_assets))
         .where(*conditions)
         .order_by(PlatformDownloadTask.created_at.desc(), PlatformDownloadTask.id.desc())
         .offset((page - 1) * page_size)
@@ -184,11 +184,17 @@ async def list_tasks(
         total = int((await db.execute(
             select(func.count(PlatformDownloadTask.id)).where(*conditions)
         )).scalar() or 0)
-    states = await asyncio.to_thread(
-        redis_client.get_platform_task_states, spec.id, [task.id for task in tasks]
-    )
+    task_ids = [task.id for task in tasks]
+    preview_counts = dict((await db.execute(
+        select(PlatformMediaAsset.task_id, func.count(PlatformMediaAsset.id))
+        .where(PlatformMediaAsset.task_id.in_(task_ids)).group_by(PlatformMediaAsset.task_id)
+    )).all()) if task_ids else {}
+    states = await asyncio.to_thread(redis_client.get_platform_task_states, spec.id, task_ids)
     return PaginatedPlatformTasksResponse(
-        items=[serialize_platform_task(task, states.get(task.id)) for task in tasks],
+        items=[
+            serialize_platform_task(task, states.get(task.id), preview_count=int(preview_counts.get(task.id, 0)))
+            for task in tasks
+        ],
         total=total,
         page=page,
         page_size=page_size,
@@ -218,6 +224,9 @@ async def list_media(
     )
     if page is not None:
         statement = statement.offset((page - 1) * page_size).limit(page_size)
+    else:
+        # 不分页的旧调用方式也设上限，主页任务可能有数万条媒体。
+        statement = statement.limit(UNPAGED_MEDIA_LIMIT)
     assets = (await db.execute(statement)).scalars().all()
     items = [PlatformMediaAssetResponse(
         id=item.id,

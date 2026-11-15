@@ -220,9 +220,17 @@ def retire_attempt_artifacts(db, task) -> None:
         return
     source = Path(task.temp_file_path)
     root = Path(settings.DOWNLOAD_DIR).expanduser().resolve()
-    source.resolve().relative_to(root)
-    if source.is_symlink() or not source.name.endswith(".downloading"):
-        raise ValueError("旧执行分片路径不合法")
+    try:
+        source.resolve().relative_to(root)
+        if source.is_symlink() or not source.name.endswith(".downloading"):
+            raise ValueError("旧执行分片路径不合法")
+    except (OSError, RuntimeError, ValueError):
+        # 历史脏路径不能阻断撤销执行权，也不能授权删除根目录外的文件。
+        # 仅解除任务对该路径的引用；原文件原位保留供人工核对。
+        import logging
+        logging.getLogger(__name__).warning("任务 %s 的旧分片路径不可信，已解除引用并保留文件", task.id)
+        task.temp_file_path = None
+        return
     operation = uuid4().hex
     author_id = db.scalar(select(Work.author_id).where(Work.id == task.work_id))
     entry = {"operation": "retire", "marker": f"media-retire:{operation}",

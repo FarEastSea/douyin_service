@@ -364,6 +364,10 @@ async def add_author(
         raise HTTPException(status_code=500, detail=f"添加作者失败: {str(e)}")
 
 
+AUTHOR_SEARCH_LIMIT = 50
+_report_details_memo: dict = {}
+
+
 @router.get("/search")
 async def search_authors(
     q: str = Query(..., min_length=1, description="搜索关键词（昵称或抖音ID）"),
@@ -389,10 +393,12 @@ async def search_authors(
             ) - 1
         ).label("position"),
     ).subquery()
+    # 转义 % 和 _，避免把通配符当作“匹配全部”；结果数量设上限。
+    pattern = _escaped_ilike_pattern(q.strip())
     search_query = select(ranked_authors).where(
-        (ranked_authors.c.nickname.ilike(f"%{q}%"))
-        | (ranked_authors.c.sec_uid.ilike(f"%{q}%"))
-    ).order_by(ranked_authors.c.position)
+        (ranked_authors.c.nickname.ilike(pattern, escape="\\"))
+        | (ranked_authors.c.sec_uid.ilike(pattern, escape="\\"))
+    ).order_by(ranked_authors.c.position).limit(AUTHOR_SEARCH_LIMIT)
 
     matched_authors = (await db.execute(search_query)).mappings().all()
 
@@ -453,19 +459,30 @@ async def list_authors(
     else:
         total = 0
 
-    latest_report_result = await db.execute(
-        select(SubscriptionCheckReport)
+    # 已结束的报告不再变化；明细每位作者一条，订阅多时不应每次翻页都重新读取和解析。
+    latest_report_row = (await db.execute(
+        select(SubscriptionCheckReport.id, SubscriptionCheckReport.started_at)
         .where(SubscriptionCheckReport.status != "running")
         .order_by(SubscriptionCheckReport.started_at.desc(), SubscriptionCheckReport.id.desc())
         .limit(1)
-    )
-    latest_report = latest_report_result.scalar_one_or_none()
+    )).first()
+    latest_report_id = latest_report_row.id if latest_report_row else None
+    latest_report_started_at = latest_report_row.started_at if latest_report_row else None
     latest_details = []
-    if latest_report:
-        try:
-            latest_details = json.loads(latest_report.details_json or "[]")
-        except (TypeError, ValueError):
-            latest_details = []
+    if latest_report_id is not None:
+        if _report_details_memo.get("id") == latest_report_id:
+            latest_details = _report_details_memo["details"]
+        else:
+            raw_details = await db.scalar(
+                select(SubscriptionCheckReport.details_json).where(SubscriptionCheckReport.id == latest_report_id)
+            )
+            try:
+                latest_details = json.loads(raw_details or "[]")
+            except (TypeError, ValueError):
+                latest_details = []
+            if not isinstance(latest_details, list):
+                latest_details = []
+            _report_details_memo.update(id=latest_report_id, details=latest_details)
     detail_map = {item.get("author_id"): item for item in latest_details}
     breakpoint_id = next((item.get("author_id") for item in latest_details if item.get("status") == "deferred"), None)
     history_counts = {}
@@ -492,8 +509,8 @@ async def list_authors(
         next_at = None
         if author.is_subscribed and author.last_auto_update_at:
             next_at = author.last_auto_update_at + timedelta(seconds=max(author.check_interval or 0, global_interval, current_settings.MIN_CHECK_INTERVAL))
-        if author.is_subscribed and status == "deferred" and latest_report and latest_report.started_at:
-            cycle_at = latest_report.started_at + timedelta(seconds=global_interval)
+        if author.is_subscribed and status == "deferred" and latest_report_started_at:
+            cycle_at = latest_report_started_at + timedelta(seconds=global_interval)
             next_at = max(next_at, cycle_at) if next_at else cycle_at
         author.expected_next_auto_update_at = next_at
         author.is_last_breakpoint = author.id == breakpoint_id
@@ -585,8 +602,6 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
     request_context = await get_request_context(db)
 
     try:
-        import asyncio
-
         runtime_config = await get_runtime_config(db)
 
         def _sync():

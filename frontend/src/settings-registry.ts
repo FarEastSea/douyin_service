@@ -54,6 +54,12 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
         envKeys: ["DOWNLOAD_ROOT"],
       },
       {
+        title: "磁盘空间预警",
+        description:
+          "下载根目录所在磁盘的剩余空间低于预警线时，总览与洞察页会提示，并按通知设置提醒。只提醒，不会暂停下载。",
+        envKeys: ["DISK_WARN_FREE_GB"],
+      },
+      {
         title: "平台子目录",
         description: "仅填写相对目录；保存时系统会同步迁移数据库中的已有路径。",
         envKeys: [
@@ -174,7 +180,7 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
   notifications: {
     id: "notifications",
     title: "通知中心",
-    description: "选择需要通知的事件，并配置 Webhook、Bark、邮件和 Gotify。",
+    description: "选择需要通知的事件，并配置 Webhook、Bark、邮件、Gotify、Telegram 与企业微信、钉钉、飞书机器人。",
     fieldSections: [
       {
         title: "通知规则",
@@ -185,8 +191,15 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
           "NOTIFY_ON_DOWNLOAD_FAILURE",
           "NOTIFY_ON_RISK",
           "NOTIFY_ON_SUBSCRIPTION_FAILURE",
+          "NOTIFY_ON_LOW_DISK",
           "NOTIFY_DEDUPE_SECONDS",
         ],
+      },
+      {
+        title: "每日摘要",
+        description:
+          "每天在设定的整点之后汇总前一天的入库、订阅检查、当前队列与磁盘空间，发送到已启用的渠道。",
+        envKeys: ["NOTIFY_DAILY_DIGEST", "NOTIFY_DAILY_DIGEST_HOUR"],
       },
       {
         title: "Webhook",
@@ -216,6 +229,32 @@ export const settingsPages: Record<string, SettingsPageDefinition> = {
         title: "Gotify",
         description: "向自托管 Gotify 服务推送通知。",
         envKeys: ["GOTIFY_ENABLED", "GOTIFY_SERVER_URL", "GOTIFY_TOKEN"],
+      },
+      {
+        title: "Telegram",
+        description: "通过 Telegram Bot 向用户、群组或频道发送通知。",
+        envKeys: [
+          "TELEGRAM_ENABLED",
+          "TELEGRAM_BOT_TOKEN",
+          "TELEGRAM_CHAT_ID",
+          "TELEGRAM_API_BASE",
+        ],
+      },
+      {
+        title: "企业微信",
+        description: "向企业微信群机器人发送文本通知。",
+        envKeys: ["WECOM_ENABLED", "WECOM_WEBHOOK_URL"],
+      },
+      {
+        title: "钉钉",
+        description:
+          "向钉钉自定义机器人发送文本通知；机器人使用关键词校验时，请确保关键词出现在通知标题中。",
+        envKeys: ["DINGTALK_ENABLED", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET"],
+      },
+      {
+        title: "飞书",
+        description: "向飞书自定义机器人发送文本通知。",
+        envKeys: ["FEISHU_ENABLED", "FEISHU_WEBHOOK_URL", "FEISHU_SECRET"],
       },
     ],
   },

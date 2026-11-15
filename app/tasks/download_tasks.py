@@ -475,8 +475,14 @@ def _queue_scanned_works(
 
     celery_task_ids: list[str] = []
     for task_id in task_ids:
-        queued = download_single_file.delay(task_id)
-        celery_task_ids.append(queued.id)
+        try:
+            queued = download_single_file.delay(task_id)
+            celery_task_ids.append(queued.id)
+        except StaleDownloadAttempt:
+            continue
+        except Exception:
+            # 作品已持久化；投递失败由 fencing producer 及恢复任务兜底，报告不能丢掉本轮发现。
+            logger.exception("订阅新文件任务 %s 暂未投递，保留作品发现结果", task_id)
     db.commit()
     return {
         "persisted_works": persisted_works,
@@ -1568,7 +1574,17 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                     completed_ids.add(int(author_id))
             return settled_ids, completed_ids
 
+        last_progress_at = time.monotonic()
+        last_progress_count = 0
+
         def _update_running_progress() -> None:
+            nonlocal last_progress_at, last_progress_count
+            # 跳过未到期作者时不再每人重写整份报告/断点；最多每五秒或100位持久化。
+            # 正常收尾仍完整写入，崩溃后仅重查最近一个短批次。
+            current = time.monotonic()
+            if current - last_progress_at < 5 and len(results) - last_progress_count < 100:
+                return
+            last_progress_at, last_progress_count = current, len(results)
             settled_ids, completed_ids = _result_sets()
             status_counts: dict[str, int] = {}
             for item in results:
@@ -2024,7 +2040,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
                 if not isinstance(e, DouyinRequestError) or e.code != "signature_missing":
                     consecutive_signature_rejected = 0
             finally:
-                # 每位作者完成后即持久化报告和跨轮累计进度，页面无需等整轮结束。
+                # 按时间和处理量合并报告写入，保留跨轮恢复断点。
                 _update_running_progress()
 
             # 请求间隔
@@ -2187,7 +2203,7 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
             "continuation_task_id": continuation_task_id,
             "results": results,
         }
-    
+
     except Exception as e:
         db.rollback()
         error_summary = f"{type(e).__name__}: {str(e)[:500]}"
@@ -2218,6 +2234,11 @@ def check_subscriptions(self, force: bool = False, risk_retry_attempt: int = 0,
         db.close()
 
 
+# 每轮恢复检测最多处理的任务数。积压很大时，排队超过超时阈值是常态；不设上限会在一轮里
+# 逐个加锁、提交并重新投递全部等待任务。剩余的任务由后续轮次（每 5 分钟）继续处理。
+RECOVERY_BATCH_LIMIT = 500
+
+
 @celery_app.task(name="app.tasks.download_tasks.detect_stuck_tasks")
 def detect_stuck_tasks():
     """
@@ -2245,55 +2266,60 @@ def detect_stuck_tasks():
         redispatch_ids = []
 
         for task in downloading_tasks:
-            progress = redis_client.get_progress(task.id)
-            last_updated = progress.get("last_updated", 0) if progress else 0
-
-            if last_updated == 0 and task.started_at:
-                last_updated = task.started_at.timestamp()
-
-            if now - last_updated > timeout:
-                task = lock_task_graph_sync(db, task.id)
-                if task is None:
-                    continue
-                if task.status != "downloading":
-                    db.rollback()
-                    continue
+            recovery_id = task.id
+            try:
                 progress = redis_client.get_progress(task.id)
-                if progress and now - progress.get("last_updated", 0) <= timeout:
-                    db.rollback()
-                    continue
-                elapsed_min = int((now - last_updated) / 60)
-                task.retry_count = (task.retry_count or 0) + 1
-                redis_client.invalidate_download_attempt(task.id, task.celery_task_id)
-                retire_attempt_artifacts(db, task)
-                task.celery_task_id = None
-                task.download_speed = 0
-                redis_client.resume_task(task.id)  # 清除暂停标记
-                stuck_count += 1
-                
-                # 如果未超过最大重试次数，自动重试
-                if task.retry_count <= retry_limit:
-                    task.status = "pending"
-                    task.error_message = None
-                    task.started_at = None
-                    task.completed_at = None
-                    logger.warning(
-                        f"任务 {task.id} 卡住 {elapsed_min} 分钟，自动重试 ({task.retry_count}/{retry_limit})"
-                    )
-                    db.commit()
-                    redispatch_ids.append(task.id)
-                else:
-                    task.status = "failed"
-                    task.completed_at = datetime.now()
-                    task.error_message = f"下载超时：任务卡住超过 {elapsed_min} 分钟无进度变化，已达最大重试次数"
-                    logger.warning(
-                        f"任务 {task.id} 卡住 {elapsed_min} 分钟，已达最大重试次数，标记为失败"
-                    )
-                    work = db.get(Work, task.work_id)
-                    if work:
-                        refresh_work_download_state_sync(db, work)
-                        recalc_author_counts_sync(db, db.get(Author, work.author_id))
-                    db.commit()
+                last_updated = progress.get("last_updated", 0) if progress else 0
+
+                if last_updated == 0 and task.started_at:
+                    last_updated = task.started_at.timestamp()
+
+                if now - last_updated > timeout:
+                    task = lock_task_graph_sync(db, task.id)
+                    if task is None:
+                        continue
+                    if task.status != "downloading":
+                        db.rollback()
+                        continue
+                    progress = redis_client.get_progress(task.id)
+                    if progress and now - progress.get("last_updated", 0) <= timeout:
+                        db.rollback()
+                        continue
+                    elapsed_min = int((now - last_updated) / 60)
+                    task.retry_count = (task.retry_count or 0) + 1
+                    redis_client.invalidate_download_attempt(task.id, task.celery_task_id)
+                    retire_attempt_artifacts(db, task)
+                    task.celery_task_id = None
+                    task.download_speed = 0
+                    redis_client.resume_task(task.id)  # 清除暂停标记
+                    stuck_count += 1
+
+                    # 如果未超过最大重试次数，自动重试
+                    if task.retry_count <= retry_limit:
+                        task.status = "pending"
+                        task.error_message = None
+                        task.started_at = None
+                        task.completed_at = None
+                        logger.warning(
+                            f"任务 {task.id} 卡住 {elapsed_min} 分钟，自动重试 ({task.retry_count}/{retry_limit})"
+                        )
+                        db.commit()
+                        redispatch_ids.append(task.id)
+                    else:
+                        task.status = "failed"
+                        task.completed_at = datetime.now()
+                        task.error_message = f"下载超时：任务卡住超过 {elapsed_min} 分钟无进度变化，已达最大重试次数"
+                        logger.warning(
+                            f"任务 {task.id} 卡住 {elapsed_min} 分钟，已达最大重试次数，标记为失败"
+                        )
+                        work = db.get(Work, task.work_id)
+                        if work:
+                            refresh_work_download_state_sync(db, work)
+                            recalc_author_counts_sync(db, db.get(Author, work.author_id))
+                        db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("任务 %s 恢复失败，继续处理其余任务", recovery_id)
 
         # pending 任务不产生进度，原逻辑永远检测不到。超过同一超时阈值
         # 仍未被认领就重新投递；原子认领可保证旧消息随后到达时不会重复下载。
@@ -2302,19 +2328,24 @@ def detect_stuck_tasks():
             select(DownloadTask).where(
                 DownloadTask.status == "pending",
                 DownloadTask.updated_at < pending_cutoff,
-            )
+            ).order_by(DownloadTask.updated_at, DownloadTask.id).limit(RECOVERY_BATCH_LIMIT)
         ).scalars().all()
         for task in orphaned_pending:
-            task = lock_task_graph_sync(db, task.id)
-            if task is None:
-                continue
-            if task.status != "pending" or task.updated_at >= pending_cutoff:
+            recovery_id = task.id
+            try:
+                task = lock_task_graph_sync(db, task.id)
+                if task is None:
+                    continue
+                if task.status != "pending" or task.updated_at >= pending_cutoff:
+                    db.rollback()
+                    continue
+                task.updated_at = now_dt
+                task.error_message = None
+                redispatch_ids.append(task.id)
+                db.commit()
+            except Exception:
                 db.rollback()
-                continue
-            task.updated_at = now_dt
-            task.error_message = None
-            redispatch_ids.append(task.id)
-            db.commit()
+                logger.exception("任务 %s 恢复失败，继续处理其余任务", recovery_id)
 
         # 连接池跨 fork 导致的失败属于基础设施瞬时故障，应在连接隔离后
         # 自动恢复；业务错误、风控和无效 URL 不在此处盲目重试。
@@ -2328,20 +2359,25 @@ def detect_stuck_tasks():
                      & (DownloadTask.retry_count <= retry_limit))
                     | DownloadTask.error_message.startswith("CoordinationUnavailable:")
                 ),
-            )
+            ).order_by(DownloadTask.id).limit(RECOVERY_BATCH_LIMIT)
         ).scalars().all()
         for task in recoverable_failed:
-            task = lock_task_graph_sync(db, task.id)
-            if task is None:
-                continue
-            if task.status != "failed":
+            recovery_id = task.id
+            try:
+                task = lock_task_graph_sync(db, task.id)
+                if task is None:
+                    continue
+                if task.status != "failed":
+                    db.rollback()
+                    continue
+                prepare_download_retry(task)
+                redis_client.resume_task(task.id)
+                task.updated_at = now_dt
+                redispatch_ids.append(task.id)
+                db.commit()
+            except Exception:
                 db.rollback()
-                continue
-            prepare_download_retry(task)
-            redis_client.resume_task(task.id)
-            task.updated_at = now_dt
-            redispatch_ids.append(task.id)
-            db.commit()
+                logger.exception("任务 %s 恢复失败，继续处理其余任务", recovery_id)
 
         db.commit()
 
@@ -2384,7 +2420,7 @@ def detect_stuck_tasks():
 def resume_task(task_id: int):
     """
     恢复暂停的任务
-    
+
     Args:
         task_id: 任务ID
     """

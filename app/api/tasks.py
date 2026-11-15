@@ -16,6 +16,7 @@ from typing import List, Optional
 import asyncio
 import json
 import mimetypes
+import time
 from pathlib import Path
 
 from app.models.database import get_async_db
@@ -57,7 +58,7 @@ from app.services.unified_task_operations import (
     operate_task,
 )
 from app.services.download_state_lock import lock_works
-from app.services.download_lifecycle import prepare_download_retry
+from app.services.download_lifecycle import StaleDownloadAttempt, prepare_download_retry
 from app.services.douyin_account import get_request_context
 from app.services.douyin_errors import (
     DouyinCooldownError,
@@ -138,12 +139,31 @@ def _update_task_runtime(
             redis_client.delete_progress(task_id)
 
 
+_risk_retry_memo = {"at": 0.0, "value": 0}
+
+
+def _risk_retry_after() -> int:
+    """列表里每个风控类失败任务都要显示冷却剩余时间；一秒内只读一次 Redis，而不是每行一次。"""
+    now = time.monotonic()
+    if now - _risk_retry_memo["at"] > 1.0:
+        try:
+            _risk_retry_memo["value"] = int(redis_client.get_douyin_risk_state().get("retry_after") or 0)
+        except Exception:
+            _risk_retry_memo["value"] = 0
+        _risk_retry_memo["at"] = now
+    return int(_risk_retry_memo["value"])
+
+
 def _dispatch_download_tasks(task_ids: List[int], *, force_refresh: bool = False) -> None:
     """批量向 Celery 投递任务，避免阻塞 FastAPI 事件循环。"""
     for task_id in task_ids:
-        download_single_file.apply_async(
-            args=[task_id], kwargs={"force_refresh": force_refresh},
-        )
+        try:
+            download_single_file.apply_async(
+                args=[task_id], kwargs={"force_refresh": force_refresh},
+            )
+        except StaleDownloadAttempt:
+            # 这个任务已被 Worker 认领或被取消；跳过它，不能让后面的任务都失去投递。
+            continue
 
 
 def _build_task_preview_data(
@@ -236,10 +256,7 @@ def _serialize_download_task(
     item.error_category = error_meta["error_category"]
     item.error_action = error_meta["error_action"]
     if item.error_category == "risk_control":
-        try:
-            item.retry_after = int(redis_client.get_douyin_risk_state().get("retry_after") or 0)
-        except Exception:
-            item.retry_after = 0
+        item.retry_after = _risk_retry_after()
     return item
 
 
@@ -786,12 +803,20 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
             message=f"抖音接口正在冷却，已跳过失败任务；约 {state.get('retry_after', 0)} 秒后再试",
             data={"count": 0, "skipped": "risk_cooldown", "retry_after": state.get("retry_after", 0)},
         )
-    # 查询所有失败的任务
-    await lock_works(db, list((await db.scalars(select(DownloadTask.work_id).where(
-        DownloadTask.status.in_(["failed", "cancelled"]),
-    ))).all()))
+    # 每次请求只处理一批：失败任务可能有数万个，一次全部加锁会形成长事务并长时间占用连接。
+    # 只重试失败任务，不包含用户主动取消的任务，与统一任务页的“全部重试”一致。
+    total_failed = int(await db.scalar(
+        select(func.count(DownloadTask.id)).where(DownloadTask.status == "failed")
+    ) or 0)
+    batch_ids = list((await db.scalars(
+        select(DownloadTask.id).where(DownloadTask.status == "failed")
+        .order_by(DownloadTask.id).limit(RETRY_ALL_BATCH)
+    )).all())
+    await lock_works(db, list((await db.scalars(
+        select(DownloadTask.work_id).where(DownloadTask.id.in_(batch_ids))
+    )).all()))
     result = await db.execute(select(DownloadTask).where(
-        DownloadTask.status.in_(["failed", "cancelled"]),
+        DownloadTask.id.in_(batch_ids), DownloadTask.status == "failed",
     ).order_by(DownloadTask.id).with_for_update().execution_options(populate_existing=True))
     failed_tasks = result.scalars().all()
 
@@ -817,21 +842,34 @@ async def retry_all_failed_tasks(db: AsyncSession = Depends(get_async_db)):
     # 触发所有任务的下载
     await asyncio.to_thread(_dispatch_download_tasks, [task.id for task in failed_tasks])
 
+    remaining = max(0, total_failed - count)
     return MessageResponse(
         success=True,
-        message=f"已重新提交 {count} 个失败任务",
-        data={"count": count}
+        message=f"已重新提交 {count} 个失败任务" + (f"，还有 {remaining} 个，请再次点击继续" if remaining else ""),
+        data={"count": count, "remaining": remaining}
     )
+
+
+RETRY_ALL_BATCH = 500
+
+
+# 失败任务可能有数万条；一次只返回最近的一部分，避免把全部错误文本读进内存。
+FAILED_ERRORS_LIMIT = 500
 
 
 @router.get("/all-failed-errors", response_model=MessageResponse)
 async def get_all_failed_errors(db: AsyncSession = Depends(get_async_db)):
     """获取所有失败任务的错误信息"""
+    conditions = (
+        DownloadTask.status.in_(["failed", "cancelled"]),
+        DownloadTask.error_message.isnot(None),
+    )
+    total = int(await db.scalar(select(func.count(DownloadTask.id)).where(*conditions)) or 0)
     result = await db.execute(
         select(DownloadTask.id, DownloadTask.file_name, DownloadTask.error_message)
-        .where(DownloadTask.status.in_(["failed", "cancelled"]))
-        .where(DownloadTask.error_message.isnot(None))
+        .where(*conditions)
         .order_by(DownloadTask.id.desc())
+        .limit(FAILED_ERRORS_LIMIT)
     )
     failed_tasks = result.all()
 
@@ -839,11 +877,12 @@ async def get_all_failed_errors(db: AsyncSession = Depends(get_async_db)):
         f"[任务{t.id}] {t.file_name or '未知'}: {t.error_message}"
         for t in failed_tasks
     ]
+    truncated = total > len(errors)
 
     return MessageResponse(
         success=True,
-        message=f"共 {len(errors)} 个失败任务",
-        data={"count": len(errors), "errors": errors}
+        message=f"共 {total} 个失败任务" + (f"，仅列出最近 {len(errors)} 个" if truncated else ""),
+        data={"count": total, "errors": errors, "truncated": truncated}
     )
 
 
@@ -857,15 +896,14 @@ async def batch_delete_tasks(
 ):
     """批量删除指定状态的所有任务"""
     # 查询待删除的任务
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.status == status)
-    )
-    tasks = result.scalars().all()
+    # 只取 ID：这里不需要完整的任务对象。
+    ids = list((await db.execute(
+        select(DownloadTask.id).where(DownloadTask.status == status).order_by(DownloadTask.id)
+    )).scalars().all())
 
-    if not tasks:
+    if not ids:
         return MessageResponse(success=True, message="没有可删除的任务", data={"count": 0})
 
-    ids = [task.id for task in tasks]
     count = 0
     # 每批独立提交：删除时还要隔离不完整文件，单个长事务会拉长锁持有时间并放大回滚范围。
     for start in range(0, len(ids), BATCH_DELETE_SIZE):
@@ -891,22 +929,22 @@ async def batch_delete_tasks(
 @router.post("/pause-all", response_model=MessageResponse)
 async def pause_all_tasks(db: AsyncSession = Depends(get_async_db)):
     """暂停所有正在下载和等待中的任务"""
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.status.in_(["downloading", "pending"]))
-    )
-    active_tasks = result.scalars().all()
+    task_ids = list((await db.execute(
+        select(DownloadTask.id).where(DownloadTask.status.in_(["downloading", "pending"]))
+    )).scalars().all())
 
-    if not active_tasks:
+    if not task_ids:
         return MessageResponse(success=True, message="没有需要暂停的任务", data={"count": 0})
 
-    count = 0
-    await asyncio.to_thread(
-        _update_task_runtime, [task.id for task in active_tasks], pause=True
-    )
-    for task in active_tasks:
-        if task.status == "pending":
-            task.status = "paused"
-        count += 1
+    count = len(task_ids)
+    await asyncio.to_thread(_update_task_runtime, task_ids, pause=True)
+    # 条件更新：读取之后已被 Worker 认领为下载中的任务不会被写回“已暂停”，它们由暂停标记中止。
+    for start in range(0, count, BATCH_DELETE_SIZE):
+        await db.execute(
+            update(DownloadTask)
+            .where(DownloadTask.id.in_(task_ids[start:start + BATCH_DELETE_SIZE]), DownloadTask.status == "pending")
+            .values(status="paused")
+        )
 
     await db.commit()
 
@@ -967,22 +1005,21 @@ async def redispatch_pending_tasks(db: AsyncSession = Depends(get_async_db)):
     但 Worker 崩溃导致队列中的消息丢失或未消费。
     此端点把所有 pending 任务重新投递到 Celery 队列。
     """
-    result = await db.execute(
-        select(DownloadTask).where(DownloadTask.status == "pending")
-    )
-    pending_tasks = result.scalars().all()
+    pending_ids = list((await db.execute(
+        select(DownloadTask.id).where(DownloadTask.status == "pending").order_by(DownloadTask.id)
+    )).scalars().all())
 
-    if not pending_tasks:
+    if not pending_ids:
         return MessageResponse(success=True, message="没有待处理任务", data={"count": 0})
 
-    count = len(pending_tasks)
-    await asyncio.to_thread(_dispatch_download_tasks, [task.id for task in pending_tasks])
+    count = len(pending_ids)
+    await asyncio.to_thread(_dispatch_download_tasks, pending_ids)
 
     await asyncio.to_thread(
         redis_client.append_activity_log,
         "info", "api",
         f"🔄 重新分发 {count} 个 pending 任务到队列",
-        f"task_ids={[t.id for t in pending_tasks[:20]]}{'...' if count > 20 else ''}",
+        f"task_ids={pending_ids[:20]}{'...' if count > 20 else ''}",
     )
 
     return MessageResponse(

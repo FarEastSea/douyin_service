@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import importlib.util
+import json
 import logging
 import os
 from pathlib import Path
@@ -19,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.exclusions import router as exclusions_router
+from app.api.insights import router as insights_router
 from app.api.media_library import router as media_library_router
+from app.api.subscription_backup import router as subscription_backup_router
 from app.core import redis_client
 from app.core.config import settings
 from app.core.revision import runtime_revision
@@ -48,7 +51,7 @@ from app.services.storage_maintenance import (
 )
 from app.tasks.operations_tasks import run_storage_audit_task, run_storage_repair_all_task
 from app.tasks.operations_tasks import retry_all_failed_task, delete_all_failed_task
-from app.services.bulk_task_retry import create_job, failed_task_keys, get_job, release_lock, save_job
+from app.services.bulk_task_retry import create_job, failed_task_count, get_job, release_lock, save_job
 from app.services.unified_task_operations import TaskOperationError, deletion_summary, operate_task
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.models.schemas import MessageResponse, UnifiedTaskActionRequest
@@ -58,6 +61,8 @@ from app.services.media_library import douyin_media_type
 router = APIRouter(prefix="/operations", tags=["统一运维"])
 router.include_router(media_library_router)
 router.include_router(exclusions_router)
+router.include_router(insights_router)
+router.include_router(subscription_backup_router)
 logger = logging.getLogger(__name__)
 
 
@@ -381,6 +386,38 @@ VALID_TASK_STATUSES = {
 }
 
 
+# 状态汇总要对三张任务表做全表分组统计；总览每 30 秒会连发三个只差状态筛选的请求。
+# 没有搜索词时把汇总短时间复用，任务操作后主动失效。
+STATUS_SUMMARY_KEY = "tasks:status-summary:"
+STATUS_SUMMARY_SECONDS = 10
+
+
+def _read_status_summary(scope: str) -> dict[str, int] | None:
+    try:
+        raw = redis_client.redis_client.get(STATUS_SUMMARY_KEY + (scope or "all"))
+        value = json.loads(raw) if raw else None
+    except Exception:
+        return None
+    return {str(key): int(count) for key, count in value.items()} if isinstance(value, dict) else None
+
+
+def _write_status_summary(scope: str, summary: dict[str, int]) -> None:
+    try:
+        redis_client.redis_client.set(
+            STATUS_SUMMARY_KEY + (scope or "all"), json.dumps(summary), ex=STATUS_SUMMARY_SECONDS,
+        )
+    except Exception:
+        logger.warning("任务状态汇总缓存写入失败，下次请求直接统计")
+
+
+def invalidate_status_summary() -> None:
+    try:
+        keys = [STATUS_SUMMARY_KEY + "all", *(STATUS_SUMMARY_KEY + item.id for item in platform_registry.list())]
+        redis_client.redis_client.delete(*keys)
+    except Exception:
+        logger.warning("任务状态汇总缓存失效失败，最多 %s 秒后自动过期", STATUS_SUMMARY_SECONDS)
+
+
 def _merge_status_rows(target: dict[str, int], rows) -> None:
     for row in rows:
         key = str(row.status or "unknown")
@@ -640,7 +677,10 @@ async def unified_tasks(
         raise HTTPException(status_code=404, detail="平台不存在")
 
     key_statements = []
-    status_summary: dict[str, int] = {}
+    cacheable = not search and not located_id
+    cached_summary = await asyncio.to_thread(_read_status_summary, wanted) if cacheable else None
+    status_summary: dict[str, int] = dict(cached_summary or {})
+    count_statuses = cached_summary is None
 
     if wanted in {"", "douyin"}:
         base_conditions = []
@@ -653,21 +693,25 @@ async def unified_tasks(
                 Author.nickname.contains(search, autoescape=True),
                 DownloadTask.file_name.contains(search, autoescape=True),
             ))
-        summary_rows = (await db.execute(
-            select(DownloadTask.status, func.count(DownloadTask.id).label("task_count"))
-            .join(DownloadTask.work).join(Work.author)
-            .where(*base_conditions).group_by(DownloadTask.status)
-        )).all()
-        _merge_status_rows(status_summary, summary_rows)
+        # 只有搜索才需要作品和作者；不搜索时不联表，状态索引可以直接使用。
+        if count_statuses:
+            summary_statement = select(DownloadTask.status, func.count(DownloadTask.id).label("task_count"))
+            if search:
+                summary_statement = summary_statement.join(DownloadTask.work).join(Work.author)
+            summary_rows = (await db.execute(
+                summary_statement.where(*base_conditions).group_by(DownloadTask.status)
+            )).all()
+            _merge_status_rows(status_summary, summary_rows)
         conditions = [*base_conditions]
         if status:
             conditions.append(DownloadTask.status == status)
-        key_statements.append(
-            select(
-                literal("douyin").label("platform"), DownloadTask.id.label("task_id"),
-                DownloadTask.created_at.label("created_at"),
-            ).join(DownloadTask.work).join(Work.author).where(*conditions)
+        key_statement = select(
+            literal("douyin").label("platform"), DownloadTask.id.label("task_id"),
+            DownloadTask.created_at.label("created_at"),
         )
+        if search:
+            key_statement = key_statement.join(DownloadTask.work).join(Work.author)
+        key_statements.append(key_statement.where(*conditions))
 
     if wanted in {"", "x"}:
         base_conditions = []
@@ -683,11 +727,12 @@ async def unified_tasks(
                     XMediaAsset.filename.contains(search, autoescape=True),
                 )),
             ))
-        summary_rows = (await db.execute(
-            select(XDownloadTask.status, func.count(XDownloadTask.id).label("task_count"))
-            .where(*base_conditions).group_by(XDownloadTask.status)
-        )).all()
-        _merge_status_rows(status_summary, summary_rows)
+        if count_statuses:
+            summary_rows = (await db.execute(
+                select(XDownloadTask.status, func.count(XDownloadTask.id).label("task_count"))
+                .where(*base_conditions).group_by(XDownloadTask.status)
+            )).all()
+            _merge_status_rows(status_summary, summary_rows)
         conditions = [*base_conditions]
         if status:
             conditions.append(XDownloadTask.status == status)
@@ -715,11 +760,12 @@ async def unified_tasks(
                     PlatformMediaAsset.filename.contains(search, autoescape=True),
                 )),
             ))
-        summary_rows = (await db.execute(
-            select(PlatformDownloadTask.status, func.count(PlatformDownloadTask.id).label("task_count"))
-            .where(*base_conditions).group_by(PlatformDownloadTask.status)
-        )).all()
-        _merge_status_rows(status_summary, summary_rows)
+        if count_statuses:
+            summary_rows = (await db.execute(
+                select(PlatformDownloadTask.status, func.count(PlatformDownloadTask.id).label("task_count"))
+                .where(*base_conditions).group_by(PlatformDownloadTask.status)
+            )).all()
+            _merge_status_rows(status_summary, summary_rows)
         conditions = [*base_conditions]
         if status:
             conditions.append(PlatformDownloadTask.status == status)
@@ -731,6 +777,8 @@ async def unified_tasks(
             ).where(*conditions)
         )
 
+    if cacheable and count_statuses:
+        await asyncio.to_thread(_write_status_summary, wanted, status_summary)
     totals = status_summary.get(status, 0) if status else sum(status_summary.values())
 
     combined_statement = key_statements[0] if len(key_statements) == 1 else union_all(*key_statements)
@@ -788,8 +836,7 @@ async def preview_retry_all_failed(
     platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"] = "",
     db: AsyncSession = Depends(get_async_db),
 ):
-    keys = await failed_task_keys(db, platform)
-    return {"platform": platform, "total": len(keys)}
+    return {"platform": platform, "total": await failed_task_count(db, platform)}
 
 
 @router.get("/tasks/retry-all-failed")
@@ -808,11 +855,10 @@ async def submit_retry_all_failed(
 async def _submit_failed_task_operation(db: AsyncSession, platform: str, action: str):
     label = "删除" if action == "delete" else "重试"
     worker = delete_all_failed_task if action == "delete" else retry_all_failed_task
-    keys = await failed_task_keys(db, platform)
-    if not keys:
+    if not await failed_task_count(db, platform):
         return MessageResponse(success=True, message="该平台范围没有失败任务", data={"status": "idle", "total": 0})
     try:
-        state, created = await asyncio.to_thread(create_job, keys, platform, action=action)
+        state, created = await create_job(db, platform, action=action)
         if created:
             try:
                 await asyncio.to_thread(worker.delay, state["job_id"])
@@ -833,7 +879,7 @@ async def preview_delete_all_failed(
     platform: Literal["", "douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"] = "",
     db: AsyncSession = Depends(get_async_db),
 ):
-    return {"platform": platform, "total": len(await failed_task_keys(db, platform))}
+    return {"platform": platform, "total": await failed_task_count(db, platform)}
 
 
 @router.get("/tasks/delete-all-failed")
@@ -869,6 +915,8 @@ async def unified_task_actions(
             failed.append({"task_key": task_key, "message": str(exc), "status_code": exc.status_code})
     action_label = {"retry": "重试", "cancel": "取消", "pause": "暂停",
                     "resume": "恢复", "refresh_retry": "刷新重试", "delete": "删除"}[request.action]
+    if succeeded:
+        await asyncio.to_thread(invalidate_status_summary)
     message = f"已{action_label} {len(succeeded)} 个任务"
     if request.action == "delete" and (summary := deletion_summary(files)):
         message += f"，{summary}"

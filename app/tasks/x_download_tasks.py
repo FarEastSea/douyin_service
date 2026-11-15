@@ -19,8 +19,10 @@ from app.services.x_cookie_manager import cleanup_x_cookie_file, materialize_x_c
 from app.services.x_downloader import build_x_download_engine, is_media_download_line
 from app.services.platform_metadata import (
     apply_media_metadata,
+    known_asset_ids,
     metadata_for_media,
     record_media_stats_snapshot,
+    sidecar_updated_since,
 )
 from app.services.x_task_service import (
     ACTIVE_X_TASK_STATUSES,
@@ -155,16 +157,13 @@ def download_x_profile(self, task_id: int):
         lock_download_attempt(db, task_id, self.request.id, XDownloadTask)
         db.refresh(task)
         task.download_dir = build_x_source_download_dir(task.username, task.profile_url)
-        asset_scope = (
-            XMediaAsset.x_author_id == task.x_author_id
-            if task.x_author_id else XMediaAsset.task_id == task.id
-        )
-        existing_assets = {
-            item.file_path: item for item in db.execute(
-                select(XMediaAsset).where(asset_scope)
-            ).scalars().all()
-        }
+        # result.files 是作者目录里的全部媒体，不只是本次新增。file_path 全局唯一，按路径查出已登记的记录；
+        # 已登记且侧车元数据在本次运行中没有被重写的文件直接跳过，不再逐个读文件、查统计快照。
+        known_assets = known_asset_ids(db, XMediaAsset, list(result.files))
         for file_path in result.files:
+            known_id = known_assets.get(file_path)
+            if known_id is not None and not sidecar_updated_since(file_path, task.started_at):
+                continue
             mime_type, _ = mimetypes.guess_type(file_path)
             media_type = "video" if (mime_type or "").startswith("video/") else "image"
             path = Path(file_path)
@@ -173,11 +172,13 @@ def download_x_profile(self, task_id: int):
                 fallback_title=f"X 动态 @{task.username}",
                 fallback_author=task.x_author.display_name if task.x_author else task.username,
             )
-            if existing := existing_assets.get(file_path):
-                apply_media_metadata(existing, metadata)
-                record_media_stats_snapshot(
-                    db, existing, platform="x", asset_kind="x_media",
-                )
+            if known_id is not None:
+                existing = db.get(XMediaAsset, known_id)
+                if existing is not None:
+                    apply_media_metadata(existing, metadata)
+                    record_media_stats_snapshot(
+                        db, existing, platform="x", asset_kind="x_media",
+                    )
                 continue
             asset = XMediaAsset(
                 task_id=task.id,

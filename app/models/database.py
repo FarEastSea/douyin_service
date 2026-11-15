@@ -10,6 +10,7 @@
 
 import asyncio
 import os
+from datetime import datetime
 from threading import RLock
 import time
 from typing import Optional
@@ -36,9 +37,16 @@ def _postgresql_connect_args(database_url: str, *, asynchronous: bool = False) -
     """保持 PostgreSQL 客户端使用 UTF-8，即使历史数据库是 SQL_ASCII。"""
     if not database_url.startswith(("postgresql://", "postgresql+")):
         return {}
+    # 旧业务表保存服务器本地 naive 时间，数据库 NOW() 必须采用相同口径。
+    # GUC 字符串采用 POSIX 语法，西为正、东为负。
+    offset = int(datetime.now().astimezone().utcoffset().total_seconds())
+    sign = "-" if offset >= 0 else "+"
+    hours, rest = divmod(abs(offset), 3600)
+    minutes = rest // 60
+    zone = f"UTC{sign}{hours:02d}:{minutes:02d}"
     if asynchronous:
-        return {"server_settings": {"client_encoding": "UTF8"}}
-    return {"client_encoding": "UTF8"}
+        return {"server_settings": {"client_encoding": "UTF8", "TimeZone": zone}}
+    return {"client_encoding": "UTF8", "options": f"-c timezone={zone}"}
 
 _engine_lock = RLock()
 _async_engine: Optional[AsyncEngine] = None
@@ -54,7 +62,7 @@ _sync_retry_after = 0.0
 
 def _current_engine_config():
     current = settings.snapshot()
-    return current, (current.effective_database_url, current.DEBUG)
+    return current, (current.effective_database_url, current.DEBUG, datetime.now().astimezone().utcoffset())
 
 
 async def get_async_engine() -> AsyncEngine:

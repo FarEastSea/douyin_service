@@ -7,6 +7,7 @@ const SettingsView = () => import("./views/SettingsView.vue");
 const UnifiedTasksView = () => import("./views/UnifiedTasksView.vue");
 const DashboardView = () => import("./views/DashboardView.vue");
 const MediaLibraryView = () => import("./views/MediaLibraryView.vue");
+const InsightsView = () => import("./views/InsightsView.vue");
 
 const legacySections: Record<string, string> = {
   general: "/settings/application",
@@ -56,6 +57,7 @@ export const router = createRouter({
     { path: "/", redirect: "/dashboard" },
     { path: "/dashboard", component: DashboardView },
     { path: "/library", component: MediaLibraryView },
+    { path: "/insights", component: InsightsView },
     { path: "/subscriptions", redirect: "/authors/douyin" },
     { path: "/authors/instagram", component: InstagramAuthorsView },
     { path: "/operations/tasks", component: UnifiedTasksView },

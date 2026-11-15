@@ -79,6 +79,16 @@ async def _dispatch_or_fail(db: AsyncSession, task, dispatcher, message: str) ->
     try:
         await asyncio.to_thread(dispatcher.delay, task.id)
     except Exception as exc:
+        # 提交 pending 后再投递；队列失败时重新加锁，不能覆盖已被认领的执行。
+        model, task_id = type(task), task.id
+        current = await _load_for_update(db, model, task_id)
+        if current.status == "pending" and not current.celery_task_id:
+            current.status = "failed"
+            current.phase = "failed"
+            current.error_code = "queue_unavailable"
+            current.error_message = message
+            current.completed_at = datetime.now()
+            await db.commit()
         raise TaskOperationError(message, 503) from exc
     await db.refresh(task)
 
@@ -88,7 +98,6 @@ async def _cancel_douyin(db: AsyncSession, task_id: int) -> None:
     if task.status not in ACTIVE_STATUSES:
         raise TaskOperationError(f"任务状态为 {task.status}，无法取消")
     old_token = task.celery_task_id
-    await asyncio.to_thread(redis_client.pause_task, task.id)
     task.status = "cancelled"
     from app.services.media_deletion import retire_attempt_artifacts
     await db.run_sync(lambda session: retire_attempt_artifacts(session, task))
@@ -100,9 +109,9 @@ async def _cancel_douyin(db: AsyncSession, task_id: int) -> None:
     if work:
         await refresh_work_download_state(db, work)
         await recalc_author_counts(db, await db.get(Author, work.author_id))
-    if old_token:
-        await asyncio.to_thread(redis_client.invalidate_download_attempt, task.id, old_token)
     await db.commit()
+    if old_token:
+        await asyncio.to_thread(redis_client.invalidate_download_attempt, task_id, old_token)
 
 
 async def _retry_douyin(db: AsyncSession, task_id: int, *, force_refresh: bool = False,
@@ -113,10 +122,7 @@ async def _retry_douyin(db: AsyncSession, task_id: int, *, force_refresh: bool =
     await asyncio.to_thread(redis_client.resume_task, task.id)
     await asyncio.to_thread(redis_client.delete_progress, task.id)
     prepare_download_retry(task)
-    from app.services.work_manager import refresh_work_download_state, recalc_author_counts
-    work = await db.get(Work, task.work_id)
-    await refresh_work_download_state(db, work)
-    await recalc_author_counts(db, await db.get(Author, work.author_id))
+    # failed/cancelled/paused → pending 均为未完成状态，不改变作品/作者完成计数。
     await db.commit()
     try:
         await asyncio.to_thread(download_single_file.apply_async, args=[task.id],
@@ -247,14 +253,22 @@ async def _delete_failed_task(
         else:
             await asyncio.to_thread(redis_client.clear_external_attempt, platform, task_id, old_token)
     if platform == "douyin":
-        from app.services.work_manager import refresh_work_download_state, recalc_author_counts
+        from app.services.work_manager import refresh_work_download_state
+        from sqlalchemy import case, func, update
         work = await db.get(Work, task.work_id)
+        was_downloaded = bool(work.is_downloaded) if work else False
         # 删除任务不等于排除作品；后续扫描确认作品仍存在时允许补建任务。
         # 兼容尚未启用级联外键的历史安装。只删记录，不触碰磁盘文件。
         await db.execute(delete(DownloadHistory).where(DownloadHistory.task_id == task_id))
         await db.delete(task)
         await refresh_work_download_state(db, work)
-        await recalc_author_counts(db, await db.get(Author, work.author_id))
+        # 删除任务不删除作品，总作品数不变；只按完成态变化调整已下载数。
+        # 父作者/作品锁已由 _load_for_update 持有，无需逐任务扫描作者全部作品。
+        if work and not work.is_excluded and bool(work.is_downloaded) != was_downloaded:
+            count = func.coalesce(Author.downloaded_works, 0) + (1 if work.is_downloaded else -1)
+            await db.execute(update(Author).where(Author.id == work.author_id).values(
+                downloaded_works=case((count < 0, 0), else_=count),
+            ).execution_options(synchronize_session=False))
     else:
         x_author_id = getattr(task, "x_author_id", None) if platform == "x" else None
         await db.delete(task)

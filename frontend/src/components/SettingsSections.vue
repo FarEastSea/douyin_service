@@ -17,6 +17,12 @@ import {
 import StatusIndicator from "./StatusIndicator.vue";
 import IssueDetail from "./IssueDetail.vue";
 import InstagramConnectionPanel from "./InstagramConnectionPanel.vue";
+import SubscriptionBackup from "./SubscriptionBackup.vue";
+
+const channelNames: Record<string, string> = {
+  webhook: "Webhook", bark: "Bark", email: "邮件", gotify: "Gotify",
+  telegram: "Telegram", wecom: "企业微信", dingtalk: "钉钉", feishu: "飞书",
+};
 import type { SettingsController } from "../composables/useSettingsController";
 const componentProps = defineProps<{ controller: SettingsController }>();
 const {
@@ -45,6 +51,9 @@ const {
   toggleField,
   displayDateTime,
   saveAndTestNotification,
+  digestBusy,
+  digestPreview,
+  sendDigestNow,
   toggleArchiveValue,
 } = componentProps.controller;
 // 秒数配置附带可读时长，避免把 21600 这类值误读。
@@ -153,6 +162,10 @@ function durationHint(label: string, value: unknown) {
               <option value="bark">Bark</option>
               <option value="email">邮件</option>
               <option value="gotify">Gotify</option>
+              <option value="telegram">Telegram</option>
+              <option value="wecom">企业微信</option>
+              <option value="dingtalk">钉钉</option>
+              <option value="feishu">飞书</option>
             </select>
             <button
               class="btn ghost"
@@ -173,12 +186,35 @@ function durationHint(label: string, value: unknown) {
           <span
             v-for="(result, channel) in notificationTestResult"
             :key="String(channel)"
-            ><strong>{{ channel }}</strong
+            ><strong>{{ channelNames[String(channel)] || channel }}</strong
             >{{ result.success ? "成功" : result.message || "失败" }}</span
           >
         </div>
+        <div class="setting-row">
+          <span class="setting-copy"
+            ><strong>每日摘要</strong
+            ><small>立即生成昨天的摘要并发送到已启用的渠道，用来核对内容；不受摘要开关和发送时间限制。</small></span
+          >
+          <span class="setting-control inline-control">
+            <button
+              class="btn ghost"
+              type="button"
+              :disabled="digestBusy"
+              @click="sendDigestNow"
+            >
+              <BellRing :size="15" />{{
+                digestBusy ? "发送中…" : "保存并发送摘要"
+              }}
+            </button>
+          </span>
+        </div>
+        <div v-if="digestPreview" class="digest-preview" role="status">
+          <strong>{{ digestPreview.title }}</strong>
+          <pre>{{ digestPreview.body }}</pre>
+        </div>
       </div>
     </section>
+    <SubscriptionBackup v-if="activePage.id === 'subscriptions'" />
 
     <section v-if="activePage.id === 'account-douyin'" class="account-page">
       <div class="account-summary">
@@ -464,7 +500,7 @@ function durationHint(label: string, value: unknown) {
                 v-model="xCookieValue"
                 rows="5"
                 placeholder="留空保持当前 Cookie"
-              /><span v-if="fieldErrors.cookie" id="setting-error-cookie" class="field-error">{{fieldErrors.cookie}}</span><textarea id="setting-cookie" :aria-invalid="Boolean(fieldErrors.cookie) || undefined" :aria-describedby="fieldErrors.cookie ? 'setting-error-cookie' : undefined" @input="delete fieldErrors.cookie"
+              /><textarea id="setting-cookie" :aria-invalid="Boolean(fieldErrors.cookie) || undefined" :aria-describedby="fieldErrors.cookie ? 'setting-error-cookie' : undefined" @input="delete fieldErrors.cookie"
                 v-else
                 v-model="platformCookieValues[activePlatform!.id]"
                 rows="5"

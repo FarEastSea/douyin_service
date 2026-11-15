@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from sqlalchemy import BigInteger, Integer, String, case, cast, exists, func, literal, or_, select, union_all
 
@@ -44,8 +45,14 @@ def _orphan_statement(platform: str):
     return statement
 
 
-def media_query(*, platform: str = "", media_type: str = "", search: str = "", author: str = "", library_status: str = ""):
-    """Use resource IDs, never a profile task ID as an invented work identity."""
+def media_query(
+    *, platform: str = "", media_type: str = "", search: str = "", author: str = "", author_id: int | None = None,
+    library_status: str = "", since: datetime | None = None, until: datetime | None = None,
+):
+    """Use resource IDs, never a profile task ID as an invented work identity.
+
+    since / until 按入库时间筛选，区间为 [since, until)。
+    """
     statements = []
     indexed = library_status != "orphaned"
     if indexed and (not platform or platform == "douyin"):
@@ -110,8 +117,14 @@ def media_query(*, platform: str = "", media_type: str = "", search: str = "", a
         conditions.append(or_(*(column.contains(search, autoescape=True) for column in (
             combined.c.title, combined.c.filename, combined.c.author_name,
         ))))
-    if author:
+    if author_id is not None:
+        conditions.append(combined.c.author_id == author_id)
+    elif author:
         conditions.append(combined.c.author_name.contains(author, autoescape=True))
+    if since is not None:
+        conditions.append(combined.c.completed_at >= since)
+    if until is not None:
+        conditions.append(combined.c.completed_at < until)
     return select(combined).where(*conditions)
 
 

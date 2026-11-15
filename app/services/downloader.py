@@ -1102,6 +1102,7 @@ class DouyinDownloader:
                     reason = f"文件大小 {total_bytes} 字节，小于归档规则下限 {min_file_size} 字节"
                 else:
                     reason = f"文件大小 {total_bytes} 字节，大于归档规则上限 {max_file_size} 字节"
+                Path(metadata_path).unlink(missing_ok=True)
                 return {
                     'success': False,
                     'paused': False,
@@ -1192,6 +1193,7 @@ class DouyinDownloader:
                 res.close()
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
+                Path(metadata_path).unlink(missing_ok=True)
                 return {
                     'success': False,
                     'paused': False,
@@ -1214,6 +1216,7 @@ class DouyinDownloader:
                     reason = f"文件大小 {actual_size} 字节，小于归档规则下限 {min_file_size} 字节"
                 else:
                     reason = f"文件大小 {actual_size} 字节，大于归档规则上限 {max_file_size} 字节"
+                Path(metadata_path).unlink(missing_ok=True)
                 return {
                     'success': False,
                     'paused': False,

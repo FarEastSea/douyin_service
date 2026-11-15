@@ -104,9 +104,13 @@ def finalize_platform_task(
 
 def serialize_platform_task(
     task: PlatformDownloadTask, runtime_state: Optional[Mapping[str, Any]] = None,
+    *, preview_count: Optional[int] = None,
 ) -> PlatformDownloadTaskResponse:
     item = PlatformDownloadTaskResponse.model_validate(task)
-    item.preview_count = len(getattr(task, "media_assets", ()) or ())
+    # 列表场景由调用方传入计数，避免为了数个数加载任务的全部媒体记录。
+    item.preview_count = (
+        preview_count if preview_count is not None else len(getattr(task, "media_assets", ()) or ())
+    )
     if (runtime_state and task.status == "downloading"
             and runtime_state.get("attempt_id") == task.celery_task_id):
         for field_name in (

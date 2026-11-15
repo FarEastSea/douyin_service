@@ -34,8 +34,10 @@ from app.services.platform_task_service import (
 )
 from app.services.platform_metadata import (
     apply_media_metadata,
+    known_asset_ids,
     metadata_for_media,
     record_media_stats_snapshot,
+    sidecar_updated_since,
 )
 from app.services.x_downloader import is_media_download_line
 from app.tasks.celery_app import celery_app
@@ -309,14 +311,15 @@ def download_platform_profile(self, task_id: int):
         db.refresh(task)
 
         task.download_dir = str(Path(download_destination) / profile_storage_key(task.source_key))
-        existing_assets = {
-            item.file_path: item for item in db.execute(
-            select(PlatformMediaAsset).where(
-                PlatformMediaAsset.task_id == task.id
-            )
-        ).scalars().all()
-        }
+        # result.files 是来源目录里的全部媒体。按平台和路径查已登记的记录（不限于本任务）：
+        # 同一主页再次下载时，旧文件不能以新任务的名义重复入库；已登记且侧车元数据未被重写的文件直接跳过。
+        known_assets = known_asset_ids(
+            db, PlatformMediaAsset, list(result.files), PlatformMediaAsset.platform == task.platform,
+        )
         for file_path in result.files:
+            known_id = known_assets.get(file_path)
+            if known_id is not None and not sidecar_updated_since(file_path, task.started_at):
+                continue
             path = Path(file_path)
             mime_type, _ = mimetypes.guess_type(file_path)
             metadata = metadata_for_media(
@@ -325,11 +328,13 @@ def download_platform_profile(self, task_id: int):
                 fallback_author=task.source_key if task.source_type == "profile" else None,
                 fallback_data=getattr(result, "metadata", None),
             )
-            if existing := existing_assets.get(file_path):
-                apply_media_metadata(existing, metadata)
-                record_media_stats_snapshot(
-                    db, existing, platform=task.platform, asset_kind="platform_media",
-                )
+            if known_id is not None:
+                existing = db.get(PlatformMediaAsset, known_id)
+                if existing is not None:
+                    apply_media_metadata(existing, metadata)
+                    record_media_stats_snapshot(
+                        db, existing, platform=task.platform, asset_kind="platform_media",
+                    )
                 continue
             asset = PlatformMediaAsset(
                 task_id=task.id,

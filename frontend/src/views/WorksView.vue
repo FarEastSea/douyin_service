@@ -72,6 +72,7 @@ const detailId = computed(() => Number(route.query.work) || 0),
 let sequence = 0,
   detailSequence = 0;
 const loaded = ref(false);
+const busyIds = ref<number[]>([]), batchDeleting = ref(false);
 page.value = Number(route.query.page) || 1;
 search.value = String(route.query.q || "");
 filter.value = (route.query.status || "all") as DownloadFilter;
@@ -228,6 +229,8 @@ function primeVideoPreview(event: Event) {
     video.currentTime = Math.min(0.1, video.duration / 2);
 }
 async function workAction(work: Work, endpoint: string, method = "POST") {
+  if (busyIds.value.includes(work.id) || batchDeleting.value) return;
+  busyIds.value.push(work.id);
   try {
     const result = await api<any>(`/works/${work.id}/${endpoint}`, { method });
     store.notify(result.message || "操作成功");
@@ -235,10 +238,15 @@ async function workAction(work: Work, endpoint: string, method = "POST") {
     if (detailId.value === work.id) await loadDetail();
   } catch (error: any) {
     store.notify(error.message || "操作失败", "error");
+  } finally {
+    busyIds.value = busyIds.value.filter((id) => id !== work.id);
   }
 }
 async function remove(work: Work) {
+  if (busyIds.value.includes(work.id) || batchDeleting.value) return;
   if (!(await confirmAction("确定删除该作品记录及已下载文件？"))) return;
+  if (busyIds.value.includes(work.id) || batchDeleting.value) return;
+  busyIds.value.push(work.id);
   try {
     await api(`/works/${work.id}`, { method: "DELETE" });
     store.notify("作品已删除");
@@ -246,9 +254,12 @@ async function remove(work: Work) {
     await load();
   } catch (error: any) {
     store.notify(error.message || "删除失败", "error");
+  } finally {
+    busyIds.value = busyIds.value.filter((id) => id !== work.id);
   }
 }
 async function batchDelete() {
+  if (batchDeleting.value || busyIds.value.length) return;
   if (
     !selected.value.length ||
     !(await confirmAction(
@@ -256,6 +267,8 @@ async function batchDelete() {
     ))
   )
     return;
+  if (batchDeleting.value || busyIds.value.length) return;
+  batchDeleting.value = true;
   try {
     const result = await api<any>("/works/batch-delete", {
       method: "POST",
@@ -267,6 +280,8 @@ async function batchDelete() {
     await load();
   } catch (error: any) {
     store.notify(error.message || "批量删除失败", "error");
+  } finally {
+    batchDeleting.value = false;
   }
 }
 function syncQuery() {
@@ -342,7 +357,7 @@ useContextActions(() =>
           id: "download-current-work",
           label: "重新下载当前作品",
           run: () => workAction(detail.value!, "redownload"),
-          disabled: store.risk.active,
+          disabled: store.risk.active || busyIds.value.includes(detail.value!.id) || batchDeleting.value,
         },
       ]
     : [],
@@ -359,7 +374,7 @@ watch(id, () => {
   void loadDetail();
 });
 watch(
-  () => route.query,
+  () => JSON.stringify([route.query.page, route.query.q, route.query.status, route.query.type, route.query.sort, route.query.from, route.query.to]),
   () => {
     const next = {
       page: Number(route.query.page) || 1,
@@ -498,7 +513,7 @@ onBeforeUnmount(() => {
     >
     <div v-if="selected.length" class="selection-bar">
       <span>已选择 {{ selected.length }} 个当前页作品</span
-      ><button class="btn compact danger" @click="batchDelete">
+      ><button class="btn compact danger" :disabled="batchDeleting || busyIds.length > 0" @click="batchDelete">
         删除作品及文件</button
       ><button class="text-button" @click="selected = []">取消选择</button>
     </div>
@@ -577,13 +592,13 @@ onBeforeUnmount(() => {
             >
               互动趋势</button
             ><button
-              :disabled="store.risk.active"
+              :disabled="store.risk.active || busyIds.includes(work.id) || batchDeleting"
               @click="workAction(work, 'redownload')"
             >
               重新下载</button
             ><button
               v-if="work.download_status === 'failed'"
-              :disabled="store.risk.active"
+              :disabled="store.risk.active || busyIds.includes(work.id) || batchDeleting"
               @click="workAction(work, 'retry-failed')"
             >
               重试失败文件</button
@@ -703,7 +718,7 @@ onBeforeUnmount(() => {
         ><template v-if="detail"
           ><button
             class="btn"
-            :disabled="store.risk.active"
+            :disabled="store.risk.active || busyIds.includes(detail.id) || batchDeleting"
             @click="workAction(detail, 'redownload')"
           >
             重新下载</button

@@ -136,13 +136,7 @@ def metadata_for_media(
     fallback_data: Mapping[str, Any] | None = None,
 ) -> NormalizedMediaMetadata:
     """Read a bounded adjacent sidecar produced by gallery-dl or yt-dlp."""
-    path = Path(file_path)
-    candidates = (
-        path.with_suffix(path.suffix + ".json"),
-        path.with_suffix(".info.json"),
-        path.with_suffix(".json"),
-    )
-    for candidate in candidates:
+    for candidate in _sidecar_candidates(file_path):
         try:
             if not candidate.is_file() or candidate.stat().st_size > 5 * 1024 * 1024:
                 continue
@@ -156,6 +150,49 @@ def metadata_for_media(
     return normalize_media_metadata(
         fallback_data, fallback_title=fallback_title, fallback_author=fallback_author,
     )
+
+
+def _sidecar_candidates(file_path: str) -> tuple[Path, ...]:
+    path = Path(file_path)
+    return (
+        path.with_suffix(path.suffix + ".json"),
+        path.with_suffix(".info.json"),
+        path.with_suffix(".json"),
+    )
+
+
+def sidecar_updated_since(file_path: str, since: datetime | None) -> bool:
+    """侧车元数据是否在 since（服务器本地时间）之后被重写过。
+
+    下载器带下载归档时会跳过已有文件，也不会重写它们的侧车文件；这类文件无需每次
+    重新读取元数据。无法判断时返回 True，保持“重新读取”的保守行为。
+    """
+    if since is None:
+        return True
+    threshold = since.timestamp() - 2  # 容忍文件系统时间精度
+    for candidate in _sidecar_candidates(file_path):
+        try:
+            if candidate.is_file() and candidate.stat().st_mtime >= threshold:
+                return True
+        except OSError:
+            return True
+    return False
+
+
+LOOKUP_CHUNK = 500
+
+
+def known_asset_ids(db: Any, model: Any, file_paths: list[str], *conditions: Any) -> dict[str, int]:
+    """按文件路径分批查出已登记的媒体记录 ID，避免把整个作者或平台的记录读进内存。"""
+    known: dict[str, int] = {}
+    for start in range(0, len(file_paths), LOOKUP_CHUNK):
+        chunk = file_paths[start:start + LOOKUP_CHUNK]
+        rows = db.execute(
+            select(model.file_path, model.id).where(model.file_path.in_(chunk), *conditions).order_by(model.id)
+        ).all()
+        for file_path, asset_id in rows:
+            known.setdefault(file_path, asset_id)
+    return known
 
 
 def fill_missing_media_metadata(record: Any, metadata: NormalizedMediaMetadata) -> bool:

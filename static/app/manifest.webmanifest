@@ -1,0 +1,16 @@
+{
+  "name": "媒体工作台",
+  "short_name": "媒体工作台",
+  "description": "统一管理媒体下载任务、作者订阅、异常诊断和服务维护。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#07080b",
+  "theme_color": "#07080b",
+  "icons": [
+    { "src": "/static/app/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/app/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/static/app/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

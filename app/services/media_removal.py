@@ -15,7 +15,6 @@ import os
 import re
 import sqlite3
 import string
-import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import timedelta
@@ -25,6 +24,8 @@ from uuid import uuid4
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.cache_lock import cache_resource_lock
 
 from app.models.models import (
     Author,
@@ -116,16 +117,6 @@ def plan_archive_release(file_path: str) -> ArchiveRelease | None:
     return None
 
 
-def _locked(lock_path: Path, attempts: int = 50) -> int | None:
-    """跨进程的简易排他锁，防止并发删除同时改写同一份归档文本。"""
-    for _ in range(attempts):
-        try:
-            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            time.sleep(0.1)
-    return None
-
-
 def apply_archive_release(release: ArchiveRelease) -> bool:
     """移除归档条目；返回是否确实移除。归档里没有该条目时返回 False。"""
     if release.kind == "sqlite":
@@ -137,11 +128,8 @@ def apply_archive_release(release: ArchiveRelease) -> bool:
         except sqlite3.Error:
             logger.warning("下载归档暂不可写，未移除条目: %s", release.archive, exc_info=True)
             return False
-    lock_path = release.archive.with_name(release.archive.name + ".lock")
-    descriptor = _locked(lock_path)
-    if descriptor is None:
-        return False
-    try:
+    # 操作系统在进程退出时释放锁；锁文件残留不会造成永久不可写。
+    with cache_resource_lock(release.archive.parent, release.archive.name):
         try:
             lines = release.archive.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError):
@@ -153,9 +141,7 @@ def apply_archive_release(release: ArchiveRelease) -> bool:
         temporary.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
         os.replace(temporary, release.archive)
         return True
-    finally:
-        os.close(descriptor)
-        lock_path.unlink(missing_ok=True)
+
 
 
 def archive_contains(release: ArchiveRelease) -> bool | None:
@@ -207,15 +193,9 @@ async def _delete_douyin(db: AsyncSession, task_id: int, block: bool) -> dict:
 
 async def _active_folder(db: AsyncSession, folder: Path) -> bool:
     """同目录仍有下载在运行时，引擎可能正在追加归档，不能改写。"""
-    target = folder.resolve(strict=False)
-    for model in (XDownloadTask, PlatformDownloadTask):
-        directories = (await db.execute(
-            select(model.download_dir).where(model.status.in_(("pending", "downloading", "paused")))
-        )).scalars().all()
-        for directory in directories:
-            if directory and target.is_relative_to(Path(directory).resolve(strict=False)):
-                return True
-    return False
+    from app.services.storage_maintenance import _active_path
+    return await _active_path(db, folder.resolve(strict=False))
+
 
 
 async def _queue_instagram_redownload(db: AsyncSession, asset: PlatformMediaAsset) -> str:

@@ -27,6 +27,7 @@ import {
   Plus,
   ArrowLeft,
   Images,
+  ChartColumn,
 } from "@lucide/vue";
 import { api, saveToken } from "./api";
 import MediaLightbox from "./components/MediaLightbox.vue";
@@ -112,6 +113,8 @@ const pageTitle = computed(() =>
       ? "系统"
       : route.path === "/library"
         ? "媒体库"
+      : route.path === "/insights"
+        ? "洞察"
       : route.path.includes("/works")
         ? "订阅 / 作品"
         : route.path.startsWith("/authors")
@@ -191,6 +194,8 @@ function handleVisibilityChange() {
   if (!document.hidden) void refreshHealth();
 }
 async function refreshHealth() {
+  // 侧边栏角标与总览的订阅数来自同一份统计，随健康检查一起刷新，避免长时间停留在载入时的值。
+  void store.refreshStats();
   await store.refreshRisk();
   try {
     const data = await api<{ ready: boolean }>("/status/readiness");
@@ -364,6 +369,7 @@ onBeforeUnmount(() => {
           <RouterLink to="/operations/tasks" @click="closeSidebar"><Layers3 :size="17" /><span>任务</span><small v-if="store.stats.downloading_tasks" class="nav-count">{{ store.stats.downloading_tasks }}</small></RouterLink>
           <RouterLink to="/library" @click="closeSidebar"><Images :size="17" /><span>媒体库</span></RouterLink>
           <RouterLink to="/authors/douyin" :class="{ 'router-link-active': route.path.startsWith('/authors') || route.path === '/automation' }" @click="closeSidebar"><Users :size="17" /><span>订阅</span></RouterLink>
+          <RouterLink to="/insights" @click="closeSidebar"><ChartColumn :size="17" /><span>洞察</span></RouterLink>
         </nav>
         <nav class="main-nav utility-nav" aria-label="系统">
           <span class="nav-label">系统</span>

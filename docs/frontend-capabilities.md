@@ -32,6 +32,13 @@
 | 日志、版本与系统入口 | 系统目录 | logs、update/info、update/check、update/diagnose、/docs、/legacy | 原始诊断披露、版本查询；版本安装通过现有 Jenkins 的排空、备份和可恢复发布流程 |
 | 高级后台诊断 | 系统 / 服务折叠区 | celery-debug、worker-log、celery-test、celery-purge-old、service/restart | 明确测试 / 旧队列清理 / 重启影响，保持原进程管理 |
 | 数据库连接验证 | 设置 / 高级连接 | /config/database/test | 测试当前表单，不自动保存；空密码使用已有值 |
+| 数据洞察 | 洞察 | /operations/insights?days= | 7 / 30 / 90 / 365 天窗口深链；零入库日补零；成功率无样本时显示“-”；图表可键盘逐项查看并附数据表 |
+| 磁盘空间预警 | 总览“需要处理”、洞察、设置 / 下载目录 | /operations/insights/disk、DISK_WARN_FREE_GB | 读取失败不显示为充足；阈值为 0 不预警 |
+| 媒体库日期、排序与批量删除 | 媒体库 | /operations/media 的 date_from / date_to / sort_by、/operations/media/batch-delete | 仅按入库时间排序时分组；选择只对当前页有效；部分失败逐项反馈并保留选中 |
+| 预览缩放与连续播放 | 媒体预览 | 原 preview 接口 | 图片缩放拖动、视频倍速、连续播放、触屏滑动；Esc 先退出缩放再关闭 |
+| 全局搜索 | 命令面板 | /operations/tasks、/operations/media、/authors、/x/authors 的 q | 输入两个字起搜索；部分来源失败时说明；结果深链到对应对象 |
+| 通知机器人与每日摘要 | 设置 / 通知 | config/all、/notifications/test、/notifications/digest | 密钥不回显；测试与摘要结果按渠道显示 |
+| 订阅备份 | 设置 / 订阅检查 | /operations/subscriptions/export、import | 导入先预演；非备份文件与无效 JSON 有明确提示；不含凭据 |
 
 ## 兼容与能力边界
 
@@ -46,6 +53,8 @@
 本地浏览器采用拦截接口的明确演示数据，验证组件、深链、焦点、移动布局、保护和反馈；不执行生产下载、删除、通知或维护。实际下载链路、长时间性能、屏幕阅读器及线上动态配置仍需在真实环境验收后再移除旧入口。临时验证文件位于忽略目录，验证结束删除，不提交。
 
 ## 当前验证记录
+
+2026-11-16 接续验收：38 项后端本地隔离回归通过，包含任务恢复、队列失败、批量快照、缓存并发、存储保护、统计完整性、订阅备份和管理鉴权；前端类型检查与生产构建通过。模拟接口浏览器验收覆盖保存间隔与页签保留、搜索防抖、删除失败反馈、作者媒体深链、放弃 Cookie 修改、排除列表和 Instagram 分页迟到响应，以及初始化错误提示。媒体库在 375、1024、1440px 的深浅主题下检查通过。此次未运行真实 PostgreSQL / Redis、生产下载、外部通知和 NAS 故障演练。
 
 Instagram 本地验收覆盖固定版 gallery-dl 解析合成数据、稳定 ID 去重、轮播缺项恢复、Stories/Highlights 重叠、分片断点、300位作者调度、会话熔断、取消与重试、增量迁移、批次预览及视频 Range 请求，共38项检查通过。生产资源重新构建；1440px 和390px 浏览器验证了作者详情、内容开关、立即检查、订阅提交、运行记录、配置与 Cookie 文件导入。Instagram 默认关闭，当前没有真实采集账号；各内容类型、私密权限及生产发布验收仍待完成。
 

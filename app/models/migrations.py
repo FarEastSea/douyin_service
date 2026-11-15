@@ -150,6 +150,8 @@ ADD_COLUMN_MIGRATIONS = [
 
 
 INDEX_MIGRATIONS = [
+    _create_index("0133_idx_history_file_path", "下载历史路径等值索引", "idx_history_file_path", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_history_file_path ON download_history USING hash (file_path)", "CREATE INDEX idx_history_file_path ON download_history (file_path(255))"),
+    _create_index("0134_idx_task_temp_path", "续传路径等值索引", "idx_task_temp_path", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_temp_path ON download_tasks USING hash (temp_file_path)", "CREATE INDEX idx_task_temp_path ON download_tasks (temp_file_path(255))"),
     _create_index("0130_platform_media_identity", "平台媒体稳定身份去重", "uq_platform_media_identity", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_platform_media_identity ON platform_media_assets (platform, external_media_id)", "CREATE UNIQUE INDEX uq_platform_media_identity ON platform_media_assets (platform, external_media_id)"),
     # 媒体库按路径比对无索引媒体与已索引记录；hash 索引只做等值匹配，不受长路径长度限制。
     _create_index("0131_idx_download_task_file_path", "下载任务文件路径等值索引", "idx_download_task_file_path", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_download_task_file_path ON download_tasks USING hash (file_path)", "CREATE INDEX idx_download_task_file_path ON download_tasks (file_path(255))"),

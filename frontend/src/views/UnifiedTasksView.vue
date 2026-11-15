@@ -31,7 +31,7 @@ import PageHeader from "../components/PageHeader.vue";
 import StatusIndicator from "../components/StatusIndicator.vue";
 import StateView from "../components/StateView.vue";
 import TaskInspector from "../components/TaskInspector.vue";
-import { confirmAction, confirmWithOption, dateTime, useContextActions } from "../workspace";
+import { confirmAction, confirmWithOption, dateTime, platformNames, useContextActions } from "../workspace";
 import { mediaPreviewType, openMedia } from "../media";
 import { focusFirst, restoreFocus, trapFocus } from "../focus";
 import { useAppStore } from "../stores/app";
@@ -123,14 +123,6 @@ type TaskAction =
   | "resume"
   | "refresh_retry"
   | "delete";
-const platformNames: Record<string, string> = {
-  douyin: "抖音",
-  x: "X",
-  tiktok: "TikTok",
-  weibo: "微博",
-  bilibili: "B站",
-  xhs: "小红书",
-};
 const statusNames: Record<string, string> = {
   pending: "等待中",
   downloading: "下载中",
@@ -585,7 +577,7 @@ useContextActions(() => [
   },
 ]);
 watch(
-  () => route.fullPath,
+  () => JSON.stringify([route.query.platform, route.query.status, route.query.q, route.query.page, route.query.sort]),
   () => {
     const nextPlatform = queryText(route.query.platform),
       nextStatus = queryText(route.query.status),
@@ -687,7 +679,7 @@ watch(
         {{ statusNames[item] }}
         <span
           :class="{ danger: item === 'failed' && statusSummary[item] > 0 }"
-          >{{ statusSummary[item] ?? "—" }}</span
+          >{{ summaryLoaded ? (statusSummary[item] ?? 0) : "—" }}</span
         >
       </button>
     </nav>
