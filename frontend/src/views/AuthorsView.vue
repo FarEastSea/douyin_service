@@ -164,15 +164,20 @@ async function loadDetail(preserve = false) {
 }
 async function loadResource() {
   const current = ++resourceSequence;
-  resourceBusy.value = true;
+  const authorId = selected.value;
   resourceError.value = "";
+  if (!authorId || detail.value?.id !== authorId || isX.value) {
+    resourceBusy.value = false;
+    return;
+  }
+  resourceBusy.value = true;
   try {
-    if (!isX.value && tab.value === "overview") {
-      const data = await api(`${prefix.value}/${selected.value}/auto-update`);
+    if (tab.value === "overview") {
+      const data = await api(`${prefix.value}/${authorId}/auto-update`);
       if (current === resourceSequence) automation.value = data;
-    } else if (!isX.value && tab.value === "history") {
+    } else if (tab.value === "history") {
       const data = await api<any>(
-        `${prefix.value}/${selected.value}/profile-history`,
+        `${prefix.value}/${authorId}/profile-history`,
       );
       if (current === resourceSequence) history.value = data.items || [];
     }
