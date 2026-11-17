@@ -25,9 +25,8 @@ ERROR_INFO = {
     ),
     "browser_identity_missing": DouyinErrorInfo(
         "browser_identity_missing", "authentication",
-        "抖音请求缺少浏览器身份标识，系统已停止继续请求。",
-        "请在设置中心更新包含 UIFID 的完整抖音 Cookie 后重试。",
-        False,
+        "抖音未识别本次请求的浏览器身份，系统已暂停继续请求。",
+        "请等待冷却结束；若持续失败，请检查 Cookie 中的 UIFID 与浏览器身份参数。",
     ),
     "argus_blocked": DouyinErrorInfo(
         "argus_blocked", "risk_control",
@@ -196,7 +195,7 @@ def parse_douyin_json_response(response: Any, *, expected_keys: Iterable[str] = 
     classified = classify_douyin_error(status_code=status_code, data=diagnostic)
     if classified:
         raise classified
-    if business_status not in (None, 0, "0"):
+    if business_status not in (None, 0, "0") and not any(bool(data.get(key)) for key in expected_keys):
         raise DouyinRequestError("upstream_error", detail=_flatten_text(data)[:1000], status_code=status_code)
     if (status_code or 0) >= 400:
         raise preliminary or DouyinRequestError("upstream_error", status_code=status_code)

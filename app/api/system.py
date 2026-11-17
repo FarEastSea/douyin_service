@@ -243,10 +243,10 @@ async def get_douyin_risk_state():
         "reason_label": localize_douyin_reason(
             normalized_error_type, state.get("reason")
         ),
-        "requires_cookie_update": normalized_error_type == "browser_identity_missing",
+        "requires_cookie_update": normalized_error_type == "browser_identity_missing" and not state.get("retry_after"),
         "requires_account_update": normalized_error_type in {
             "account_isolated", "browser_identity_missing",
-        },
+        } and not state.get("retry_after"),
     }
 
 
