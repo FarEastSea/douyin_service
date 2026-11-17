@@ -614,20 +614,25 @@ onBeforeUnmount(() => {
           <IssueDetail
             v-if="detail.last_error"
             :message="detail.account_status_label ? [detail.account_status_label, detail.account_status_detail].filter(Boolean).join('：') : detail.last_error"
-          /><a
-            v-if="detail.share_url || detail.profile_url"
-            class="text-button"
-            :href="detail.share_url || detail.profile_url"
-            target="_blank"
-            rel="noopener noreferrer"
-            >打开主页</a
-          ><RouterLink
-            v-if="!isX"
-            class="btn"
-            :to="`/authors/douyin/${detail.id}/works`"
-          >浏览全部作品</RouterLink
-          >
-          <RouterLink class="btn ghost" :to="{path:'/library',query:{platform:props.platform,author_id:String(detail.id),author:name(detail)}}">查看已保存媒体</RouterLink>
+          />
+          <nav class="author-detail-actions" aria-label="作者相关页面">
+            <a
+              v-if="detail.share_url || detail.profile_url"
+              class="btn ghost"
+              :href="detail.share_url || detail.profile_url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >打开主页</a>
+            <RouterLink
+              v-if="!isX"
+              class="btn ghost"
+              :to="`/authors/douyin/${detail.id}/works`"
+            >浏览全部作品</RouterLink>
+            <RouterLink
+              class="btn ghost"
+              :to="{path:'/library',query:{platform:props.platform,author_id:String(detail.id),author:name(detail)}}"
+            >查看已保存媒体</RouterLink>
+          </nav>
           <div v-if="automation?.history?.length" class="result-list">
             <h3>最近检查轨迹</h3>
             <article v-for="item in automation.history" :key="item.report_id">

@@ -403,7 +403,7 @@ class DouyinDownloader:
         if exc.code not in {"browser_identity_missing", "argus_blocked", "rate_limited"}:
             return
         try:
-            cooldown_seconds = 0 if exc.code == "browser_identity_missing" else self.risk_cooldown_seconds
+            cooldown_seconds = self.risk_cooldown_seconds
             redis_client.set_douyin_risk_state(
                 exc.code,
                 exc.detail or exc.user_message,

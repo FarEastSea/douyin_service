@@ -31,6 +31,7 @@ DEFAULT_USER_AGENT = (
 PROFILE_ID = 1
 KEY_PATH = Path(__file__).resolve().parents[2] / ".runtime" / "douyin-account.key"
 SIGNATURE_RECOVERY_MARKER = "douyin_signature_recovery_20260906"
+RESPONSE_RECOVERY_MARKER = "douyin_response_isolation_recovery_20261117"
 
 
 @dataclass(frozen=True)
@@ -355,13 +356,15 @@ def record_request_result(
             profile.last_success_at = now
             profile.last_failure_code = None
         else:
-            profile.consecutive_failures = int(profile.consecutive_failures or 0) + 1
+            previous_code = profile.last_failure_code
+            profile.consecutive_failures = (
+                int(profile.consecutive_failures or 0) + 1 if previous_code == error_code else 1
+            )
             profile.last_failure_at = now
             profile.last_failure_code = error_code
-            isolate = error_code in {"browser_identity_missing", "cookie_invalid"} or (
-                error_code in {"argus_blocked", "rate_limited"}
-                and profile.consecutive_failures >= 3
-            )
+            # 只有连续、明确的登录失效才能隔离账号；限流、安全校验及网络/
+            # 响应格式异常只能降级或冷却，不能要求重新保存有效 Cookie。
+            isolate = error_code == "cookie_invalid" and profile.consecutive_failures >= 3
             profile.status = "isolated" if isolate else "degraded"
             profile.isolation_reason = error_code if isolate else None
             if isolate:
@@ -460,4 +463,39 @@ def recover_legacy_signature_isolation_sync() -> bool:
             redis_client.clear_douyin_risk_state()
         except Exception:
             pass
+    return recovered
+
+
+def recover_legacy_response_isolation_sync() -> bool:
+    """旧解析器无法证明登录失效：一次性恢复为待验证，保留失败诊断。"""
+    db = get_sync_db()
+    recovered = False
+    try:
+        profile = db.execute(
+            select(DouyinAccountProfile)
+            .where(DouyinAccountProfile.id == PROFILE_ID)
+            .with_for_update()
+        ).scalar_one_or_none()
+        marker = db.execute(select(SystemConfig).where(
+            SystemConfig.key == RESPONSE_RECOVERY_MARKER
+        )).scalar_one_or_none()
+        if marker is None and profile is not None and profile.status == "isolated" and profile.isolation_reason in {
+            "cookie_invalid", "argus_blocked", "rate_limited",
+        }:
+            profile.status = "unknown"
+            profile.isolation_reason = None
+            profile.consecutive_failures = 0
+            recovered = True
+        if marker is None:
+            db.add(SystemConfig(key=RESPONSE_RECOVERY_MARKER, value="completed"))
+        # 持有账号行锁时清理，避免覆盖另一个进程刚确认的真实登录失效。
+        # 重启可补清上次遗留的闸门，但不能解除新逻辑确认的隔离。
+        if profile is not None and profile.status != "isolated":
+            redis_client.clear_douyin_account_isolation()
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False
+    finally:
+        db.close()
     return recovered
