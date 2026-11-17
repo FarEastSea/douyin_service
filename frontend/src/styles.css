@@ -1799,6 +1799,21 @@ details.diagnostic-box[open] > summary::before {
 .inspector-body > .view-tabs > * {
   flex: 1;
 }
+.author-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.author-detail-actions > .btn {
+  flex: 1 1 auto;
+  min-height: 44px;
+  height: auto;
+  padding: 10px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: center;
+}
 .inspector-footer {
   display: flex;
   align-items: center;

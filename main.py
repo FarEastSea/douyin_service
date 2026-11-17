@@ -66,7 +66,10 @@ async def activate_runtime(app: FastAPI) -> bool:
             raise RuntimeError("Redis 尚未恢复")
         from app.services.download_publication import recover_media_publications
         from app.services.media_deletion import recover_media_deletions
-        from app.services.douyin_account import migrate_legacy_account_sync, recover_legacy_signature_isolation_sync
+        from app.services.douyin_account import (
+            migrate_legacy_account_sync, recover_legacy_signature_isolation_sync,
+            recover_legacy_response_isolation_sync,
+        )
         stage = "media_publication_recovery"
         await asyncio.to_thread(recover_media_publications)
         stage = "media_deletion_recovery"
@@ -75,6 +78,7 @@ async def activate_runtime(app: FastAPI) -> bool:
         await asyncio.to_thread(migrate_legacy_account_sync)
         stage = "signature_recovery"
         await asyncio.to_thread(recover_legacy_signature_isolation_sync)
+        await asyncio.to_thread(recover_legacy_response_isolation_sync)
         stage = "route_registration"
         if not getattr(app.state, "runtime_routes_loaded", False):
             for name in ("tasks", "authors", "system", "x_tasks", "works", "platforms", "instagram", "platform_downloads", "operations", "subscription_runs"):

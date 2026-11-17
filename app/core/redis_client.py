@@ -875,6 +875,21 @@ def clear_douyin_risk_state() -> bool:
     return bool(redis_client.delete(DOUYIN_RISK_STATE_KEY))
 
 
+def clear_douyin_account_isolation() -> bool:
+    """原子清除旧永久账号闸门，不覆盖并发请求新写入的限流冷却。"""
+    return bool(redis_client.eval("""
+        local raw = redis.call('GET', KEYS[1])
+        if not raw then return 0 end
+        local ok, state = pcall(cjson.decode, raw)
+        if ok and type(state) == 'table' and state.error_type == 'account_isolated'
+            and (state.reason == 'cookie_invalid' or state.reason == 'argus_blocked'
+                 or state.reason == 'rate_limited') then
+            return redis.call('DEL', KEYS[1])
+        end
+        return 0
+    """, 1, DOUYIN_RISK_STATE_KEY))
+
+
 def get_x_task_state(task_id: int) -> Optional[Dict[str, Any]]:
     """读取一个 X 任务的实时状态缓存。"""
     raw_state = redis_client.hgetall(f"{X_TASK_STATE_PREFIX}{task_id}")

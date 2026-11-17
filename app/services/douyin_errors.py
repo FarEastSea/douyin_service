@@ -25,9 +25,8 @@ ERROR_INFO = {
     ),
     "browser_identity_missing": DouyinErrorInfo(
         "browser_identity_missing", "authentication",
-        "抖音请求缺少浏览器身份标识，系统已停止继续请求。",
-        "请在设置中心更新包含 UIFID 的完整抖音 Cookie 后重试。",
-        False,
+        "抖音未识别本次请求的浏览器身份，系统已暂停继续请求。",
+        "请等待冷却结束；若持续失败，请检查 Cookie 中的 UIFID 与浏览器身份参数。",
     ),
     "argus_blocked": DouyinErrorInfo(
         "argus_blocked", "risk_control",
@@ -139,7 +138,7 @@ def classify_douyin_error(*, status_code: Optional[int], body: Any = None,
     cookie_tokens: Iterable[str] = (
         "cookie invalid", "cookie expired", "cookie失效", "cookie 失效", "cookie过期",
         "login required", "not login", "未登录", "登录失效", "登录过期",
-        "session expired", "passport",
+        "session expired",
     )
     if any(token in lowered for token in cookie_tokens):
         return DouyinRequestError("cookie_invalid", detail=text, status_code=status_code)
@@ -161,35 +160,45 @@ def parse_douyin_json_response(response: Any, *, expected_keys: Iterable[str] = 
     body = str(getattr(response, "text", "") or "")
     status_code = getattr(response, "status_code", None)
     preliminary = classify_douyin_error(status_code=status_code, body=body)
-    # HTTP 200 的正常作品正文可能碰巧包含“风控”“验证码”等文字。只有精确的
-    # Argus 文本可以在 JSON 解析前直接判定；其他文本分类仅用于 HTTP 错误响应。
-    if preliminary and (preliminary.code == "argus_blocked" or (status_code or 0) >= 400):
-        raise preliminary
     try:
         data = response.json()
     except (json.JSONDecodeError, ValueError) as exc:
-        classified = preliminary or classify_douyin_error(status_code=status_code, body=body)
-        if classified:
-            raise classified from exc
+        if body.lstrip().startswith(("{", "[")):
+            # 截断 JSON 里的作品文案也不能用于错误关键词匹配。
+            preliminary = classify_douyin_error(status_code=status_code)
+        # 空响应、截断 JSON 和网关 HTML 都不能证明 Cookie 失效。非 JSON
+        # 鉴权错误须同时具备 HTTP 401 和明确的登录失效提示。
+        if preliminary and (
+            preliminary.code != "cookie_invalid" or status_code == 401
+        ):
+            raise preliminary from exc
         raise DouyinRequestError(
-            "cookie_invalid" if status_code in {200, 401, 403} else "upstream_error",
+            "upstream_error",
             detail=body[:500] or "empty non-json response", status_code=status_code,
+            diagnostics={"stage": "response_json", "response_format": (
+                "empty" if not body.strip() else "invalid_json"
+            )},
         ) from exc
 
     if not isinstance(data, dict):
         raise DouyinRequestError("upstream_error", detail=f"unexpected JSON type: {type(data).__name__}")
+    business_status = data.get("status_code", 0)
+    has_expected_payload = any(key in data and data[key] is not None for key in expected_keys)
+    # 正常作品正文、作者介绍及成功提示中的登录/风控文字不是账号错误。
+    if business_status in (None, 0, "0") and has_expected_payload and (status_code or 0) < 400:
+        return data
     diagnostic = {
         key: data.get(key)
         for key in ("status_code", "status_msg", "message", "description", "detail")
-        if data.get(key) not in {None, "", 0, "0"}
+        if data.get(key) not in (None, "", 0, "0")
     }
     classified = classify_douyin_error(status_code=status_code, data=diagnostic)
     if classified:
         raise classified
-    business_status = data.get("status_code", 0)
-    has_expected_payload = any(bool(data.get(key)) for key in expected_keys)
-    if business_status not in {None, 0, "0"} and not has_expected_payload:
+    if business_status not in (None, 0, "0") and not any(bool(data.get(key)) for key in expected_keys):
         raise DouyinRequestError("upstream_error", detail=_flatten_text(data)[:1000], status_code=status_code)
+    if (status_code or 0) >= 400:
+        raise preliminary or DouyinRequestError("upstream_error", status_code=status_code)
     return data
 
 
