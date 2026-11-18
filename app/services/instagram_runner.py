@@ -318,7 +318,8 @@ class Runtime:
         self.gate_db.commit()
         if latest != self.fingerprint:
             raise InstagramStop("session_changed", "会话或出口已变更，请重新检测会话")
-        if api or not kwargs.get("stream", False):
+        # requests 的 stream 只控制响应读取方式；静态脚本和媒体均不是账号接口。
+        if api:
             while True:
                 wait = reserve_request(
                     self.gate_db, fingerprint=self.fingerprint, testing=self.testing
@@ -334,7 +335,9 @@ class Runtime:
             if not settings.snapshot().INSTAGRAM_ENABLED and not self.testing:
                 raise InstagramStop("disabled", "Instagram 采集已暂停")
             if (
-                row.status != "ready"
+                not self.testing and (
+                    row.status != "ready" or row.validated_fingerprint != self.fingerprint
+                )
                 or row.cooldown_until
                 and row.cooldown_until > utcnow()
             ):
