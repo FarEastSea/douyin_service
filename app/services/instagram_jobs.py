@@ -119,7 +119,10 @@ def dispatch_due(db):
             else:
                 return {"dispatched": 0}
         db.commit()
-        if until := budget_until(db, current, now):
+        # A fresh extractor must resolve the author and initialize pagination
+        # before it can checkpoint. Do not repeatedly spend the first free slot
+        # on that same setup. Each actual request still reserves its own slot.
+        if until := budget_until(db, current, now, required=8):
             for state in db.scalars(
                 select(PlatformSubscriptionState)
                 .join(PlatformAuthor)

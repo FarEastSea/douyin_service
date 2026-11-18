@@ -280,7 +280,7 @@ def reserve_request(db, *, fingerprint, testing=False):
     return 0
 
 
-def budget_until(db, current=None, now=None):
+def budget_until(db, current=None, now=None, *, required=1):
     current, now = current or settings.snapshot(), now or utcnow()
     boundaries = []
     for seconds, limit in (
@@ -288,11 +288,14 @@ def budget_until(db, current=None, now=None):
         (86400, current.INSTAGRAM_DAILY_BUDGET),
     ):
         condition = InstagramRequest.requested_at > now - timedelta(seconds=seconds)
-        if db.scalar(select(func.count(InstagramRequest.id)).where(condition)) >= limit:
-            oldest = db.scalar(
-                select(func.min(InstagramRequest.requested_at)).where(condition)
+        count = db.scalar(select(func.count(InstagramRequest.id)).where(condition))
+        excess = count + min(required, limit) - limit
+        if excess > 0:
+            release = db.scalar(
+                select(InstagramRequest.requested_at).where(condition)
+                .order_by(InstagramRequest.requested_at).offset(excess - 1).limit(1)
             )
-            boundaries.append(oldest + timedelta(seconds=seconds + 1))
+            boundaries.append(release + timedelta(seconds=seconds + 1))
     return max(boundaries) if boundaries else None
 
 
