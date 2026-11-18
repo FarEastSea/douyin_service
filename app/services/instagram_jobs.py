@@ -322,14 +322,11 @@ def execute_instagram_task(celery_task, db, task):
         db.expire_all()
         row = db.get(PlatformDownloadTask, task.id)
         if row.status == "downloading" and row.celery_task_id == token:
-            lock_download_attempt(db, row.id, token, PlatformDownloadTask)
-            row.status, row.phase, row.completed_at = "failed", "failed", datetime.now()
-            row.error_code, row.error_message = (
+            record_execution_failure(
+                db, row.id, token,
                 "engine_error",
                 "Instagram 解析或文件验证未完成，请检查引擎依赖与账号权限",
             )
-            row.output_log = "\n".join(lines)
-            db.commit()
         # child 已在自己的 fenced 事务中提交终态，不能用旧 Session 快照覆盖。
         return {
             "success": row.status == "completed",
@@ -338,3 +335,40 @@ def execute_instagram_task(celery_task, db, task):
         }
     finally:
         close_download_process(process)
+
+
+def record_execution_failure(db, task_id, token, code, message, *, deferred=False):
+    """父进程失败也必须结束运行记录并更新分流，不能留下立即到期的调度状态。"""
+    from app.core.time_basis import local_to_utc
+    from app.services.download_lifecycle import lock_download_attempt
+    from app.services.instagram_runner import record_unstarted_scan
+
+    db.rollback()
+    lock_download_attempt(db, task_id, token, PlatformDownloadTask)
+    task = db.get(PlatformDownloadTask, task_id)
+    started = local_to_utc(task.started_at) or utcnow()
+    now = utcnow()
+    status = "deferred" if deferred else "failed"
+    for run in db.scalars(select(PlatformSubscriptionRun).where(
+        PlatformSubscriptionRun.task_id == task_id,
+        PlatformSubscriptionRun.status == "running",
+    )):
+        run.status, run.message, run.finished_at = status, message, now
+    state = record_unstarted_scan(db, task, started, status, message)
+    if state and state.task_id == task.id:
+        state.last_check_at, state.deferred_reason = started, message
+        if deferred:
+            state.next_check_at = now + timedelta(minutes=5)
+        else:
+            state.blocked_code, state.manual = code, False
+    task.phase, task.error_code, task.error_message = code, code, message
+    task.last_heartbeat_at, task.output_log = datetime.now(), message
+    if deferred:
+        options = options_for(task)
+        options["not_before"] = (now + timedelta(minutes=5)).isoformat()
+        task.instagram_options = json.dumps(options)
+        task.status, task.celery_task_id, task.completed_at = "pending", None, None
+    else:
+        task.status, task.completed_at = "failed", datetime.now()
+    db.commit()
+    return {"success": False, "status": task.status, "deferred": deferred, "error_code": code}

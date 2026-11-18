@@ -2,6 +2,7 @@
 
 import logging
 import mimetypes
+import subprocess
 import traceback
 from collections import deque
 from datetime import datetime, timedelta
@@ -416,6 +417,21 @@ def download_platform_profile(self, task_id: int):
         return {"success": False, "superseded": True}
     except Exception as exc:
         db.rollback()
+        if platform_id == "instagram":
+            from app.services.instagram_jobs import record_execution_failure
+            deferred = isinstance(exc, (OSError, subprocess.SubprocessError))
+            code = "execution_unavailable" if deferred else "worker_exception"
+            message = (
+                "Instagram 执行进程暂不可用，已保留原任务，5 分钟后自动重试"
+                if deferred else
+                f"Instagram 执行监督异常（{type(exc).__name__}），已停止自动扫描，请检查服务端执行环境"
+            )
+            logger.warning("Instagram 任务 %s 执行异常：%s", task_id, type(exc).__name__)
+            try:
+                return record_execution_failure(db, task_id, self.request.id, code, message, deferred=deferred)
+            except StaleDownloadAttempt:
+                db.rollback()
+                return {"success": False, "superseded": True}
         logger.error("平台下载任务 %s 异常:\n%s", task_id, traceback.format_exc())
         try:
             lock_download_attempt(db, task_id, self.request.id, PlatformDownloadTask)

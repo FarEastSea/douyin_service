@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from app.models.models import (
     DownloadTask,
@@ -20,6 +20,7 @@ from app.models.models import (
 )
 from app.services.douyin_errors import ERROR_INFO, classify_stored_task_error
 from app.services.media_library import media_query
+from app.services.task_scope import visible_platform_tasks
 
 ALLOWED_WINDOWS = (7, 30, 90, 180, 365)
 TOP_AUTHOR_LIMIT = 10
@@ -80,18 +81,13 @@ def top_authors_statement(since: datetime | None = None, limit: int = TOP_AUTHOR
     ).limit(limit)
 
 
-def _visible_platform_tasks():
-    # 与统一任务列表一致：Instagram 的内部扫描任务不算文件下载任务。
-    return or_(PlatformDownloadTask.platform != "instagram", PlatformDownloadTask.source_type == "work")
-
-
 def task_status_statements() -> dict[str, Any]:
     return {
         "douyin": select(DownloadTask.status, func.count(DownloadTask.id)).group_by(DownloadTask.status),
         "x": select(XDownloadTask.status, func.count(XDownloadTask.id)).group_by(XDownloadTask.status),
         "generic": select(
             PlatformDownloadTask.platform, PlatformDownloadTask.status, func.count(PlatformDownloadTask.id),
-        ).where(_visible_platform_tasks()).group_by(PlatformDownloadTask.platform, PlatformDownloadTask.status),
+        ).where(visible_platform_tasks()).group_by(PlatformDownloadTask.platform, PlatformDownloadTask.status),
     }
 
 
@@ -107,7 +103,7 @@ def failure_statements() -> dict[str, Any]:
         "generic": select(
             PlatformDownloadTask.platform, PlatformDownloadTask.error_code, func.count(PlatformDownloadTask.id),
         ).where(
-            PlatformDownloadTask.status == "failed", _visible_platform_tasks(),
+            PlatformDownloadTask.status == "failed", visible_platform_tasks(),
         ).group_by(PlatformDownloadTask.platform, PlatformDownloadTask.error_code),
     }
 

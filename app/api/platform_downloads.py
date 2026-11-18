@@ -36,6 +36,7 @@ from app.models.schemas import (
     XhsLoginQrResponse,
 )
 from app.services.media_paths import resolve_media_path
+from app.services.task_scope import visible_platform_tasks
 from app.services.platform_credentials import (
     get_platform_credential_status,
 )
@@ -161,9 +162,7 @@ async def list_tasks(
     db: AsyncSession = Depends(get_async_db),
 ):
     spec = _require_platform(platform)
-    conditions = [PlatformDownloadTask.platform == spec.id]
-    if spec.id == "instagram":
-        conditions.append(PlatformDownloadTask.source_type == "work")
+    conditions = [visible_platform_tasks(spec.id)]
     if status:
         conditions.append(PlatformDownloadTask.status == status)
     search_text = str(q or "").strip()

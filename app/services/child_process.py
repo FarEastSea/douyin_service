@@ -18,6 +18,7 @@ import psutil
 
 
 _CONTAINER_ENV = "DOUYIN_DOWNLOAD_CONTAINER"
+_CONTAINER_OPTION = "douyin_download_container"
 _processes: dict[int, subprocess.Popen] = {}
 _processes_lock = threading.Lock()
 
@@ -136,28 +137,33 @@ def start_download_process(command: list[str], **kwargs) -> subprocess.Popen:
     """先启动等待登记的 gate；调用方登记成功后才放行实际下载器。"""
     nonce = uuid4().hex
     supplied_environment = kwargs.pop("env", None)
-    environment = dict(os.environ if supplied_environment is None else supplied_environment)
-    environment[_CONTAINER_ENV] = nonce
-    if kwargs.get("text") or kwargs.get("encoding"):
-        environment["PYTHONIOENCODING"] = kwargs.get("encoding", "utf-8")
+    encoding = kwargs.get("encoding", "utf-8") if kwargs.get("text") or kwargs.get("encoding") else None
     job = None
     process = None
     try:
-        launcher = [sys.executable, str(Path(__file__).resolve()), "--owned-child", json.dumps(command)]
+        # 与托管 Celery 使用相同的继承环境启动方式。显式 env 会被宝塔拦截。
+        # gate 用随机解释器参数证明身份；私有环境通过放行管道传入。
+        launcher = [sys.executable, "-X", f"{_CONTAINER_OPTION}={nonce}",
+                    str(Path(__file__).resolve()), "--owned-child", json.dumps(command)]
         if os.name == "nt":
             job_name = "Local\\DouyinDownload-" + nonce
             job = _WindowsJob(job_name, create=True)
             kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
-            process = subprocess.Popen(launcher, env=environment, stdin=subprocess.PIPE, **kwargs)
+            process = subprocess.Popen(launcher, stdin=subprocess.PIPE, **kwargs)
             job.assign(process)
         else:
-            process = subprocess.Popen(launcher, env=environment, stdin=subprocess.PIPE, start_new_session=True, **kwargs)
+            process = subprocess.Popen(launcher, stdin=subprocess.PIPE, start_new_session=True, **kwargs)
         identity = {"version": 1, "pid": process.pid,
                     "created_at": psutil.Process(process.pid).create_time(), "nonce": nonce,
                     "kind": "windows_job" if job else "posix_group",
                     "container": job_name if job else process.pid}
         process._download_identity = identity
         process._download_job = job
+        process._download_environment = {
+            "environment": ({os.fsdecode(key): os.fsdecode(value) for key, value in supplied_environment.items()}
+                            if supplied_environment is not None else None),
+            "encoding": encoding,
+        }
         with _processes_lock:
             _processes[process.pid] = process
         return process
@@ -203,7 +209,8 @@ def download_process_identity(process_id: int, token: str, *, platform=None, tas
 def release_download_process(process: subprocess.Popen) -> None:
     """所有登记和执行权检查通过后放行；登记异常时 gate 不会写媒体文件。"""
     if process.stdin and not process.stdin.closed:
-        process.stdin.write("1" if process.text_mode else b"1")
+        payload = "1" + json.dumps(process._download_environment, ensure_ascii=True) + "\n"
+        process.stdin.write(payload if process.text_mode else payload.encode("ascii"))
         process.stdin.flush()
         process.stdin.close()
 
@@ -242,6 +249,16 @@ def retire_download_identity(identity: dict) -> None:
         pass
 
 
+def _gate_nonce(command: list[str]) -> str | None:
+    """尚未放行的 gate 没有环境标记，核验其解释器参数和固定入口。"""
+    if len(command) != 6 or command[1] != "-X" or command[4] != "--owned-child":
+        return None
+    if Path(command[3]).resolve() != Path(__file__).resolve():
+        return None
+    prefix = _CONTAINER_OPTION + "="
+    return command[2][len(prefix):] if command[2].startswith(prefix) else None
+
+
 def _posix_members(identity: dict) -> list[psutil.Process]:
     group = int(identity["container"])
     members = []
@@ -249,7 +266,8 @@ def _posix_members(identity: dict) -> list[psutil.Process]:
         try:
             if os.getpgid(process.pid) != group or process.info["status"] == psutil.STATUS_ZOMBIE:
                 continue
-            if (process.environ().get(_CONTAINER_ENV) != identity["nonce"]
+            if ((_gate_nonce(process.cmdline()) != identity["nonce"]
+                 and process.environ().get(_CONTAINER_ENV) != identity["nonce"])
                     or process.info["create_time"] + .01 < float(identity["created_at"])):
                 raise DownloadProcessError("下载进程组身份不匹配，已拒绝发送信号")
             members.append(process)
@@ -418,9 +436,18 @@ def close_download_process(process: subprocess.Popen | None) -> None:
 def _run_owned_child() -> int:
     if sys.stdin.buffer.read(1) != b"1":
         return 125
+    options = json.loads(sys.stdin.buffer.readline())
+    environment = options["environment"]
+    if environment is not None:
+        os.environ.clear()
+        os.environ.update(environment)
+    os.environ[_CONTAINER_ENV] = sys._xoptions[_CONTAINER_OPTION]
+    if options["encoding"]:
+        os.environ["PYTHONIOENCODING"] = options["encoding"]
     command = json.loads(sys.argv[2])
     if os.name != "nt":
-        os.execvpe(command[0], command, os.environ)
+        # execvp 继承 gate 已设置的环境，不使用显式环境参数。
+        os.execvp(command[0], command)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                creationflags=subprocess.CREATE_NO_WINDOW)
     return process.wait()

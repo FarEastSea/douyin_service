@@ -18,6 +18,7 @@ from app.models.database import create_isolated_async_engine
 from app.models.models import DownloadTask, PlatformDownloadTask, XDownloadTask
 from app.services.unified_task_operations import TaskOperationError, operate_task, parse_task_key
 from app.services.download_state_lock import lock_task_graph
+from app.services.task_scope import visible_platform_tasks
 
 
 PREFIX = "operations:failed-retry:"
@@ -40,9 +41,7 @@ def failed_task_statement(platform: str = ""):
                           .where(XDownloadTask.status == "failed"))
     if platform not in {"douyin", "x"}:
         statement = select(PlatformDownloadTask.platform.label("platform"), PlatformDownloadTask.id.label("id"))
-        statement = statement.where(PlatformDownloadTask.status == "failed")
-        if platform:
-            statement = statement.where(PlatformDownloadTask.platform == platform)
+        statement = statement.where(PlatformDownloadTask.status == "failed", visible_platform_tasks(platform))
         statements.append(statement)
     combined = statements[0] if len(statements) == 1 else union_all(*statements)
     return combined
@@ -194,7 +193,8 @@ async def run_job(job_id: str, token: str) -> dict:
                         model = DownloadTask if platform == "douyin" else XDownloadTask if platform == "x" else PlatformDownloadTask
                         conditions = [model.id == task_id]
                         if model == PlatformDownloadTask:
-                            conditions.append(model.platform == platform)
+                            # 旧作业快照也必须遵守当前任务范围，不能操作内部扫描任务。
+                            conditions.append(visible_platform_tasks(platform))
                         if model is DownloadTask:
                             task = await lock_task_graph(db, task_id)
                             task_status = task.status if task is not None else None
