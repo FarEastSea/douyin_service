@@ -288,19 +288,27 @@ onBeforeUnmount(() => {
             <dd>{{ task.engine_name }}</dd>
           </div>
         </dl>
-        <a
-          v-if="task.source_url"
-          class="text-button"
-          :href="task.source_url"
-          target="_blank"
-          rel="noopener noreferrer"
-          >打开来源</a
-        ><RouterLink
-          v-if="task.work_id && task.author_id"
-          class="text-button"
-          :to="`/authors/douyin/${task.author_id}/works?work=${task.work_id}`"
-          >查看作者作品</RouterLink
-        ><IssueDetail
+        <div
+          v-if="task.source_url || (task.work_id && task.author_id) || task.status === 'failed'"
+          class="task-inspector-actions"
+        >
+          <a
+            v-if="task.source_url"
+            class="text-button"
+            :href="task.source_url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >打开来源</a>
+          <RouterLink
+            v-if="task.work_id && task.author_id"
+            class="text-button"
+            :to="`/authors/douyin/${task.author_id}/works?work=${task.work_id}`"
+          >查看作者作品</RouterLink>
+          <button v-if="task.status === 'failed'" class="text-button" @click="copyDiagnostic">
+            复制任务诊断
+          </button>
+        </div>
+        <IssueDetail
           v-if="task.error_message"
           :message="task.error_message"
           :code="task.error_code"
@@ -308,9 +316,7 @@ onBeforeUnmount(() => {
         <p v-if="task.error_action" class="inline-note">
           {{ task.error_action }}
         </p>
-        <button class="text-button" @click="copyDiagnostic">
-          复制任务诊断
-        </button></template
+        </template
       ><template v-else-if="tab === 'files'"
         ><button v-if="task.preview_endpoint" class="btn" @click="previewTask">
           预览下载文件</button

@@ -1799,6 +1799,12 @@ details.diagnostic-box[open] > summary::before {
 .inspector-body > .view-tabs > * {
   flex: 1;
 }
+.task-inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
 .author-detail-actions {
   display: flex;
   flex-wrap: wrap;
