@@ -187,16 +187,18 @@ app = FastAPI(
 app.state.bootstrap_status = {"ready": False, "missing": [], "errors": []}
 app.state.degraded_mode = True
 register_exception_handlers(app)
-# 禁用 API 响应缓存，避免页面显示过时数据
+# API 和前端入口须从当前发布获取。
 @app.middleware("http")
-async def no_cache_api_responses(request: Request, call_next):
+async def no_cache_responses(request: Request, call_next):
     from pathlib import Path
     maintenance = Path(__file__).resolve().parent / ".runtime" / "deployment-maintenance"
     if maintenance.exists() and request.method not in {"GET", "HEAD", "OPTIONS"}:
         return JSONResponse(status_code=503, content={"success": False, "detail": "系统正在发布，请稍后重试"},
                             headers={"Retry-After": "10"})
     response = await call_next(request)
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") or request.url.path in {
+        "/", "/static/app/index.html",
+    }:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
