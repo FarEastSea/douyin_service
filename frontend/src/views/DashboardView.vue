@@ -285,7 +285,7 @@ onBeforeUnmount(() => {
     <PageHeader title="总览" :description="greeting" :busy="loading" :updated-at="refreshedAt?.toISOString()" refreshable @refresh="load">
       <button class="btn primary" @click="windowNewDownload"><Download :size="16" />新建下载</button>
     </PageHeader>
-    <div v-if="errors.length" class="load-error-banner" role="status"><AlertCircle :size="17" /><span>{{ errors.join('、') }}暂不可用，当前显示上次读取的结果。未知状态以“-”表示。</span><button class="text-button" @click="load">重试</button></div>
+    <div v-if="errors.length" class="load-error-banner" role="status"><AlertCircle :size="17" /><span>{{ errors.join('、') }}暂不可用，当前显示上次读取的结果。未知状态以“-”表示。</span><button class="btn ghost compact" @click="load">重试</button></div>
     <StateView v-if="loading && !refreshedAt" loading />
     <template v-else>
       <section class="kpi-grid" aria-label="全部平台任务摘要">
@@ -313,7 +313,7 @@ onBeforeUnmount(() => {
       </section>
       <div class="dashboard-lead">
         <section class="dashboard-card overview-queue">
-          <div class="section-heading"><div><h2>下载队列</h2><p class="muted">实时传输中的任务</p></div><RouterLink to="/operations/tasks?status=downloading">查看队列 <ArrowRight :size="14" /></RouterLink></div>
+          <div class="section-heading"><div><h2>下载队列</h2><p class="muted">实时传输中的任务</p></div><RouterLink class="btn ghost compact" to="/operations/tasks?status=downloading">查看队列 <ArrowRight :size="14" /></RouterLink></div>
           <div v-if="activeTasks.length" class="compact-records active-download-records">
             <RouterLink v-for="task in activeTasks.slice(0,4)" :key="task.key" :to="`/operations/tasks?task_key=${encodeURIComponent(task.key)}`">
               <MediaThumbnail :src="task.thumbnail_endpoint || task.cover_url" :type="task.media_type" />
@@ -330,31 +330,31 @@ onBeforeUnmount(() => {
             <p v-else class="normal-note">{{ errors.length ? '部分状态未确认，刷新后再核对。' : '当前没有运行阻塞。' }}</p>
           </section>
           <section class="dashboard-card overview-subscriptions">
-            <div class="section-heading"><h2>订阅检查</h2><RouterLink to="/automation">运行记录 <ArrowRight :size="14" /></RouterLink></div>
-            <div v-if="report" class="automation-overview"><div class="automation-overview-head"><StatusIndicator :status="report.status" /><time>{{ formatTime(report.started_at) }}</time></div><p>{{ reportSummary(report) }}</p><RouterLink v-if="report.failed_authors + report.warning_authors" to="/automation" class="danger">{{report.failed_authors + report.warning_authors}} 位作者需核对</RouterLink></div>
+            <div class="section-heading"><h2>订阅检查</h2><RouterLink class="btn ghost compact" to="/automation">运行记录 <ArrowRight :size="14" /></RouterLink></div>
+            <div v-if="report" class="automation-overview"><div class="automation-overview-head"><StatusIndicator :status="report.status" /><time>{{ formatTime(report.started_at) }}</time></div><p>{{ reportSummary(report) }}</p><RouterLink v-if="report.failed_authors + report.warning_authors" to="/automation" class="btn compact danger">{{report.failed_authors + report.warning_authors}} 位作者需核对</RouterLink></div>
             <p v-else class="inline-note">{{ errors.includes('订阅检查') ? '检查状态未确认' : '暂无运行记录，订阅作者后会定期检查更新。' }}</p>
             <RouterLink class="subscription-manage" to="/authors/douyin"><Users :size="15" />管理作者订阅<ArrowRight :size="14" /></RouterLink>
           </section>
         </aside>
       </div>
       <section class="dashboard-card recent-library">
-        <div class="section-heading"><div><h2>最近入库</h2><p class="muted">{{ errors.includes('媒体库') ? '读取失败，显示上次结果' : freshness['媒体库'] ? '更新于 '+formatTime(freshness['媒体库']) : '已保存的媒体文件' }}</p></div><RouterLink to="/library">打开媒体库 <ArrowRight :size="14" /></RouterLink></div>
+        <div class="section-heading"><div><h2>最近入库</h2><p class="muted">{{ errors.includes('媒体库') ? '读取失败，显示上次结果' : freshness['媒体库'] ? '更新于 '+formatTime(freshness['媒体库']) : '已保存的媒体文件' }}</p></div><RouterLink class="btn ghost compact" to="/library">打开媒体库 <ArrowRight :size="14" /></RouterLink></div>
         <div v-if="media.length" class="recent-media-grid"><article v-for="item in media" :key="item.key"><button class="recent-cover" :disabled="item.available === false" :aria-label="'预览 '+(item.title || item.filename)" @click="previewMedia(item)"><MediaThumbnail :src="endpoint(item.thumbnail_endpoint) || (item.media_type === 'image' ? endpoint(item.preview_endpoint) : '')" :type="item.media_type" /><span v-if="item.available === false" class="media-unavailable">文件不可用</span><span class="recent-caption"><strong :title="item.title || item.filename">{{item.title || item.filename}}</strong><small>{{item.author_name || platformNames[item.platform]}}</small></span></button></article></div>
         <StateView v-else :error="errors.includes('媒体库') ? '媒体库暂时无法读取' : ''" title="还没有入库媒体" description="下载完成的内容会出现在这里。" :rows="2" @retry="load"><button class="btn" @click="windowNewDownload">添加下载</button></StateView>
       </section>
       <div class="dashboard-history">
         <section class="dashboard-card overview-failures">
-          <div class="section-heading"><h2>失败待复核 <span class="error-count">{{ counts === null ? '-' : failedCount.toLocaleString() }}</span></h2><RouterLink to="/operations/tasks?status=failed">查看全部 <ArrowRight :size="14" /></RouterLink></div>
+          <div class="section-heading"><h2>失败待复核 <span class="error-count">{{ counts === null ? '-' : failedCount.toLocaleString() }}</span></h2><RouterLink class="btn ghost compact" to="/operations/tasks?status=failed">查看全部 <ArrowRight :size="14" /></RouterLink></div>
           <div v-if="failedTasks.length" class="compact-records"><RouterLink v-for="task in failedTasks.slice(0,3)" :key="task.key" :to="`/operations/tasks?status=failed&task_key=${encodeURIComponent(task.key)}`"><MediaThumbnail :src="task.thumbnail_endpoint || task.cover_url" :type="task.media_type" /><span class="task-title"><strong>{{ task.source_label || '任务 '+task.id }}</strong><small class="danger-text">{{task.error_message || task.author_name || task.error_code || '失败原因见详情'}}</small></span><span class="row-recovery">查看原因 <ArrowRight :size="14" /></span></RouterLink></div>
           <p v-else class="inline-note">{{ errors.includes('失败任务') ? '失败记录暂时无法读取。' : '没有待复核的失败任务。' }}</p>
         </section>
         <section class="dashboard-card overview-completed">
-          <div class="section-heading"><h2>最近完成</h2><RouterLink to="/operations/tasks?status=completed">查看全部 <ArrowRight :size="14" /></RouterLink></div>
+          <div class="section-heading"><h2>最近完成</h2><RouterLink class="btn ghost compact" to="/operations/tasks?status=completed">查看全部 <ArrowRight :size="14" /></RouterLink></div>
           <div v-if="tasks.length" class="compact-records"><RouterLink v-for="task in tasks.slice(0,3)" :key="task.key" :to="`/operations/tasks?task_key=${encodeURIComponent(task.key)}`"><span class="completed-check"><CircleCheck :size="16" /></span><span class="task-title"><strong>{{ task.source_label || '任务 '+task.id }}</strong><small>{{platformNames[task.platform]}}<span v-if="task.author_name"> · {{task.author_name}}</span> · {{task.file_count}} 个文件</small></span><time>{{formatTime(task.completed_at || task.created_at)}}</time></RouterLink></div>
           <p v-else class="inline-note">{{ errors.includes('最近完成') ? '最近完成记录未确认。' : '还没有完成的任务。' }}</p>
         </section>
       </div>
     </template>
-    <footer class="dashboard-footer"><HardDrive :size="15" /><span>存储巡检{{errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? '更新于 '+formatTime(storage.updated_at) : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录'}}</span><RouterLink to="/operations/maintenance/storage">打开存储维护 <ArrowRight :size="14" /></RouterLink><span v-if="disk?.available" class="dashboard-disk" :class="{ 'danger-text': disk.low }">磁盘剩余 {{ bytes(disk.free_bytes) }}（已用 {{ disk.used_percent }}%）</span><RouterLink to="/insights">查看洞察 <ArrowRight :size="14" /></RouterLink></footer>
+    <footer class="dashboard-footer"><HardDrive :size="15" /><span>存储巡检{{errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? '更新于 '+formatTime(storage.updated_at) : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录'}}</span><RouterLink class="btn ghost compact" to="/operations/maintenance/storage">打开存储维护 <ArrowRight :size="14" /></RouterLink><span v-if="disk?.available" class="dashboard-disk" :class="{ 'danger-text': disk.low }">磁盘剩余 {{ bytes(disk.free_bytes) }}（已用 {{ disk.used_percent }}%）</span><RouterLink class="btn ghost compact" to="/insights">查看洞察 <ArrowRight :size="14" /></RouterLink></footer>
   </div>
 </template>

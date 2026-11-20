@@ -228,7 +228,7 @@ onBeforeUnmount(() => {
     /><template v-else
       ><div v-if="error" class="load-error-banner" role="alert">
         <span>{{ error }}。显示上次读取的数据。</span
-        ><button class="text-button" @click="refresh">重试</button>
+        ><button class="btn ghost compact" @click="refresh">重试</button>
       </div>
       <div class="detail-status">
         <StatusIndicator :status="task.status" /><span
@@ -290,21 +290,21 @@ onBeforeUnmount(() => {
         </dl>
         <div
           v-if="task.source_url || (task.work_id && task.author_id) || task.status === 'failed'"
-          class="task-inspector-actions"
+          class="detail-links"
         >
           <a
             v-if="task.source_url"
-            class="text-button"
+            class="btn ghost"
             :href="task.source_url"
             target="_blank"
             rel="noopener noreferrer"
           >打开来源</a>
           <RouterLink
             v-if="task.work_id && task.author_id"
-            class="text-button"
+            class="btn ghost"
             :to="`/authors/douyin/${task.author_id}/works?work=${task.work_id}`"
           >查看作者作品</RouterLink>
-          <button v-if="task.status === 'failed'" class="text-button" @click="copyDiagnostic">
+          <button v-if="task.status === 'failed'" class="btn ghost" @click="copyDiagnostic">
             复制任务诊断
           </button>
         </div>
@@ -332,13 +332,13 @@ onBeforeUnmount(() => {
             <span>{{ file.filename || file.title || "媒体文件" }}</span
             ><button
               v-if="file.preview_url"
-              class="text-button"
+              class="btn ghost compact"
               @click="previewFile(file)"
             >
               预览</button
             ><a
               v-if="file.download_url"
-              class="text-button"
+              class="btn ghost compact"
               :href="file.download_url"
               >下载</a
             >
@@ -352,7 +352,7 @@ onBeforeUnmount(() => {
           title="暂无日志"
           @retry="loadResource"
         /><template v-else
-          ><button class="text-button" @click="copyDiagnostic">
+          ><button class="btn ghost compact" @click="copyDiagnostic">
             复制日志与诊断
           </button>
           <pre class="log-output">{{ logs.join("\n") }}</pre>

@@ -106,7 +106,7 @@ onBeforeUnmount(() => { ++sequence; window.clearTimeout(searchTimer); window.rem
       </div>
       <div v-if="failures.length" class="load-error-banner" role="alert">
         <span>{{ failures.length }} 项未恢复：{{ failures.map((item) => `${failureLabels[item.key] || item.key}（${item.message}）`).join("；") }}</span>
-        <button class="text-button" @click="failures = []">知道了</button>
+        <button class="btn ghost compact" @click="failures = []">知道了</button>
       </div>
       <StateView v-if="!items.length" :loading="loading" :error="error" :title="search || platform ? '没有匹配的排除项目' : '没有排除项目'" description="删除媒体时勾选“阻止订阅重新下载”的项目会出现在这里。" @retry="load" />
       <div v-else class="table-shell">
@@ -125,7 +125,7 @@ onBeforeUnmount(() => { ++sequence; window.clearTimeout(searchTimer); window.rem
               <td data-label="范围">{{ kindLabels[item.kind] }}</td>
               <td data-label="排除时间">{{ item.excluded_at ? dateTime(item.excluded_at) : "—" }}</td>
               <td class="actions-col">
-                <button v-if="item.restorable" class="text-button" :disabled="busy" @click="restore([item.key])">恢复下载</button>
+                <button v-if="item.restorable" class="btn ghost compact" :disabled="busy" @click="restore([item.key])">恢复下载</button>
                 <span v-else class="muted exclusion-unavailable" title="删除时未能记录下载归档位置">无法自动恢复</span>
               </td>
             </tr>

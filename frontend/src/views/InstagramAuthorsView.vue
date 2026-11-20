@@ -236,7 +236,7 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++coll
       <div><strong>{{ sessionIssue.title }}</strong><small>{{ sessionIssue.text }}</small></div>
       <RouterLink v-if="sessionIssue.action" class="btn ghost" to="/settings/account-instagram">{{ sessionIssue.action }}</RouterLink>
     </div>
-    <div v-if="error && authors.length" class="load-error-banner" role="alert"><span>{{ error }}</span><button class="text-button" @click="load">重试</button></div>
+    <div v-if="error && authors.length" class="load-error-banner" role="alert"><span>{{ error }}</span><button class="btn ghost compact" @click="load">重试</button></div>
     <FilterToolbar :active="subscribed ? (subscribed === 'true' ? '已订阅' : '已暂停') : ''" @clear="subscribed=''; filters()">
       <template #search><label class="search"><Search :size="16" /><input v-model="search" placeholder="搜索用户名、名称或 ID" aria-label="搜索 Instagram 作者" @input="searchInput" /></label></template>
       <select v-model="subscribed" aria-label="订阅状态" @change="filters"><option value="">全部订阅</option><option value="true">已订阅</option><option value="false">已暂停</option></select>
@@ -244,7 +244,7 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++coll
     <div v-if="selectedIds.length" class="selection-bar" role="region" aria-label="批量操作">
       <span>已选择 {{ selectedIds.length }} 位作者</span>
       <button class="btn ghost" :disabled="busy" @click="mutate('/authors/batch', {ids:selectedIds,is_subscribed:false}, '已暂停所选作者')">暂停订阅</button>
-      <button class="text-button" @click="selectedIds = []">取消选择</button>
+      <button class="btn ghost compact" @click="selectedIds = []">取消选择</button>
     </div>
     <StateView v-if="!authors.length" :loading="loading" :error="error" :title="search || subscribed ? '没有匹配的作者' : '还没有订阅 Instagram 作者'" description="粘贴作者主页或用户名即可订阅；身份确认后会按请求预算分批补齐历史。" @retry="load" />
     <div v-else class="table-shell">
@@ -294,7 +294,7 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++coll
             <div class="detail-links">
               <button v-if="kindsDirty" class="btn primary" :disabled="busy || !kinds.length" @click="mutate(`/authors/${detail.id}/subscription`, {is_subscribed:true,kinds}, detail.is_subscribed ? '采集内容已更新' : '已恢复订阅')">{{ detail.is_subscribed ? '保存采集内容' : '恢复订阅' }}</button>
               <button class="btn ghost" :disabled="busy || !detail.is_subscribed" @click="scan(detail)">立即检查</button>
-              <button v-if="detail.is_subscribed" class="text-button" :disabled="busy" @click="mutate(`/authors/${detail.id}/subscription`, {is_subscribed:false}, '已暂停订阅')">暂停订阅</button>
+              <button v-if="detail.is_subscribed" class="btn ghost compact" :disabled="busy" @click="mutate(`/authors/${detail.id}/subscription`, {is_subscribed:false}, '已暂停订阅')">暂停订阅</button>
             </div>
           </section>
           <section class="ig-section">
@@ -316,12 +316,12 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++coll
             </table>
             <div class="detail-links">
               <button class="btn ghost" :disabled="busy || !detail.is_subscribed" @click="mutate(`/authors/${detail.id}/history`,{enabled:true}, '历史补齐已排入调度')">继续 / 重新补齐历史</button>
-              <button class="text-button" :disabled="busy" @click="mutate(`/authors/${detail.id}/history`,{enabled:false}, '已暂停历史补齐')">暂停历史补齐</button>
+              <button class="btn ghost compact" :disabled="busy" @click="mutate(`/authors/${detail.id}/history`,{enabled:false}, '已暂停历史补齐')">暂停历史补齐</button>
             </div>
           </section>
           <div class="detail-links ig-links">
-            <a class="text-button" :href="detail.profile_url" target="_blank" rel="noreferrer"><ExternalLink :size="14" />打开 Instagram 主页</a>
-            <RouterLink class="text-button" :to="{path:'/library',query:{platform:'instagram',author:detail.nickname || detail.username}}">查看本地媒体</RouterLink>
+            <a class="btn ghost compact" :href="detail.profile_url" target="_blank" rel="noreferrer"><ExternalLink :size="14" />打开 Instagram 主页</a>
+            <RouterLink class="btn ghost compact" :to="{path:'/library',query:{platform:'instagram',author:detail.nickname || detail.username}}">查看本地媒体</RouterLink>
           </div>
         </template>
         <template v-else-if="tab === 'works'">
@@ -332,8 +332,8 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++coll
               <div class="ig-work-copy"><strong :title="work.title || ''">{{ work.title || '无标题' }}</strong><small>{{ utc(work.published_at) }}<template v-if="work.expected_media_count"> · {{ work.expected_media_count }} 个媒体</template></small></div>
               <div class="ig-work-actions">
                 <template v-if="work.download_task_id">
-                  <button class="text-button" @click="preview(work.download_task_id)">预览</button>
-                  <RouterLink class="text-button" :to="{path:'/operations/tasks',query:{task_key:`instagram:${work.download_task_id}`}}">任务</RouterLink>
+                  <button class="btn ghost compact" @click="preview(work.download_task_id)">预览</button>
+                  <RouterLink class="btn ghost compact" :to="{path:'/operations/tasks',query:{task_key:`instagram:${work.download_task_id}`}}">任务</RouterLink>
                 </template>
                 <span v-else class="muted">待下载</span>
               </div>
@@ -346,7 +346,7 @@ onBeforeUnmount(() => { ++loadSequence; ++detailSequence; ++workSequence; ++coll
           <ul v-else class="ig-work-list">
             <li v-for="collection in collections" :key="collection.id">
               <div class="ig-work-copy"><strong>{{ collection.title || '未命名精选' }}</strong><small>已发现 {{ collection.work_ids.length }} 条 Story</small></div>
-              <div class="ig-work-actions"><a class="text-button" :href="collection.source_url" target="_blank" rel="noreferrer">查看原精选</a></div>
+              <div class="ig-work-actions"><a class="btn ghost compact" :href="collection.source_url" target="_blank" rel="noreferrer">查看原精选</a></div>
             </li>
           </ul>
           <Pager v-if="collectionTotal" :page="collectionPage" :pages="collectionPages" :total="collectionTotal" @change="collectionPage=$event; loadCollections().catch(e=>detailError=e.message)" />

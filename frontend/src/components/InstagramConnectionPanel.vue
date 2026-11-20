@@ -59,11 +59,11 @@ const labels: Record<string, string> = { ready: '检测通过', unchecked: '尚�
 <template>
   <section class="setting-section instagram-session">
     <header><div><h2>登录会话</h2><p>在正常浏览器登录 Instagram，粘贴 Cookie 或导入导出文件，然后保存并检测。</p></div><StatusIndicator :status="status?.status === 'ready' ? 'success' : 'warning'" :label="testing ? '检测中' : labels[status?.status] || '读取状态中'" /></header>
-    <div v-if="loadError" class="load-error-banner" role="alert"><AlertCircle :size="18" /><span>{{ loadError }}</span><button class="text-button" @click="load">重新读取状态</button></div>
+    <div v-if="loadError" class="load-error-banner" role="alert"><AlertCircle :size="18" /><span>{{ loadError }}</span><button class="btn ghost compact" @click="load">重新读取状态</button></div>
     <div v-if="feedback" class="instagram-feedback" :data-tone="feedback.tone" :role="feedback.tone === 'error' ? 'alert' : 'status'" aria-live="polite">
       <AlertCircle v-if="feedback.tone === 'error'" :size="20" /><CheckCircle2 v-else-if="feedback.tone === 'success'" :size="20" /><LoaderCircle v-else-if="testing" :size="20" /><Info v-else :size="20" />
       <div><strong>{{ feedback.text }}</strong><small v-if="feedback.code">错误代码：{{ feedback.code }}</small></div>
-      <RouterLink v-if="status?.test_task" class="text-button" :to="{path:'/automation',query:{run:status.test_run_key || undefined}}">查看运行记录</RouterLink>
+      <RouterLink v-if="status?.test_task" class="btn ghost compact" :to="{path:'/automation',query:{run:status.test_run_key || undefined}}">查看运行记录</RouterLink>
     </div>
     <div class="instagram-cookie-toolbar"><div><strong>Cookie</strong><small>{{ status?.configured ? '已加密保存，内容不会回显' : '尚未保存登录会话' }}</small></div><button class="btn ghost" type="button" :aria-expanded="expanded" aria-controls="instagram-cookie-editor" @click="expanded = !expanded"><ChevronDown :size="16" />{{ expanded ? '收起' : '更新 Cookie' }}</button></div>
     <div v-show="expanded" id="instagram-cookie-editor" class="instagram-cookie-editor">

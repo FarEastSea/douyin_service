@@ -181,7 +181,7 @@ onBeforeUnmount(() => { sequence++; controller?.abort(); });
     <nav class="view-tabs" aria-label="统计窗口">
       <button v-for="value in WINDOWS" :key="value" :class="{ active: days === value }" :aria-pressed="days === value" @click="selectWindow(value)">{{ value === 365 ? '近一年' : `近 ${value} 天` }}</button>
     </nav>
-    <div v-if="error && data" class="load-error-banner" role="alert"><AlertCircle :size="17" /><span>{{ error }}，当前显示上次读取的结果。</span><button class="text-button" @click="load()">重试</button></div>
+    <div v-if="error && data" class="load-error-banner" role="alert"><AlertCircle :size="17" /><span>{{ error }}，当前显示上次读取的结果。</span><button class="btn ghost compact" @click="load()">重试</button></div>
     <StateView v-if="!data" :loading="loading" :error="error" title="还没有可统计的数据" description="下载完成的媒体会计入这里。" @retry="load()" />
     <template v-else>
       <section class="kpi-grid" aria-label="关键指标">
@@ -243,12 +243,12 @@ onBeforeUnmount(() => { sequence++; controller?.abort(); });
 
       <div class="insight-columns">
         <section class="dashboard-card">
-          <div class="section-heading"><div><h2>占用最多的作者</h2><p class="muted">全部时间，点击查看该作者的媒体</p></div><RouterLink to="/library?sort=size_desc">最大的文件 <ArrowRight :size="14" /></RouterLink></div>
+          <div class="section-heading"><div><h2>占用最多的作者</h2><p class="muted">全部时间，点击查看该作者的媒体</p></div><RouterLink class="btn ghost compact" to="/library?sort=size_desc">最大的文件 <ArrowRight :size="14" /></RouterLink></div>
           <RankBars v-if="authorBars.length" :items="authorBars" label="占用最多的作者" />
           <p v-else class="inline-note">还没有带作者信息的媒体。</p>
         </section>
         <section class="dashboard-card">
-          <div class="section-heading"><div><h2>订阅产出</h2><p class="muted">订阅检查发现的新作品与保存的文件</p></div><RouterLink to="/automation">运行记录 <ArrowRight :size="14" /></RouterLink></div>
+          <div class="section-heading"><div><h2>订阅产出</h2><p class="muted">订阅检查发现的新作品与保存的文件</p></div><RouterLink class="btn ghost compact" to="/automation">运行记录 <ArrowRight :size="14" /></RouterLink></div>
           <dl class="insight-facts">
             <div><dt>抖音检查</dt><dd>{{ count(data.subscriptions.runs) }} 次</dd></div>
             <div><dt>新作品</dt><dd>{{ count(data.subscriptions.new_works) }}</dd></div>
@@ -262,7 +262,7 @@ onBeforeUnmount(() => { sequence++; controller?.abort(); });
 
       <div class="insight-columns">
         <section class="dashboard-card">
-          <div class="section-heading"><div><h2>任务结果</h2><p class="muted">各平台当前保留的任务记录</p></div><RouterLink to="/operations/tasks">全部任务 <ArrowRight :size="14" /></RouterLink></div>
+          <div class="section-heading"><div><h2>任务结果</h2><p class="muted">各平台当前保留的任务记录</p></div><RouterLink class="btn ghost compact" to="/operations/tasks">全部任务 <ArrowRight :size="14" /></RouterLink></div>
           <div v-if="data.tasks.by_platform.length" class="chart-table-scroll"><table class="insight-table">
             <thead><tr><th scope="col">平台</th><th v-for="status in taskStatuses" :key="status" scope="col">{{ statusPresentation(status).label }}</th><th scope="col">合计</th></tr></thead>
             <tbody><tr v-for="item in data.tasks.by_platform" :key="item.platform">

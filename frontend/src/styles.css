@@ -761,17 +761,8 @@ progress::-moz-progress-bar {
   margin-top: 2px;
   font-size: 12.5px;
 }
-.section-heading > a {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.section-heading > .btn {
   flex-shrink: 0;
-  color: var(--text-2);
-  font-size: 13px;
-  font-weight: 520;
-}
-.section-heading > a:hover {
-  color: var(--text);
 }
 .section-heading > span {
   color: var(--text-3);
@@ -862,21 +853,6 @@ progress::-moz-progress-bar {
 .icon-btn:hover:not(:disabled) {
   background: var(--hover);
   color: var(--text);
-}
-.text-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 560;
-  white-space: nowrap;
-}
-.text-button:hover:not(:disabled) {
-  color: var(--accent-hover);
-}
-.text-button.danger {
-  color: var(--danger);
 }
 .record-link {
   min-width: 0;
@@ -1097,6 +1073,16 @@ progress::-moz-progress-bar {
   width: 100%;
   color: var(--danger);
 }
+.field-error-summary > .btn {
+  height: auto;
+  min-height: 30px;
+  max-width: 100%;
+  padding-block: 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  text-align: left;
+}
 .risk-banner {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto auto;
@@ -1313,7 +1299,7 @@ details.diagnostic-box[open] > summary::before {
   font-family: var(--font-mono);
   font-size: 12px;
 }
-.issue-body > .text-button {
+.issue-body > .btn {
   justify-self: start;
 }
 .job-report,
@@ -1786,9 +1772,7 @@ details.diagnostic-box[open] > summary::before {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.inspector-body > .text-button,
 .inspector-body > .btn,
-.inspector-body > a.btn,
 .inspector-body > .status-indicator {
   align-self: flex-start;
 }
@@ -1798,12 +1782,6 @@ details.diagnostic-box[open] > summary::before {
 }
 .inspector-body > .view-tabs > * {
   flex: 1;
-}
-.task-inspector-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
 }
 .author-detail-actions {
   display: flex;
@@ -2373,7 +2351,7 @@ details.diagnostic-box[open] > summary::before {
 .capture-detection > svg {
   color: var(--success);
 }
-.capture-detection .text-button {
+.capture-detection > .btn {
   margin-left: auto;
 }
 .download-platform-choice {
@@ -2834,10 +2812,6 @@ details.diagnostic-box[open] > summary::before {
   font-size: 13.5px;
   line-height: 1.6;
 }
-.automation-overview a.danger {
-  font-size: 13px;
-  font-weight: 560;
-}
 .subscription-manage {
   display: flex;
   align-items: center;
@@ -2947,17 +2921,14 @@ details.diagnostic-box[open] > summary::before {
 .dashboard-footer {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding-top: 6px;
   color: var(--text-3);
   font-size: 12.5px;
 }
-.dashboard-footer a {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.dashboard-footer > .btn {
   margin-left: auto;
-  color: var(--text-2);
 }
 
 /* ---------- Tasks ---------- */
@@ -4450,7 +4421,7 @@ details.diagnostic-box > summary {
 .instagram-connection > .setting-row { padding:14px 0; }
 @media (max-width:640px) {
   .instagram-feedback { display:grid; grid-template-columns:20px minmax(0,1fr); }
-  .instagram-feedback .text-button { grid-column:2; margin-left:0; justify-self:start; }
+  .instagram-feedback > .btn { grid-column:2; margin-left:0; justify-self:start; }
   .instagram-cookie-toolbar .btn { flex:none; }
   .instagram-connection > .setting-row { display:grid; gap:10px; }
 }
@@ -4503,7 +4474,6 @@ details.diagnostic-box > summary {
 .ig-progress progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
 .ig-progress progress::-moz-progress-bar { background: var(--accent); }
 .ig-links { padding-top: 4px; border-top: 1px solid var(--line); }
-.ig-links .text-button { display: inline-flex; align-items: center; gap: 6px; }
 .ig-work-list { display: grid; list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); overflow: hidden; }
 .ig-work-list > li { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .ig-work-list > li:last-child { border-bottom: 0; }

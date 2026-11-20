@@ -685,7 +685,7 @@ watch(
     </nav>
     <div v-if="retryJobError" class="load-error-banner" role="alert">
       <IssueDetail :message="retryJobError" /><button
-        class="text-button"
+        class="btn ghost compact"
         @click="loadRetryJob"
       >
         核对进度
@@ -726,7 +726,7 @@ watch(
     </JobReport>
     <div v-if="deleteJobError" class="load-error-banner" role="alert">
       <IssueDetail :message="deleteJobError" /><button
-        class="text-button"
+        class="btn ghost compact"
         @click="loadDeleteJob"
       >
         核对进度
@@ -774,7 +774,7 @@ watch(
       <IssueDetail
         :message="loadError"
         impact="显示上次读取的数据，当前状态未确认。"
-      /><button class="text-button" @click="load()">重试</button>
+      /><button class="btn ghost compact" @click="load()">重试</button>
     </div>
     <FilterToolbar
       :active="
@@ -845,7 +845,7 @@ watch(
           "
         >
           删除记录 {{ deletableSelected.length }}</button
-        ><button class="text-button" @click="selectedKeys = []">
+        ><button class="btn ghost compact" @click="selectedKeys = []">
           取消选择
         </button>
       </div>

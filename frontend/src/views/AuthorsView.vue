@@ -376,7 +376,7 @@ onBeforeUnmount(() => {
     <SubscriptionNavigation />
     <div v-if="error && authors.length" class="load-error-banner" role="alert">
       <IssueDetail :message="error" impact="显示上次读取的数据。" /><button
-        class="text-button"
+        class="btn ghost compact"
         @click="load"
       >
         重试

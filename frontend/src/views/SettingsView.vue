@@ -66,7 +66,7 @@ function focusField(key: string) {
     <div v-if="saveError" class="config-alert" role="alert">
       <IssueDetail :message="saveError" />
     </div>
-    <div v-if="Object.keys(fieldErrors).length" ref="errorSummary" class="field-error-summary" tabindex="-1" role="alert" aria-label="请检查以下配置字段"><strong>请检查以下字段</strong><button v-for="(message,key) in fieldErrors" :key="key" class="text-button" @click="focusField(String(key))">{{message}}</button></div>
+    <div v-if="Object.keys(fieldErrors).length" ref="errorSummary" class="field-error-summary" tabindex="-1" role="alert" aria-label="请检查以下配置字段"><strong>请检查以下字段</strong><button v-for="(message,key) in fieldErrors" :key="key" class="btn ghost compact" @click="focusField(String(key))">{{message}}</button></div>
     <p
       v-if="configurationFeedback && mode === 'settings'"
       class="maintenance-note"

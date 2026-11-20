@@ -415,7 +415,7 @@ onBeforeUnmount(() => {
           }}</label
           ><button
             type="button"
-            class="text-button"
+            class="btn ghost compact"
             :disabled="submitting || pasting"
             @click="paste"
           >
@@ -469,7 +469,7 @@ onBeforeUnmount(() => {
           ><button
             v-if="!found"
             type="button"
-            class="text-button"
+            class="btn ghost compact"
             :disabled="submitting"
             @click="manualOpen = !manualOpen"
           >
@@ -522,7 +522,7 @@ onBeforeUnmount(() => {
         >
           {{ platform === 'instagram' ? '这是作者主页，提交会分批下载 Posts/Reels 的全部可访问历史。' : '这是作者主页，提交会扫描该作者作品并创建下载任务。' }}<button
             type="button"
-            class="text-button"
+            class="btn ghost compact"
             :disabled="submitting"
             @click="mode = 'subscribe'"
           >
@@ -543,7 +543,7 @@ onBeforeUnmount(() => {
             <strong>{{ success.message }}</strong
             ><span>可继续粘贴下一条链接</span>
           </div>
-          <button type="button" class="text-button" @click="viewResult">
+          <button type="button" class="btn ghost compact" @click="viewResult">
             查看<ArrowRight :size="14" />
           </button>
         </div>

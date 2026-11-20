@@ -13,6 +13,6 @@ async function copy() {
 <template>
   <details class="issue-detail">
     <summary>{{ issue.title }}</summary>
-    <div class="issue-body"><p v-if="impact">{{ impact }}</p><p>{{ issue.nextAction }}</p><small v-if="code">错误代码：{{ code }}</small><pre>{{ message }}</pre><button class="text-button" type="button" @click="copy">复制完整诊断</button><slot /></div>
+    <div class="issue-body"><p v-if="impact">{{ impact }}</p><p>{{ issue.nextAction }}</p><small v-if="code">错误代码：{{ code }}</small><pre>{{ message }}</pre><button class="btn ghost compact" type="button" @click="copy">复制完整诊断</button><slot /></div>
   </details>
 </template>

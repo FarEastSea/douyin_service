@@ -515,7 +515,7 @@ onBeforeUnmount(() => {
       <span>已选择 {{ selected.length }} 个当前页作品</span
       ><button class="btn compact danger" :disabled="batchDeleting || busyIds.length > 0" @click="batchDelete">
         删除作品及文件</button
-      ><button class="text-button" @click="selected = []">取消选择</button>
+      ><button class="btn ghost compact" @click="selected = []">取消选择</button>
     </div>
     <StateView
       v-if="!works.length"
@@ -581,7 +581,7 @@ onBeforeUnmount(() => {
           >
         </div>
         <footer>
-          <button class="text-button" @click="openDetail(work)">详情</button
+          <button class="btn ghost compact" @click="openDetail(work)">详情</button
           ><MoreActions :label="'作品 ' + work.aweme_id"
             ><button @click="preview(work)">预览</button
             ><button
@@ -654,7 +654,7 @@ onBeforeUnmount(() => {
               </div>
               <button
                 v-if="file.preview_url"
-                class="text-button"
+                class="btn ghost compact"
                 @click="
                   openMedia([
                     {
@@ -668,7 +668,7 @@ onBeforeUnmount(() => {
                 预览</button
               ><button
                 v-if="detail.work_type === 'images'"
-                class="text-button danger"
+                class="btn compact danger"
                 @click="removeFile(file.file_index)"
               >
                 删除此文件

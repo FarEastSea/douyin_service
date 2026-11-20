@@ -234,7 +234,7 @@ onBeforeUnmount(() => {
       <IssueDetail
         :message="loadError"
         impact="显示上次读取的数据；当前状态未确认。"
-      /><button class="text-button" @click="load()">重试</button>
+      /><button class="btn ghost compact" @click="load()">重试</button>
     </div>
     <section class="cycle-strip" aria-label="当前检查周期">
       <div>
@@ -338,7 +338,7 @@ onBeforeUnmount(() => {
             <td data-label="异常">
               <button
                 v-if="report.failed_authors + report.warning_authors"
-                class="text-button danger"
+                class="btn compact danger"
                 @click="
                   openRun(report.key || report.id);
                   onlyIssues = true;
