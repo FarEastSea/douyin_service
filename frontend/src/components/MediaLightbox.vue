@@ -37,6 +37,7 @@ const MIN_SCALE = 1;
 const MAX_SCALE = 5;
 const SLIDE_SECONDS = 4;
 const SWIPE_DISTANCE = 60;
+const BACKDROP_CLICK_DISTANCE = 8;
 const SPEEDS = [1, 1.25, 1.5, 2, 0.5];
 
 const index = ref(0);
@@ -50,6 +51,7 @@ const slideshow = ref(false);
 let returnFocus: HTMLElement | null = null;
 let slideTimer: number | undefined;
 let gesture: { id: number; x: number; y: number; originX: number; originY: number; pan: boolean } | null = null;
+let pointerStart: PointerEvent | null = null;
 
 const current = computed(() => props.items[index.value]);
 const isImage = computed(() => current.value?.type === "image" && !failed.value);
@@ -171,6 +173,17 @@ function preloadNeighbours() {
 function close() {
   emit("close");
 }
+function rememberPointerStart(event: PointerEvent) {
+  pointerStart = event;
+}
+function closeOnBackdrop(event: MouseEvent) {
+  if (
+    pointerStart?.target === event.target &&
+    Math.hypot(event.clientX - pointerStart.clientX, event.clientY - pointerStart.clientY) <= BACKDROP_CLICK_DISTANCE
+  ) {
+    close();
+  }
+}
 function keydown(event: KeyboardEvent) {
   if (!props.open) return;
   if (event.key === "Escape") {
@@ -216,6 +229,7 @@ watch(
       clearSlideTimer();
       slideshow.value = false;
       gesture = null;
+      pointerStart = null;
       const target = returnFocus;
       returnFocus = null;
       await nextTick();
@@ -242,9 +256,10 @@ onBeforeUnmount(() => {
         aria-modal="true"
         aria-label="媒体预览"
         tabindex="-1"
-        @click.self="close"
+        @pointerdown.capture="rememberPointerStart"
+        @click.self="closeOnBackdrop"
       >
-        <header class="lightbox-bar">
+        <header class="lightbox-bar" @click.self="closeOnBackdrop">
           <div>
             <strong>{{ current?.title || "媒体预览" }}</strong
             ><span v-if="items.length > 1"
@@ -291,6 +306,7 @@ onBeforeUnmount(() => {
         <main
           class="lightbox-stage"
           :class="{ zoomed }"
+          @click.self="closeOnBackdrop"
           @wheel="wheel"
           @pointerdown="pointerDown"
           @pointermove="pointerMove"
