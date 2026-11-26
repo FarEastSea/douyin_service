@@ -1,3 +1,4 @@
+import { maintenancePages, settingsPages } from "./settings-registry";
 import { createRouter, createWebHashHistory } from "vue-router";
 const AuthorsView = () => import("./views/AuthorsView.vue");
 const InstagramAuthorsView = () => import("./views/InstagramAuthorsView.vue");
@@ -20,21 +21,15 @@ const legacySections: Record<string, string> = {
   about: "/operations/maintenance/update",
 };
 
-function legacySettingsRedirect(
-  query: Record<string, unknown>,
-  platform?: string,
-) {
+function legacySettingsRedirect(query: Record<string, unknown>, platform?: string) {
   const requestedPlatform = platform || String(query.platform || "");
   if (
-    ["douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"].includes(
-      requestedPlatform,
-    )
+    ["douyin", "x", "tiktok", "weibo", "bilibili", "xhs", "instagram"].includes(requestedPlatform)
   ) {
     return { path: `/settings/account-${requestedPlatform}`, query: {} };
   }
   const tab = String(query.tab || "");
-  if (tab && legacySections[tab])
-    return { path: legacySections[tab], query: {} };
+  if (tab && legacySections[tab]) return { path: legacySections[tab], query: {} };
   return { path: "/settings/application", query: {} };
 }
 
@@ -55,18 +50,23 @@ export const router = createRouter({
   },
   routes: [
     { path: "/", redirect: "/dashboard" },
-    { path: "/dashboard", component: DashboardView },
-    { path: "/library", component: MediaLibraryView },
-    { path: "/insights", component: InsightsView },
+    { path: "/dashboard", meta: { title: "总览" }, component: DashboardView },
+    { path: "/library", meta: { title: "媒体库" }, component: MediaLibraryView },
+    { path: "/insights", meta: { title: "洞察" }, component: InsightsView },
     { path: "/subscriptions", redirect: "/authors/douyin" },
-    { path: "/authors/instagram", component: InstagramAuthorsView },
-    { path: "/operations/tasks", component: UnifiedTasksView },
+    {
+      path: "/authors/instagram",
+      meta: { title: "Instagram 订阅" },
+      component: InstagramAuthorsView,
+    },
+    { path: "/operations/tasks", meta: { title: "下载任务" }, component: UnifiedTasksView },
     {
       path: "/operations/maintenance",
       redirect: (to) => legacyMaintenanceRedirect(to.query),
     },
     {
       path: "/operations/maintenance/:section",
+      meta: { title: "系统维护" },
       component: SettingsView,
       props: (route) => ({
         mode: "maintenance",
@@ -76,6 +76,7 @@ export const router = createRouter({
     { path: "/settings", redirect: (to) => legacySettingsRedirect(to.query) },
     {
       path: "/settings/:section",
+      meta: { title: "设置" },
       component: SettingsView,
       props: (route) => ({
         mode: "settings",
@@ -91,6 +92,7 @@ export const router = createRouter({
     },
     {
       path: "/authors/:platform(douyin|x)",
+      meta: { title: "作者订阅" },
       component: AuthorsView,
       props: true,
     },
@@ -98,7 +100,7 @@ export const router = createRouter({
       path: "/douyin/authors",
       redirect: (to) => ({ path: "/authors/douyin", query: to.query }),
     },
-    { path: "/authors/douyin/:id/works", component: WorksView },
+    { path: "/authors/douyin/:id/works", meta: { title: "作者作品" }, component: WorksView },
     {
       path: "/douyin/authors/:id/works",
       redirect: (to) => ({
@@ -106,7 +108,7 @@ export const router = createRouter({
         query: to.query,
       }),
     },
-    { path: "/automation", component: UpdatesView },
+    { path: "/automation", meta: { title: "运行记录" }, component: UpdatesView },
     {
       path: "/douyin/updates",
       redirect: (to) => ({ path: "/automation", query: to.query }),
@@ -176,4 +178,11 @@ export const router = createRouter({
     },
     { path: "/:pathMatch(.*)*", redirect: "/dashboard" },
   ],
+});
+
+router.afterEach((to, _from, failure) => {
+  if (failure) return;
+  const pages = to.path.startsWith("/settings/") ? settingsPages : maintenancePages;
+  const section = pages[String(to.params.section)]?.title;
+  document.title = (section || to.meta.title || "总览") + " · 媒体工作台";
 });

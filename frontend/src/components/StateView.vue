@@ -8,6 +8,7 @@ withDefaults(
     title?: string;
     description?: string;
     rows?: number;
+    layout?: "list" | "grid" | "table";
   }>(),
   { title: "没有符合条件的记录", rows: 5, empty: true },
 );
@@ -17,22 +18,44 @@ defineEmits<{ retry: [] }>();
   <div
     v-if="loading"
     class="list-skeleton"
+    :class="[layout && 'skeleton-' + layout, layout === 'grid' && 'library-grid']"
     aria-label="正在读取数据"
     role="status"
   >
-    <div v-for="row in rows" :key="row"><i /><i /><i /></div>
+    <div
+      v-for="row in rows"
+      :key="row"
+      aria-hidden="true"
+    >
+      <i />
+      <i />
+      <i />
+    </div>
   </div>
-  <div v-else-if="error" class="resource-error" role="alert">
+  <div
+    v-else-if="error"
+    class="resource-error"
+    role="alert"
+  >
     <AlertCircle :size="18" />
     <div>
       <strong>数据读取失败</strong>
       <p>{{ error }}</p>
     </div>
-    <button class="btn ghost" @click="$emit('retry')">重试</button>
+    <button
+      class="btn ghost"
+      @click="$emit('retry')"
+    >
+      重试
+    </button>
   </div>
-  <div v-else-if="empty" class="empty-state">
-    <Inbox :size="22" /><strong>{{ title }}</strong
-    ><span v-if="description">{{ description }}</span
-    ><slot />
+  <div
+    v-else-if="empty"
+    class="empty-state"
+  >
+    <Inbox :size="22" />
+    <strong>{{ title }}</strong>
+    <span v-if="description">{{ description }}</span>
+    <slot />
   </div>
 </template>

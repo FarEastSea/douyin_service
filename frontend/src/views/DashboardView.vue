@@ -1,6 +1,6 @@
 <script setup lang="ts">
+import { usePagePolling } from "../composables/usePagePolling";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
 import {
   Activity,
   AlertCircle,
@@ -9,21 +9,22 @@ import {
   Clock3,
   Download,
   HardDrive,
-  RefreshCw,
   ShieldAlert,
   Users,
 } from "@lucide/vue";
+import KpiCard from "../components/KpiCard.vue";
+import SectionCard from "../components/SectionCard.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusIndicator from "../components/StatusIndicator.vue";
 import StateView from "../components/StateView.vue";
-import IssueDetail from "../components/IssueDetail.vue";
 import MediaThumbnail from "../components/MediaThumbnail.vue";
 import { mediaPreviewType, openMedia } from "../media";
 import { reportSummary } from "../presentation";
 import { api } from "../api";
-import { bytes, platformNames } from "../workspace";
+import { bytes, usePlatformNames } from "../workspace";
 import { useAppStore } from "../stores/app";
 import type { UnifiedTask, UnifiedTaskPage, LibraryMedia, PageData } from "../types";
+const platformNames = usePlatformNames();
 
 interface SubscriptionReport {
   status: string;
@@ -46,22 +47,32 @@ interface StorageState {
   result?: { issue_counts?: Record<string, number>; scanned_at?: string };
 }
 
-const router = useRouter();
 const store = useAppStore();
 const tasks = ref<UnifiedTask[]>([]);
 const activeTasks = ref<UnifiedTask[]>([]);
 const media = ref<LibraryMedia[]>([]);
-const freshness = ref<Record<string,string>>({});
-const endpoint = (value?: string) => value ? value.startsWith('/api/') ? value : `/api${value}` : '';
+const freshness = ref<Record<string, string>>({});
+const endpoint = (value?: string) =>
+  value ? (value.startsWith("/api/") ? value : `/api${value}`) : "";
 function previewMedia(item: LibraryMedia) {
-  const available = media.value.filter(entry => entry.available !== false);
-  openMedia(available.map(entry => ({ url:endpoint(entry.preview_endpoint), type:mediaPreviewType(entry.media_type), title:entry.title || entry.filename })), Math.max(0,available.findIndex(entry => entry.key === item.key)));
+  const available = media.value.filter((entry) => entry.available !== false);
+  openMedia(
+    available.map((entry) => ({
+      url: endpoint(entry.preview_endpoint),
+      type: mediaPreviewType(entry.media_type),
+      title: entry.title || entry.filename,
+    })),
+    Math.max(
+      0,
+      available.findIndex((entry) => entry.key === item.key),
+    ),
+  );
 }
 const failedTasks = ref<UnifiedTask[]>([]);
 const counts = ref<Record<string, number> | null>(null);
 const report = ref<SubscriptionReport | null>(null);
 const storage = ref<StorageState | null>(null);
-const risk = ref<any>(null);
+const risk = computed(() => store.risk);
 interface DiskState {
   available: boolean;
   free_bytes: number | null;
@@ -73,14 +84,20 @@ const disk = ref<DiskState | null>(null);
 // 接口只返回有记录的状态；已读取到摘要时缺失的状态就是 0，只有摘要本身未读取到才显示“-”。
 const statusCount = (status: string) =>
   counts.value === null ? "-" : Number(counts.value[status] || 0).toLocaleString();
-const errors = ref<string[]>([]);
+const loadErrors = ref<string[]>([]);
+const errors = computed(() =>
+  store.riskState === "failed" ? [...loadErrors.value, "抖音风控"] : loadErrors.value,
+);
+function refreshDashboard() {
+  void store.refreshHealth();
+  void load();
+}
 const loading = ref(true);
 const refreshedAt = ref<Date | null>(null);
-let timer: number | undefined;
+
 let inFlight = false,
   sequence = 0;
 
-const activeCount = computed(() => Number(counts.value?.downloading || 0));
 const failedCount = computed(() => Number(counts.value?.failed || 0));
 const queuedCount = computed(() => Number(counts.value?.pending || 0));
 const averageProgress = computed(() => {
@@ -107,7 +124,7 @@ const attention = computed(() => {
     title: string;
     detail: string;
     to: string;
-    tone: "critical" | "warning";
+    tone: "danger" | "warning";
   }> = [];
   if (risk.value?.active)
     items.push({
@@ -116,16 +133,13 @@ const attention = computed(() => {
         ? "账号请求上下文需要检查；新抖音请求暂不可用。"
         : "正在保护性冷却，等待后再检查。",
       to: "/settings/account-douyin",
-      tone: risk.value.requires_account_update ? "critical" : "warning",
+      tone: risk.value.requires_account_update ? "danger" : "warning",
     });
   if (
     report.value &&
-    [
-      "failed",
-      "interrupted",
-      "partial_upstream",
-      "partial_authentication",
-    ].includes(report.value.status)
+    ["failed", "interrupted", "partial_upstream", "partial_authentication"].includes(
+      report.value.status,
+    )
   )
     items.push({
       title: ["failed", "interrupted"].includes(report.value.status)
@@ -138,12 +152,9 @@ const attention = computed(() => {
   if (
     report.value &&
     report.value.failed_authors + report.value.warning_authors > 0 &&
-    ![
-      "failed",
-      "interrupted",
-      "partial_upstream",
-      "partial_authentication",
-    ].includes(report.value.status)
+    !["failed", "interrupted", "partial_upstream", "partial_authentication"].includes(
+      report.value.status,
+    )
   )
     items.push({
       title: `最近检查有 ${report.value.failed_authors + report.value.warning_authors} 位作者需核对`,
@@ -156,7 +167,7 @@ const attention = computed(() => {
       title: `下载磁盘仅剩 ${bytes(disk.value.free_bytes)}`,
       detail: `已低于预警线 ${bytes(disk.value.warn_free_bytes)}；空间耗尽会导致下载失败，请清理媒体或扩容。`,
       to: "/insights",
-      tone: "critical",
+      tone: "danger",
     });
   if (storage.value?.status === "failed")
     items.push({
@@ -175,15 +186,6 @@ const attention = computed(() => {
   return items;
 });
 
-const statusNames: Record<string, string> = {
-  pending: "等待中",
-  downloading: "下载中",
-  paused: "已暂停",
-  completed: "已完成",
-  skipped: "已跳过",
-  failed: "失败",
-  cancelled: "已取消",
-};
 function formatTime(value?: string) {
   if (!value) return "暂无记录";
   const date = new Date(value);
@@ -199,9 +201,6 @@ function formatTime(value?: string) {
 function windowNewDownload() {
   window.dispatchEvent(new CustomEvent("app:new-download"));
 }
-function onVisibilityChange() {
-  if (!document.hidden) void load();
-}
 
 async function load() {
   if (inFlight) return;
@@ -209,17 +208,14 @@ async function load() {
   loading.value = true;
   const current = ++sequence;
   const results = await Promise.allSettled([
-    api<UnifiedTaskPage>(
-      "/operations/tasks?page=1&page_size=5&status=completed",
-    ),
+    api<UnifiedTaskPage>("/operations/tasks?page=1&page_size=5&status=completed"),
     api<UnifiedTaskPage>("/operations/tasks?page=1&page_size=4&status=failed"),
     api<SubscriptionReports>("/authors/reports/subscriptions?limit=1"),
     api<StorageState>("/operations/storage-audit"),
-    api<any>("/system/douyin-risk-state"),
-    api<UnifiedTaskPage>(
-      "/operations/tasks?page=1&page_size=5&status=downloading",
+    api<UnifiedTaskPage>("/operations/tasks?page=1&page_size=5&status=downloading"),
+    api<PageData<LibraryMedia>>(
+      "/operations/media?page=1&page_size=6&sort_by=created_desc&with_counts=false",
     ),
-    api<PageData<LibraryMedia>>("/operations/media?page=1&page_size=6&sort_by=created_desc&with_counts=false"),
     api<DiskState>("/operations/insights/disk"),
   ]);
   inFlight = false;
@@ -229,132 +225,516 @@ async function load() {
     "失败任务",
     "订阅检查",
     "存储巡检",
-    "抖音风控",
     "活动队列",
     "媒体库",
     "磁盘空间",
   ];
-  if (results[7].status === "fulfilled") disk.value = results[7].value;
-  results.forEach((result,index) => { if (result.status === 'fulfilled') freshness.value[messages[index]!] = new Date().toISOString(); });
-  if (results[6].status === 'fulfilled') media.value = results[6].value.items;
+  if (results[6].status === "fulfilled") disk.value = results[6].value;
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") freshness.value[messages[index]!] = new Date().toISOString();
+  });
+  if (results[5].status === "fulfilled") media.value = results[5].value.items;
   activeTasks.value =
-    results[5].status === "fulfilled"
-      ? results[5].value.items
-      : activeTasks.value;
-  errors.value = results.flatMap((item, index) =>
+    results[4].status === "fulfilled" ? results[4].value.items : activeTasks.value;
+  loadErrors.value = results.flatMap((item, index) =>
     item.status === "rejected" ? [messages[index]] : [],
   );
-  tasks.value =
-    results[0].status === "fulfilled"
-      ? results[0].value.items || []
-      : tasks.value;
+  tasks.value = results[0].status === "fulfilled" ? results[0].value.items || [] : tasks.value;
   counts.value =
-    results[0].status === "fulfilled"
-      ? results[0].value.status_summary || {}
-      : counts.value;
+    results[0].status === "fulfilled" ? results[0].value.status_summary || {} : counts.value;
   failedTasks.value =
-    results[1].status === "fulfilled"
-      ? results[1].value.items || []
-      : failedTasks.value;
+    results[1].status === "fulfilled" ? results[1].value.items || [] : failedTasks.value;
   report.value =
-    results[2].status === "fulfilled"
-      ? results[2].value.items?.[0] || null
-      : report.value;
+    results[2].status === "fulfilled" ? results[2].value.items?.[0] || null : report.value;
   storage.value = results[3].status === "fulfilled" ? results[3].value : storage.value;
-  risk.value = results[4].status === "fulfilled" ? results[4].value : risk.value;
   refreshedAt.value = new Date();
   loading.value = false;
 }
 
-onMounted(() => {
-  void load();
-  timer = window.setInterval(() => {
-    if (!document.hidden) void load();
-  }, 30_000);
-  document.addEventListener("visibilitychange", onVisibilityChange);
-});
+onMounted(load);
+usePagePolling(30_000, load);
 onBeforeUnmount(() => {
   sequence++;
-  if (timer) window.clearInterval(timer);
-  document.removeEventListener("visibilitychange", onVisibilityChange);
 });
 </script>
 
 <template>
   <div class="workspace-page dashboard-page">
-    <PageHeader title="总览" :description="greeting" :busy="loading" :updated-at="refreshedAt?.toISOString()" refreshable @refresh="load">
-      <button class="btn primary" @click="windowNewDownload"><Download :size="16" />新建下载</button>
+    <PageHeader
+      title="总览"
+      :description="greeting"
+      :busy="loading"
+      :updated-at="refreshedAt?.toISOString()"
+      refreshable
+      @refresh="refreshDashboard"
+    >
+      <button
+        class="btn primary workspace-create"
+        @click="windowNewDownload"
+      >
+        <Download :size="16" />
+        新建下载
+      </button>
     </PageHeader>
-    <div v-if="errors.length" class="load-error-banner" role="status"><AlertCircle :size="17" /><span>{{ errors.join('、') }}暂不可用，当前显示上次读取的结果。未知状态以“-”表示。</span><button class="btn ghost compact" @click="load">重试</button></div>
-    <StateView v-if="loading && !refreshedAt" loading />
+    <div
+      v-if="errors.length"
+      class="load-error-banner"
+      role="status"
+    >
+      <AlertCircle :size="17" />
+      <span>{{ errors.join("、") }}暂不可用，当前显示上次读取的结果。未知状态以“-”表示。</span>
+      <button
+        class="btn ghost compact"
+        @click="refreshDashboard"
+      >
+        重试
+      </button>
+    </div>
+    <StateView
+      v-if="loading && !refreshedAt"
+      loading
+    />
     <template v-else>
-      <section class="kpi-grid" aria-label="全部平台任务摘要">
-        <RouterLink to="/operations/tasks?status=downloading" class="kpi-card" data-tone="active">
-          <span class="kpi-label"><Activity :size="15" />正在下载</span>
-          <strong>{{ statusCount('downloading') }}</strong>
-          <small>{{ activeTasks.length ? `平均进度 ${averageProgress}%` : '队列当前空闲' }}</small>
-          <span v-if="activeTasks.length" class="kpi-meter" :style="{ '--progress': averageProgress + '%' }" aria-hidden="true" />
-        </RouterLink>
-        <RouterLink to="/operations/tasks?status=pending" class="kpi-card">
-          <span class="kpi-label"><Clock3 :size="15" />等待下载</span>
-          <strong>{{ statusCount('pending') }}</strong>
-          <small>按调度规则依次执行</small>
-        </RouterLink>
-        <RouterLink to="/operations/tasks?status=failed" class="kpi-card" :data-tone="failedCount > 0 ? 'danger' : undefined">
-          <span class="kpi-label"><AlertCircle :size="15" />失败待复核</span>
-          <strong>{{ statusCount('failed') }}</strong>
-          <small>{{ failedCount > 0 ? '打开查看失败原因' : '没有失败任务' }}</small>
-        </RouterLink>
-        <RouterLink to="/authors/douyin" class="kpi-card">
-          <span class="kpi-label"><Users :size="15" />订阅作者</span>
-          <strong>{{ store.stats.subscribed_authors.toLocaleString() }}</strong>
-          <small>累计下载 {{ store.stats.total_downloads.toLocaleString() }} 个作品</small>
-        </RouterLink>
+      <section
+        class="kpi-grid"
+        aria-label="全部平台任务摘要"
+      >
+        <KpiCard
+          to="/operations/tasks?status=downloading"
+          tone="info"
+          :progress="activeTasks.length ? averageProgress : null"
+          :icon="Activity"
+          :value="statusCount('downloading')"
+        >
+          <template #label>正在下载</template>
+          {{
+            errors.includes("活动队列")
+              ? "队列状态未确认"
+              : activeTasks.length
+                ? `平均进度 ${averageProgress}%`
+                : "队列当前空闲"
+          }}
+        </KpiCard>
+        <KpiCard
+          to="/operations/tasks?status=pending"
+          :icon="Clock3"
+          :value="statusCount('pending')"
+        >
+          <template #label>等待下载</template>
+          按调度规则依次执行
+        </KpiCard>
+        <KpiCard
+          to="/operations/tasks?status=failed"
+          :tone="failedCount > 0 ? 'danger' : undefined"
+          :icon="AlertCircle"
+          :value="statusCount('failed')"
+        >
+          <template #label>失败待复核</template>
+          {{
+            counts === null
+              ? "任务状态未确认"
+              : failedCount > 0
+                ? "打开查看失败原因"
+                : "没有失败任务"
+          }}
+        </KpiCard>
+        <KpiCard
+          to="/authors/douyin"
+          :icon="Users"
+          :value="store.statsKnown ? store.stats.subscribed_authors.toLocaleString() : '—'"
+        >
+          <template #label>订阅作者</template>
+          累计下载
+          {{ store.statsKnown ? store.stats.total_downloads.toLocaleString() : "—" }} 个作品
+        </KpiCard>
       </section>
+      <SectionCard
+        title="需要处理"
+        class="attention-section"
+      >
+        <template #actions>
+          <span
+            v-if="attention.length"
+            class="error-count"
+          >
+            {{ attention.length }} 项
+          </span>
+          <span
+            v-else-if="errors.length || store.riskState === 'pending'"
+            class="muted"
+          >
+            部分状态未确认
+          </span>
+          <span
+            v-else
+            class="all-clear"
+          >
+            <CircleCheck :size="15" />
+            一切正常
+          </span>
+        </template>
+        <div
+          v-if="attention.length"
+          class="attention-list"
+        >
+          <RouterLink
+            v-for="item in attention"
+            :key="item.title"
+            :to="item.to"
+            :data-tone="item.tone"
+          >
+            <ShieldAlert :size="17" />
+            <span>
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.detail }}</small>
+            </span>
+            <ArrowRight :size="14" />
+          </RouterLink>
+        </div>
+        <p
+          v-else
+          class="normal-note"
+        >
+          {{
+            errors.length || store.riskState === "pending"
+              ? "部分状态未确认，刷新后再核对。"
+              : "当前没有运行阻塞。"
+          }}
+        </p>
+      </SectionCard>
       <div class="dashboard-lead">
-        <section class="dashboard-card overview-queue">
-          <div class="section-heading"><div><h2>下载队列</h2><p class="muted">实时传输中的任务</p></div><RouterLink class="btn ghost compact" to="/operations/tasks?status=downloading">查看队列 <ArrowRight :size="14" /></RouterLink></div>
-          <div v-if="activeTasks.length" class="compact-records active-download-records">
-            <RouterLink v-for="task in activeTasks.slice(0,4)" :key="task.key" :to="`/operations/tasks?task_key=${encodeURIComponent(task.key)}`">
-              <MediaThumbnail :src="task.thumbnail_endpoint || task.cover_url" :type="task.media_type" />
-              <span class="task-title"><strong>{{ task.source_label || '任务 '+task.id }}</strong><small>{{ platformNames[task.platform] }}<span v-if="task.author_name"> · {{ task.author_name }}</span></small><span class="overview-transfer" :style="{'--progress':Math.min(100,Math.max(0,task.progress_percent || 0))+'%'}" /></span>
-              <span class="download-percent">{{ Number(task.progress_percent || 0).toFixed(0) }}<small>%</small></span>
+        <SectionCard
+          title="下载队列"
+          class="overview-queue"
+        >
+          <template #description>实时传输中的任务</template>
+          <template #actions>
+            <RouterLink
+              class="btn ghost compact"
+              to="/operations/tasks?status=downloading"
+            >
+              查看队列
+              <ArrowRight :size="14" />
+            </RouterLink>
+          </template>
+          <div
+            v-if="activeTasks.length"
+            class="compact-records active-download-records"
+          >
+            <RouterLink
+              v-for="task in activeTasks.slice(0, 4)"
+              :key="task.key"
+              :to="`/operations/tasks?task_key=${encodeURIComponent(task.key)}`"
+            >
+              <MediaThumbnail
+                :src="task.thumbnail_endpoint || task.cover_url"
+                :type="task.media_type"
+              />
+              <span class="task-title">
+                <strong>{{ task.source_label || "任务 " + task.id }}</strong>
+                <small>
+                  {{ platformNames[task.platform] }}
+                  <span v-if="task.author_name">· {{ task.author_name }}</span>
+                </small>
+                <span
+                  class="overview-transfer"
+                  :style="{
+                    '--progress': Math.min(100, Math.max(0, task.progress_percent || 0)) + '%',
+                  }"
+                />
+              </span>
+              <span class="download-percent">
+                {{ Number(task.progress_percent || 0).toFixed(0) }}
+                <small>%</small>
+              </span>
             </RouterLink>
           </div>
-          <div v-else class="queue-empty"><span class="queue-empty-icon"><Download :size="20" /></span><div><strong>{{ errors.includes('活动队列') ? '下载队列暂时无法读取' : '当前没有正在下载的任务' }}</strong><p>{{ errors.includes('活动队列') ? '刷新后核对当前运行情况。' : queuedCount ? '等待中的任务会按调度规则继续执行。' : '添加作品链接，或让作者订阅自动发现新内容。' }}</p></div><button class="btn" @click="windowNewDownload">添加下载</button></div>
-        </section>
-        <aside class="overview-side">
-          <section class="dashboard-card attention-section">
-            <div class="section-heading"><h2>需要处理</h2><span v-if="attention.length" class="error-count">{{attention.length}} 项</span><span v-else class="all-clear"><CircleCheck :size="15" />一切正常</span></div>
-            <div v-if="attention.length" class="attention-list"><RouterLink v-for="item in attention" :key="item.title" :to="item.to" :data-tone="item.tone"><ShieldAlert :size="17" /><span><strong>{{ item.title }}</strong><small>{{ item.detail }}</small></span><ArrowRight :size="14" /></RouterLink></div>
-            <p v-else class="normal-note">{{ errors.length ? '部分状态未确认，刷新后再核对。' : '当前没有运行阻塞。' }}</p>
-          </section>
-          <section class="dashboard-card overview-subscriptions">
-            <div class="section-heading"><h2>订阅检查</h2><RouterLink class="btn ghost compact" to="/automation">运行记录 <ArrowRight :size="14" /></RouterLink></div>
-            <div v-if="report" class="automation-overview"><div class="automation-overview-head"><StatusIndicator :status="report.status" /><time>{{ formatTime(report.started_at) }}</time></div><p>{{ reportSummary(report) }}</p><RouterLink v-if="report.failed_authors + report.warning_authors" to="/automation" class="btn compact danger">{{report.failed_authors + report.warning_authors}} 位作者需核对</RouterLink></div>
-            <p v-else class="inline-note">{{ errors.includes('订阅检查') ? '检查状态未确认' : '暂无运行记录，订阅作者后会定期检查更新。' }}</p>
-            <RouterLink class="subscription-manage" to="/authors/douyin"><Users :size="15" />管理作者订阅<ArrowRight :size="14" /></RouterLink>
-          </section>
-        </aside>
+          <div
+            v-else
+            class="queue-empty"
+          >
+            <span class="queue-empty-icon"><Download :size="20" /></span>
+            <div>
+              <strong>
+                {{
+                  errors.includes("活动队列") ? "下载队列暂时无法读取" : "当前没有正在下载的任务"
+                }}
+              </strong>
+              <p>
+                {{
+                  errors.includes("活动队列")
+                    ? "刷新后核对当前运行情况。"
+                    : queuedCount
+                      ? "等待中的任务会按调度规则继续执行。"
+                      : "添加作品链接，或让作者订阅自动发现新内容。"
+                }}
+              </p>
+            </div>
+            <button
+              class="btn"
+              @click="windowNewDownload"
+            >
+              添加下载
+            </button>
+          </div>
+        </SectionCard>
+
+        <SectionCard
+          title="订阅检查"
+          class="overview-subscriptions"
+        >
+          <template #actions>
+            <RouterLink
+              class="btn ghost compact"
+              to="/automation"
+            >
+              运行记录
+              <ArrowRight :size="14" />
+            </RouterLink>
+          </template>
+          <div
+            v-if="report"
+            class="automation-overview"
+          >
+            <div class="automation-overview-head">
+              <StatusIndicator :status="report.status" />
+              <time>{{ formatTime(report.started_at) }}</time>
+            </div>
+            <p>{{ reportSummary(report) }}</p>
+            <RouterLink
+              v-if="report.failed_authors + report.warning_authors"
+              to="/automation"
+              class="btn compact danger"
+            >
+              {{ report.failed_authors + report.warning_authors }} 位作者需核对
+            </RouterLink>
+          </div>
+          <p
+            v-else
+            class="inline-note"
+          >
+            {{
+              errors.includes("订阅检查")
+                ? "检查状态未确认"
+                : "暂无运行记录，订阅作者后会定期检查更新。"
+            }}
+          </p>
+          <RouterLink
+            class="subscription-manage"
+            to="/authors/douyin"
+          >
+            <Users :size="15" />
+            管理作者订阅
+            <ArrowRight :size="14" />
+          </RouterLink>
+        </SectionCard>
       </div>
-      <section class="dashboard-card recent-library">
-        <div class="section-heading"><div><h2>最近入库</h2><p class="muted">{{ errors.includes('媒体库') ? '读取失败，显示上次结果' : freshness['媒体库'] ? '更新于 '+formatTime(freshness['媒体库']) : '已保存的媒体文件' }}</p></div><RouterLink class="btn ghost compact" to="/library">打开媒体库 <ArrowRight :size="14" /></RouterLink></div>
-        <div v-if="media.length" class="recent-media-grid"><article v-for="item in media" :key="item.key"><button class="recent-cover" :disabled="item.available === false" :aria-label="'预览 '+(item.title || item.filename)" @click="previewMedia(item)"><MediaThumbnail :src="endpoint(item.thumbnail_endpoint) || (item.media_type === 'image' ? endpoint(item.preview_endpoint) : '')" :type="item.media_type" /><span v-if="item.available === false" class="media-unavailable">文件不可用</span><span class="recent-caption"><strong :title="item.title || item.filename">{{item.title || item.filename}}</strong><small>{{item.author_name || platformNames[item.platform]}}</small></span></button></article></div>
-        <StateView v-else :error="errors.includes('媒体库') ? '媒体库暂时无法读取' : ''" title="还没有入库媒体" description="下载完成的内容会出现在这里。" :rows="2" @retry="load"><button class="btn" @click="windowNewDownload">添加下载</button></StateView>
-      </section>
+      <SectionCard
+        title="最近入库"
+        class="recent-library"
+      >
+        <template #description>
+          {{
+            errors.includes("媒体库")
+              ? "读取失败，显示上次结果"
+              : freshness["媒体库"]
+                ? "更新于 " + formatTime(freshness["媒体库"])
+                : "已保存的媒体文件"
+          }}
+        </template>
+        <template #actions>
+          <RouterLink
+            class="btn ghost compact"
+            to="/library"
+          >
+            打开媒体库
+            <ArrowRight :size="14" />
+          </RouterLink>
+        </template>
+        <div
+          v-if="media.length"
+          class="recent-media-grid"
+        >
+          <article
+            v-for="item in media"
+            :key="item.key"
+          >
+            <button
+              class="recent-cover"
+              :disabled="item.available === false"
+              :aria-label="'预览 ' + (item.title || item.filename)"
+              @click="previewMedia(item)"
+            >
+              <MediaThumbnail
+                :src="
+                  endpoint(item.thumbnail_endpoint) ||
+                  (item.media_type === 'image' ? endpoint(item.preview_endpoint) : '')
+                "
+                :type="item.media_type"
+              />
+              <span
+                v-if="item.available === false"
+                class="media-unavailable"
+              >
+                文件不可用
+              </span>
+              <span class="recent-caption">
+                <strong :title="item.title || item.filename">
+                  {{ item.title || item.filename }}
+                </strong>
+                <small>{{ item.author_name || platformNames[item.platform] }}</small>
+              </span>
+            </button>
+          </article>
+        </div>
+        <StateView
+          v-else
+          :error="errors.includes('媒体库') ? '媒体库暂时无法读取' : ''"
+          title="还没有入库媒体"
+          description="下载完成的内容会出现在这里。"
+          :rows="2"
+          @retry="load"
+        >
+          <button
+            class="btn"
+            @click="windowNewDownload"
+          >
+            添加下载
+          </button>
+        </StateView>
+      </SectionCard>
       <div class="dashboard-history">
-        <section class="dashboard-card overview-failures">
-          <div class="section-heading"><h2>失败待复核 <span class="error-count">{{ counts === null ? '-' : failedCount.toLocaleString() }}</span></h2><RouterLink class="btn ghost compact" to="/operations/tasks?status=failed">查看全部 <ArrowRight :size="14" /></RouterLink></div>
-          <div v-if="failedTasks.length" class="compact-records"><RouterLink v-for="task in failedTasks.slice(0,3)" :key="task.key" :to="`/operations/tasks?status=failed&task_key=${encodeURIComponent(task.key)}`"><MediaThumbnail :src="task.thumbnail_endpoint || task.cover_url" :type="task.media_type" /><span class="task-title"><strong>{{ task.source_label || '任务 '+task.id }}</strong><small class="danger-text">{{task.error_message || task.author_name || task.error_code || '失败原因见详情'}}</small></span><span class="row-recovery">查看原因 <ArrowRight :size="14" /></span></RouterLink></div>
-          <p v-else class="inline-note">{{ errors.includes('失败任务') ? '失败记录暂时无法读取。' : '没有待复核的失败任务。' }}</p>
-        </section>
-        <section class="dashboard-card overview-completed">
-          <div class="section-heading"><h2>最近完成</h2><RouterLink class="btn ghost compact" to="/operations/tasks?status=completed">查看全部 <ArrowRight :size="14" /></RouterLink></div>
-          <div v-if="tasks.length" class="compact-records"><RouterLink v-for="task in tasks.slice(0,3)" :key="task.key" :to="`/operations/tasks?task_key=${encodeURIComponent(task.key)}`"><span class="completed-check"><CircleCheck :size="16" /></span><span class="task-title"><strong>{{ task.source_label || '任务 '+task.id }}</strong><small>{{platformNames[task.platform]}}<span v-if="task.author_name"> · {{task.author_name}}</span> · {{task.file_count}} 个文件</small></span><time>{{formatTime(task.completed_at || task.created_at)}}</time></RouterLink></div>
-          <p v-else class="inline-note">{{ errors.includes('最近完成') ? '最近完成记录未确认。' : '还没有完成的任务。' }}</p>
-        </section>
+        <SectionCard
+          title="失败待复核"
+          class="overview-failures"
+        >
+          <template #count>
+            <span class="error-count">
+              {{ counts === null ? "-" : failedCount.toLocaleString() }}
+            </span>
+          </template>
+          <template #actions>
+            <RouterLink
+              class="btn ghost compact"
+              to="/operations/tasks?status=failed"
+            >
+              查看全部
+              <ArrowRight :size="14" />
+            </RouterLink>
+          </template>
+          <div
+            v-if="failedTasks.length"
+            class="compact-records"
+          >
+            <RouterLink
+              v-for="task in failedTasks.slice(0, 3)"
+              :key="task.key"
+              :to="`/operations/tasks?status=failed&task_key=${encodeURIComponent(task.key)}`"
+            >
+              <MediaThumbnail
+                :src="task.thumbnail_endpoint || task.cover_url"
+                :type="task.media_type"
+              />
+              <span class="task-title">
+                <strong>{{ task.source_label || "任务 " + task.id }}</strong>
+                <small class="danger-text">
+                  {{
+                    task.error_message || task.author_name || task.error_code || "失败原因见详情"
+                  }}
+                </small>
+              </span>
+              <span class="row-recovery">
+                查看原因
+                <ArrowRight :size="14" />
+              </span>
+            </RouterLink>
+          </div>
+          <p
+            v-else
+            class="inline-note"
+          >
+            {{ errors.includes("失败任务") ? "失败记录暂时无法读取。" : "没有待复核的失败任务。" }}
+          </p>
+        </SectionCard>
+        <SectionCard
+          title="最近完成"
+          class="overview-completed"
+        >
+          <template #actions>
+            <RouterLink
+              class="btn ghost compact"
+              to="/operations/tasks?status=completed"
+            >
+              查看全部
+              <ArrowRight :size="14" />
+            </RouterLink>
+          </template>
+          <div
+            v-if="tasks.length"
+            class="compact-records"
+          >
+            <RouterLink
+              v-for="task in tasks.slice(0, 3)"
+              :key="task.key"
+              :to="`/operations/tasks?task_key=${encodeURIComponent(task.key)}`"
+            >
+              <span class="completed-check"><CircleCheck :size="16" /></span>
+              <span class="task-title">
+                <strong>{{ task.source_label || "任务 " + task.id }}</strong>
+                <small>
+                  {{ platformNames[task.platform] }}
+                  <span v-if="task.author_name">· {{ task.author_name }}</span>
+                  · {{ task.file_count }} 个文件
+                </small>
+              </span>
+              <time>{{ formatTime(task.completed_at || task.created_at) }}</time>
+            </RouterLink>
+          </div>
+          <p
+            v-else
+            class="inline-note"
+          >
+            {{ errors.includes("最近完成") ? "最近完成记录未确认。" : "还没有完成的任务。" }}
+          </p>
+        </SectionCard>
       </div>
     </template>
-    <footer class="dashboard-footer"><HardDrive :size="15" /><span>存储巡检{{errors.includes('存储巡检') ? '状态未确认' : storage?.status === 'completed' ? '更新于 '+formatTime(storage.updated_at) : storage?.status === 'running' ? '正在运行' : storage?.status === 'failed' ? '需要检查' : '尚无完成记录'}}</span><RouterLink class="btn ghost compact" to="/operations/maintenance/storage">打开存储维护 <ArrowRight :size="14" /></RouterLink><span v-if="disk?.available" class="dashboard-disk" :class="{ 'danger-text': disk.low }">磁盘剩余 {{ bytes(disk.free_bytes) }}（已用 {{ disk.used_percent }}%）</span><RouterLink class="btn ghost compact" to="/insights">查看洞察 <ArrowRight :size="14" /></RouterLink></footer>
+    <footer class="dashboard-footer">
+      <HardDrive :size="15" />
+      <span>
+        存储巡检{{
+          errors.includes("存储巡检")
+            ? "状态未确认"
+            : storage?.status === "completed"
+              ? "更新于 " + formatTime(storage.updated_at)
+              : storage?.status === "running"
+                ? "正在运行"
+                : storage?.status === "failed"
+                  ? "需要检查"
+                  : "尚无完成记录"
+        }}
+      </span>
+      <RouterLink
+        class="btn ghost compact"
+        to="/operations/maintenance/storage"
+      >
+        打开存储维护
+        <ArrowRight :size="14" />
+      </RouterLink>
+      <span
+        v-if="disk?.available"
+        class="dashboard-disk"
+        :class="{ 'danger-text': disk.low }"
+      >
+        磁盘剩余 {{ bytes(disk.free_bytes) }}（已用 {{ disk.used_percent }}%）
+      </span>
+      <RouterLink
+        class="btn ghost compact"
+        to="/insights"
+      >
+        查看洞察
+        <ArrowRight :size="14" />
+      </RouterLink>
+    </footer>
   </div>
 </template>

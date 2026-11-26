@@ -3,20 +3,20 @@ import { ref, watch, onBeforeUnmount, onMounted } from "vue";
 import { api } from "../api";
 import { mediaPreviewType, openMedia } from "../media";
 import { useAppStore } from "../stores/app";
-import { bytes, confirmWithOption, dateTime, platformNames } from "../workspace";
+import { bytes, confirmWithOption, dateTime, usePlatformNames } from "../workspace";
 import type { TaskDetail } from "../types";
 import InspectorPanel from "./InspectorPanel.vue";
 import StatusIndicator from "./StatusIndicator.vue";
 import StateView from "./StateView.vue";
 import IssueDetail from "./IssueDetail.vue";
 import TrendHistory from "./TrendHistory.vue";
+const platformNames = usePlatformNames();
 const props = defineProps<{ taskKey: string; busy?: boolean }>();
 const emit = defineEmits<{
   close: [];
   action: [
     task: TaskDetail,
-    action:
-      "retry" | "pause" | "resume" | "cancel" | "refresh_retry" | "delete",
+    action: "retry" | "pause" | "resume" | "cancel" | "refresh_retry" | "delete",
   ];
   changed: [];
 }>();
@@ -37,7 +37,9 @@ let sequence = 0,
   resourceSequence = 0;
 let pollTimer: number | undefined,
   pollInFlight = false;
-let detailController: AbortController | undefined, resourceController: AbortController | undefined, refreshController: AbortController | undefined;
+let detailController: AbortController | undefined,
+  resourceController: AbortController | undefined,
+  refreshController: AbortController | undefined;
 async function refresh() {
   if (!props.taskKey || pollInFlight) return;
   pollInFlight = true;
@@ -48,14 +50,18 @@ async function refresh() {
   try {
     const data = await api<TaskDetail>(
       `/operations/tasks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`,
-      {signal:refreshController.signal},
+      { signal: refreshController.signal },
     );
     if (current === sequence && key === props.taskKey) {
       const previousStatus = task.value?.status;
       const previousCount = task.value?.preview_count;
       task.value = data;
       error.value = "";
-      if (tab.value === 'logs' || (tab.value === 'files' && (previousStatus !== data.status || previousCount !== data.preview_count)))
+      if (
+        tab.value === "logs" ||
+        (tab.value === "files" &&
+          (previousStatus !== data.status || previousCount !== data.preview_count))
+      )
         await loadResource(true);
     }
   } catch (e: any) {
@@ -66,7 +72,9 @@ async function refresh() {
 }
 async function load() {
   const current = ++sequence;
-  detailController?.abort(); resourceController?.abort(); refreshController?.abort();
+  detailController?.abort();
+  resourceController?.abort();
+  refreshController?.abort();
   detailController = new AbortController();
   task.value = undefined;
   error.value = "";
@@ -83,7 +91,7 @@ async function load() {
   try {
     const data = await api<TaskDetail>(
       `/operations/tasks/${encodeURIComponent(platform)}/${encodeURIComponent(id)}`,
-      {signal:detailController.signal},
+      { signal: detailController.signal },
     );
     if (current === sequence) task.value = data;
   } catch (e: any) {
@@ -94,25 +102,32 @@ async function load() {
 }
 async function loadResource(silent: boolean | Event = false, append = false) {
   const current = ++resourceSequence;
-  resourceController?.abort(); resourceController = new AbortController();
+  resourceController?.abort();
+  resourceController = new AbortController();
   const signal = resourceController.signal;
   resourceError.value = "";
   if (silent !== true) resourceBusy.value = true;
   try {
     if (tab.value === "files" && task.value?.media_endpoint) {
       const lastPage = append ? filesPage.value + 1 : silent === true ? filesPage.value : 1;
-      const requestedPages = append ? [lastPage] : Array.from({length:lastPage},(_,index) => index+1);
-      const results = await Promise.all(requestedPages.map(page => api<any>(`${task.value!.media_endpoint}?page=${page}&page_size=60`,{signal})));
+      const requestedPages = append
+        ? [lastPage]
+        : Array.from({ length: lastPage }, (_, index) => index + 1);
+      const results = await Promise.all(
+        requestedPages.map((page) =>
+          api<any>(`${task.value!.media_endpoint}?page=${page}&page_size=60`, { signal }),
+        ),
+      );
       if (current === resourceSequence) {
-        const rows = results.flatMap(result => result.items || []);
-        files.value = append ? [...files.value,...rows] : rows;
+        const rows = results.flatMap((result) => result.items || []);
+        files.value = append ? [...files.value, ...rows] : rows;
         filesPage.value = lastPage;
         filesPages.value = results.at(-1)?.pages || 1;
         filesTotal.value = results.at(-1)?.total || 0;
       }
     }
     if (tab.value === "logs" && task.value?.log_endpoint) {
-      const data = await api<any>(task.value.log_endpoint + "?start=0",{signal});
+      const data = await api<any>(task.value.log_endpoint + "?start=0", { signal });
       if (current === resourceSequence) logs.value = data.lines || [];
     }
   } catch (e: any) {
@@ -182,10 +197,9 @@ async function deleteRecord() {
         ? `/x/tasks/${item.id}`
         : `/platform-downloads/${item.platform}/tasks/${item.id}`;
   try {
-    const result = await api<{ message?: string }>(
-      `${endpoint}?delete_files=${choice.checked}`,
-      { method: "DELETE" },
-    );
+    const result = await api<{ message?: string }>(`${endpoint}?delete_files=${choice.checked}`, {
+      method: "DELETE",
+    });
     store.notify(result.message || "任务已删除");
     emit("changed");
     emit("close");
@@ -198,10 +212,7 @@ async function deleteRecord() {
 defineExpose({ refresh, task });
 onMounted(() => {
   pollTimer = window.setInterval(() => {
-    if (
-      !document.hidden &&
-      ["pending", "downloading", "paused"].includes(task.value?.status || "")
-    )
+    if (!document.hidden && ["pending", "downloading", "paused"].includes(task.value?.status || ""))
       void refresh();
   }, 5000);
 });
@@ -211,7 +222,9 @@ onBeforeUnmount(() => {
   clearInterval(pollTimer);
   sequence++;
   resourceSequence++;
-  detailController?.abort(); resourceController?.abort(); refreshController?.abort();
+  detailController?.abort();
+  resourceController?.abort();
+  refreshController?.abort();
 });
 </script>
 <template>
@@ -220,23 +233,37 @@ onBeforeUnmount(() => {
     :title="task?.source_label || '任务详情'"
     :subtitle="task ? platformNames[task.platform] + ' · #' + task.id : taskKey"
     @close="emit('close')"
-    ><StateView
+  >
+    <StateView
       v-if="!task"
       :loading="loading"
       :error="error"
       @retry="load"
-    /><template v-else
-      ><div v-if="error" class="load-error-banner" role="alert">
-        <span>{{ error }}。显示上次读取的数据。</span
-        ><button class="btn ghost compact" @click="refresh">重试</button>
+    />
+    <template v-else>
+      <div
+        v-if="error"
+        class="load-error-banner"
+        role="alert"
+      >
+        <span>{{ error }}。显示上次读取的数据。</span>
+        <button
+          class="btn ghost compact"
+          @click="refresh"
+        >
+          重试
+        </button>
       </div>
       <div class="detail-status">
-        <StatusIndicator :status="task.status" /><span
-          v-if="task.status === 'downloading'"
-          >{{ Number(task.progress_percent || 0).toFixed(1) }}%</span
-        >
+        <StatusIndicator :status="task.status" />
+        <span v-if="task.status === 'downloading'">
+          {{ Number(task.progress_percent || 0).toFixed(1) }}%
+        </span>
       </div>
-      <nav class="view-tabs" aria-label="任务详情">
+      <nav
+        class="view-tabs"
+        aria-label="任务详情"
+      >
         <button
           v-for="item in [
             ['overview', '概览'],
@@ -253,8 +280,8 @@ onBeforeUnmount(() => {
           {{ item[1] }}
         </button>
       </nav>
-      <template v-if="tab === 'overview'"
-        ><dl class="detail-fields">
+      <template v-if="tab === 'overview'">
+        <dl class="detail-fields">
           <div>
             <dt>作者</dt>
             <dd>{{ task.author_name || "未提供" }}</dd>
@@ -278,8 +305,7 @@ onBeforeUnmount(() => {
           <div v-if="task.transfer">
             <dt>传输</dt>
             <dd>
-              {{ bytes(task.transfer.downloaded_bytes) }} /
-              {{ bytes(task.transfer.total_bytes) }} ·
+              {{ bytes(task.transfer.downloaded_bytes) }} / {{ bytes(task.transfer.total_bytes) }} ·
               {{ bytes(task.transfer.download_speed) }}/s
             </dd>
           </div>
@@ -298,13 +324,21 @@ onBeforeUnmount(() => {
             :href="task.source_url"
             target="_blank"
             rel="noopener noreferrer"
-          >打开来源</a>
+          >
+            打开来源
+          </a>
           <RouterLink
             v-if="task.work_id && task.author_id"
             class="btn ghost"
             :to="`/authors/douyin/${task.author_id}/works?work=${task.work_id}`"
-          >查看作者作品</RouterLink>
-          <button v-if="task.status === 'failed'" class="btn ghost" @click="copyDiagnostic">
+          >
+            查看作者作品
+          </RouterLink>
+          <button
+            v-if="task.status === 'failed'"
+            class="btn ghost"
+            @click="copyDiagnostic"
+          >
             复制任务诊断
           </button>
         </div>
@@ -313,14 +347,22 @@ onBeforeUnmount(() => {
           :message="task.error_message"
           :code="task.error_code"
         />
-        <p v-if="task.error_action" class="inline-note">
+        <p
+          v-if="task.error_action"
+          class="inline-note"
+        >
           {{ task.error_action }}
         </p>
-        </template
-      ><template v-else-if="tab === 'files'"
-        ><button v-if="task.preview_endpoint" class="btn" @click="previewTask">
-          预览下载文件</button
-        ><StateView
+      </template>
+      <template v-else-if="tab === 'files'">
+        <button
+          v-if="task.preview_endpoint"
+          class="btn"
+          @click="previewTask"
+        >
+          预览下载文件
+        </button>
+        <StateView
           v-else-if="resourceBusy || resourceError || !files.length"
           :loading="resourceBusy"
           :error="resourceError"
@@ -328,93 +370,121 @@ onBeforeUnmount(() => {
           @retry="loadResource"
         />
         <div class="file-list">
-          <article v-for="file in files" :key="file.id">
-            <span>{{ file.filename || file.title || "媒体文件" }}</span
-            ><button
+          <article
+            v-for="file in files"
+            :key="file.id"
+          >
+            <span>{{ file.filename || file.title || "媒体文件" }}</span>
+            <button
               v-if="file.preview_url"
               class="btn ghost compact"
               @click="previewFile(file)"
             >
-              预览</button
-            ><a
+              预览
+            </button>
+            <a
               v-if="file.download_url"
               class="btn ghost compact"
               :href="file.download_url"
-              >下载</a
             >
+              下载
+            </a>
           </article>
-        </div><div v-if="filesTotal" class="file-pagination"><span class="muted">已显示 {{files.length}} / {{filesTotal}} 个文件</span><button v-if="filesPage < filesPages" class="btn ghost" :disabled="resourceBusy" @click="loadResource(false,true)">{{resourceBusy ? '正在读取…' : '继续加载文件'}}</button></div></template
-      ><template v-else-if="tab === 'logs'"
-        ><StateView
+        </div>
+        <div
+          v-if="filesTotal"
+          class="file-pagination"
+        >
+          <span class="muted">已显示 {{ files.length }} / {{ filesTotal }} 个文件</span>
+          <button
+            v-if="filesPage < filesPages"
+            class="btn ghost"
+            :disabled="resourceBusy"
+            @click="loadResource(false, true)"
+          >
+            {{ resourceBusy ? "正在读取…" : "继续加载文件" }}
+          </button>
+        </div>
+      </template>
+      <template v-else-if="tab === 'logs'">
+        <StateView
           v-if="resourceBusy || resourceError || !logs.length"
           :loading="resourceBusy"
           :error="resourceError"
           title="暂无日志"
           @retry="loadResource"
-        /><template v-else
-          ><button class="btn ghost compact" @click="copyDiagnostic">
+        />
+        <template v-else>
+          <button
+            class="btn ghost compact"
+            @click="copyDiagnostic"
+          >
             复制日志与诊断
           </button>
           <pre class="log-output">{{ logs.join("\n") }}</pre>
-        </template></template
-      ><TrendHistory
+        </template>
+      </template>
+      <TrendHistory
         v-else-if="tab === 'stats' && task.stats_endpoint"
-        :endpoint="task.stats_endpoint" /><StateView
+        :endpoint="task.stats_endpoint"
+      />
+      <StateView
         v-else
         title="暂无统计历史"
-        description="平台返回互动统计后会开始记录。" /></template
-    ><template #footer
-      ><template v-if="task"
-        ><button
+        description="平台返回互动统计后会开始记录。"
+      />
+    </template>
+    <template #footer>
+      <template v-if="task">
+        <button
           v-if="['failed', 'cancelled'].includes(task.status)"
           class="btn primary"
           :disabled="busy || deleting"
           @click="emit('action', task, 'retry')"
         >
-          重试</button
-        ><button
-          v-if="
-            task.platform === 'douyin' &&
-            ['pending', 'downloading'].includes(task.status)
-          "
+          重试
+        </button>
+        <button
+          v-if="task.platform === 'douyin' && ['pending', 'downloading'].includes(task.status)"
           class="btn"
           :disabled="busy || deleting"
           @click="emit('action', task, 'pause')"
         >
-          暂停</button
-        ><button
+          暂停
+        </button>
+        <button
           v-if="task.platform === 'douyin' && task.status === 'paused'"
           class="btn primary"
           :disabled="busy || deleting"
           @click="emit('action', task, 'resume')"
         >
-          恢复</button
-        ><button
-          v-if="
-            task.platform === 'douyin' &&
-            ['failed', 'cancelled'].includes(task.status)
-          "
+          恢复
+        </button>
+        <button
+          v-if="task.platform === 'douyin' && ['failed', 'cancelled'].includes(task.status)"
           class="btn"
           :disabled="busy || deleting"
           @click="emit('action', task, 'refresh_retry')"
         >
-          刷新链接重试</button
-        ><button
+          刷新链接重试
+        </button>
+        <button
           v-if="['pending', 'downloading', 'paused'].includes(task.status)"
           class="btn"
           :disabled="busy || deleting"
           @click="emit('action', task, 'cancel')"
         >
-          取消任务</button
-        ><button
+          取消任务
+        </button>
+        <button
           v-else
           class="btn danger"
           :disabled="busy || deleting"
           @click="deleteRecord"
         >
           删除记录
-        </button></template
-      ></template
-    ></InspectorPanel
-  >
+        </button>
+      </template>
+    </template>
+  </InspectorPanel>
 </template>

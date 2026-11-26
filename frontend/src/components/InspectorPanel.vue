@@ -1,12 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { X } from "@lucide/vue";
-import {
-  focusFirst,
-  restoreFocus,
-  trapFocus,
-  captureFocusOrigin,
-} from "../focus";
+import { focusFirst, restoreFocus, trapFocus, captureFocusOrigin } from "../focus";
 import { modalDepth, inspectorDepth } from "../workspace";
 const props = withDefaults(
   defineProps<{
@@ -74,12 +69,19 @@ onBeforeUnmount(() => {
     modalDepth.value--;
     if (!props.modal) inspectorDepth.value--;
   }
-  restoreFocus(origin);
+  if (props.open) restoreFocus(origin);
 });
 </script>
 <template>
-  <Teleport to="body" :disabled="wide"
-    ><div v-if="open" class="inspector-host" :class="{ docked: wide }">
+  <Teleport
+    to="body"
+    :disabled="wide"
+  >
+    <div
+      v-if="open"
+      class="inspector-host"
+      :class="{ docked: wide }"
+    >
       <button
         v-if="!wide"
         class="inspector-backdrop"
@@ -100,14 +102,22 @@ onBeforeUnmount(() => {
             <h2>{{ title }}</h2>
             <p v-if="subtitle">{{ subtitle }}</p>
           </div>
-          <button class="icon-btn" aria-label="关闭详情" @click="emit('close')">
+          <button
+            class="icon-btn"
+            aria-label="关闭详情"
+            @click="emit('close')"
+          >
             <X :size="18" />
           </button>
         </header>
         <div class="inspector-body"><slot /></div>
-        <footer v-if="$slots.footer" class="inspector-footer">
+        <footer
+          v-if="$slots.footer"
+          class="inspector-footer"
+        >
           <slot name="footer" />
         </footer>
-      </section></div
-  ></Teleport>
+      </section>
+    </div>
+  </Teleport>
 </template>

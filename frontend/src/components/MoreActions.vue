@@ -1,12 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, useId } from "vue";
 import { Ellipsis, X } from "@lucide/vue";
-import {
-  focusFirst,
-  restoreFocus,
-  rememberMenuOrigin,
-  releaseMenuOrigin,
-} from "../focus";
+import { focusFirst, restoreFocus, rememberMenuOrigin, releaseMenuOrigin } from "../focus";
 withDefaults(defineProps<{ label?: string }>(), { label: "更多操作" });
 const open = ref(false),
   trigger = ref<HTMLElement | null>(null),
@@ -19,10 +14,7 @@ function close() {
   open.value = false;
   document.removeEventListener("keydown", keydown, true);
   void nextTick(() => {
-    if (
-      document.activeElement === document.body ||
-      previousPanel?.contains(document.activeElement)
-    )
+    if (document.activeElement === document.body || previousPanel?.contains(document.activeElement))
       restoreFocus(trigger.value);
   });
 }
@@ -35,9 +27,7 @@ function keydown(event: KeyboardEvent) {
   else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
     event.preventDefault();
     const items = [
-      ...(panel.value?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled),a",
-      ) || []),
+      ...(panel.value?.querySelectorAll<HTMLElement>("button:not(:disabled),a") || []),
     ];
     const current = items.indexOf(document.activeElement as HTMLElement);
     const index =
@@ -45,8 +35,7 @@ function keydown(event: KeyboardEvent) {
         ? 0
         : event.key === "End"
           ? items.length - 1
-          : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) %
-            items.length;
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
     items[index]?.focus();
   }
 }
@@ -54,10 +43,8 @@ async function show() {
   const rect = trigger.value?.getBoundingClientRect();
   if (!rect) return;
   position.value = {
-    top:
-      Math.min(rect.bottom + 6, Math.max(12, window.innerHeight - 360)) + "px",
-    left:
-      Math.max(12, Math.min(rect.right - 240, window.innerWidth - 252)) + "px",
+    top: Math.min(rect.bottom + 6, Math.max(12, window.innerHeight - 360)) + "px",
+    left: Math.max(12, Math.min(rect.right - 240, window.innerWidth - 252)) + "px",
   };
   rememberMenuOrigin(trigger.value);
   open.value = true;
@@ -90,8 +77,12 @@ onBeforeUnmount(() => document.removeEventListener("keydown", keydown, true));
   >
     <Ellipsis :size="18" />
   </button>
-  <Teleport to="body"
-    ><div v-if="open" class="action-popover-backdrop" @click.self="close">
+  <Teleport to="body">
+    <div
+      v-if="open"
+      class="action-popover-backdrop"
+      @click.self="close"
+    >
       <section
         :id="id"
         ref="panel"
@@ -105,6 +96,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", keydown, true));
           <strong>{{ label }}</strong>
         </header>
         <div @click="choose"><slot /></div>
-      </section></div
-  ></Teleport>
+      </section>
+    </div>
+  </Teleport>
 </template>

@@ -42,8 +42,7 @@ const points = computed(() => {
 });
 const increase = computed(() =>
   series.value.length
-    ? Number(series.value.at(-1)[metric.value]) -
-      Number(series.value[0][metric.value])
+    ? Number(series.value.at(-1)[metric.value]) - Number(series.value[0][metric.value])
     : 0,
 );
 let sequence = 0;
@@ -54,8 +53,7 @@ async function load() {
   snapshots.value = [];
   try {
     const data = await api<any>(props.endpoint);
-    if (current === sequence)
-      snapshots.value = Array.isArray(data) ? data : data.snapshots || [];
+    if (current === sequence) snapshots.value = Array.isArray(data) ? data : data.snapshots || [];
   } catch (e: any) {
     if (current === sequence) error.value = e.message;
   } finally {
@@ -66,7 +64,10 @@ watch(() => props.endpoint, load, { immediate: true });
 </script>
 <template>
   <div class="trend-history">
-    <nav class="view-tabs" aria-label="统计指标">
+    <nav
+      class="view-tabs"
+      aria-label="统计指标"
+    >
       <button
         v-for="item in metrics"
         :key="item[0]"
@@ -84,11 +85,12 @@ watch(() => props.endpoint, load, { immediate: true });
       title="暂无统计历史"
       description="取得统计字段后会自动记录快照。"
       @retry="load"
-    /><template v-else
-      ><p>
+    />
+    <template v-else>
+      <p>
         当前
-        <strong>{{ Number(series.at(-1)[metric]).toLocaleString() }}</strong> ·
-        区间变化 {{ increase > 0 ? "+" : "" }}{{ increase.toLocaleString() }}
+        <strong>{{ Number(series.at(-1)[metric]).toLocaleString() }}</strong>
+        · 区间变化 {{ increase > 0 ? "+" : "" }}{{ increase.toLocaleString() }}
       </p>
       <svg
         class="trend-chart"
@@ -97,7 +99,12 @@ watch(() => props.endpoint, load, { immediate: true });
         role="img"
         aria-label="互动数据变化曲线"
       >
-        <line x1="0" y1="90" x2="100" y2="90" />
+        <line
+          x1="0"
+          y1="90"
+          x2="100"
+          y2="90"
+        />
         <polyline :points="points" />
       </svg>
       <div class="trend-table">
@@ -105,11 +112,11 @@ watch(() => props.endpoint, load, { immediate: true });
           v-for="(snapshot, index) in [...series].reverse().slice(0, 30)"
           :key="snapshot.id || index"
         >
-          <time>{{ dateTime(snapshot.observed_at) }}</time
-          ><strong>{{ Number(snapshot[metric]).toLocaleString() }}</strong
-          ><span>{{ snapshot.source }}</span>
+          <time>{{ dateTime(snapshot.observed_at) }}</time>
+          <strong>{{ Number(snapshot[metric]).toLocaleString() }}</strong>
+          <span>{{ snapshot.source }}</span>
         </article>
-      </div></template
-    >
+      </div>
+    </template>
   </div>
 </template>

@@ -19,12 +19,33 @@ function width(value: number) {
 </script>
 
 <template>
-  <ol class="rank-bars" :aria-label="label">
-    <li v-for="item in items" :key="item.key">
-      <component :is="item.to ? 'RouterLink' : 'div'" :to="item.to" class="rank-row">
-        <span class="rank-name" :title="item.label">{{ item.label }}<small v-if="item.hint">{{ item.hint }}</small></span>
+  <ol
+    class="rank-bars"
+    :aria-label="label"
+  >
+    <li
+      v-for="item in items"
+      :key="item.key"
+    >
+      <component
+        :is="item.to ? 'RouterLink' : 'div'"
+        :to="item.to"
+        class="rank-row"
+      >
+        <span
+          class="rank-name"
+          :title="item.label"
+        >
+          {{ item.label }}
+          <small v-if="item.hint">{{ item.hint }}</small>
+        </span>
         <span class="rank-value">{{ item.display }}</span>
-        <span class="rank-track" aria-hidden="true"><i :style="{ width: width(item.value) }" /></span>
+        <span
+          class="rank-track"
+          aria-hidden="true"
+        >
+          <i :style="{ width: width(item.value) }" />
+        </span>
       </component>
     </li>
   </ol>

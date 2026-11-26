@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { usePagePolling } from "../composables/usePagePolling";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Clipboard, Search, Zap } from "@lucide/vue";
@@ -12,12 +13,7 @@ import MoreActions from "../components/MoreActions.vue";
 import Pager from "../components/Pager.vue";
 import IssueDetail from "../components/IssueDetail.vue";
 import SubscriptionNavigation from "../components/SubscriptionNavigation.vue";
-import {
-  confirmAction,
-  dateTime,
-  duration,
-  useContextActions,
-} from "../workspace";
+import { confirmAction, dateTime, duration, useContextActions } from "../workspace";
 import type { AutomationRun, AutomationCycle, AutomationPage } from "../types";
 const store = useAppStore(),
   route = useRoute(),
@@ -42,15 +38,16 @@ const results = computed(() =>
   (detail.value?.details || []).filter(
     (item) =>
       (!onlyIssues.value ||
-        ["failed", "warning", "error", "partial", "interrupted", "deferred"].includes(item.status) ||
+        ["failed", "warning", "error", "partial", "interrupted", "deferred"].includes(
+          item.status,
+        ) ||
         item.error ||
         item.warning) &&
       (!authorSearch.value ||
         (item.nickname || String(item.author_id)).includes(authorSearch.value)),
   ),
 );
-let timer: number | undefined,
-  sequence = 0,
+let sequence = 0,
   detailSequence = 0,
   inFlight = false;
 function metric(value?: number) {
@@ -71,8 +68,7 @@ async function load(silent = false) {
     loaded.value = true;
     loadError.value = "";
     updatedAt.value = new Date().toISOString();
-    if (page.value > Math.max(1, unified.pages))
-      changePage(Math.max(1, unified.pages));
+    if (page.value > Math.max(1, unified.pages)) changePage(Math.max(1, unified.pages));
   } catch (e: any) {
     if (current === sequence) loadError.value = e.message || "无法读取运行记录";
   } finally {
@@ -90,12 +86,13 @@ async function loadDetail(silent = false) {
   detailBusy.value = true;
   try {
     const data = await api<AutomationRun>(
-      runId.value.includes(":") ? `/subscription-runs/${encodeURIComponent(runId.value)}` : `/authors/reports/subscriptions/${runId.value}`,
+      runId.value.includes(":")
+        ? `/subscription-runs/${encodeURIComponent(runId.value)}`
+        : `/authors/reports/subscriptions/${runId.value}`,
     );
     if (current === detailSequence) detail.value = data;
   } catch (e: any) {
-    if (current === detailSequence)
-      detailError.value = e.message || "无法读取运行详情";
+    if (current === detailSequence) detailError.value = e.message || "无法读取运行详情";
   } finally {
     if (current === detailSequence) detailBusy.value = false;
   }
@@ -128,10 +125,9 @@ async function run(reconcile = false) {
     return;
   busy.value = true;
   try {
-    const data = await api<any>(
-      reconcile ? "/authors/reconcile-all" : "/authors/check-all",
-      { method: "POST" },
-    );
+    const data = await api<any>(reconcile ? "/authors/reconcile-all" : "/authors/check-all", {
+      method: "POST",
+    });
     store.notify(data.message || "检查已提交");
     await load();
   } catch (e: any) {
@@ -150,10 +146,18 @@ async function copyDiagnostic() {
   }
 }
 function sourceLabel(report: AutomationRun) {
-  const labels: Record<string, string> = {posts:'Posts',reels:'Reels',stories:'Stories',highlights:'Highlights',session:'会话',work:'作品',profile:'作者'};
-  if (report.platform !== 'instagram') return '抖音';
-  if (report.content_kind === 'session') return 'Instagram · 会话检测';
-  return `Instagram${report.content_kind ? ' · ' + (labels[report.content_kind] || report.content_kind) : ''}`;
+  const labels: Record<string, string> = {
+    posts: "Posts",
+    reels: "Reels",
+    stories: "Stories",
+    highlights: "Highlights",
+    session: "会话",
+    work: "作品",
+    profile: "作者",
+  };
+  if (report.platform !== "instagram") return "抖音";
+  if (report.content_kind === "session") return "Instagram · 会话检测";
+  return `Instagram${report.content_kind ? " · " + (labels[report.content_kind] || report.content_kind) : ""}`;
 }
 function runSubject(report: AutomationRun) {
   if (report.content_kind === "session") return "登录会话";
@@ -163,11 +167,7 @@ function trigger(value?: string) {
   if (value === "session") return "会话检测";
   if (value === "history") return "历史补采";
   if (value === "recent") return "增量检查";
-  return value === "manual"
-    ? "手动检查"
-    : value === "reconcile"
-      ? "全量对账"
-      : "自动调度";
+  return value === "manual" ? "手动检查" : value === "reconcile" ? "全量对账" : "自动调度";
 }
 useContextActions(() => [
   {
@@ -186,20 +186,17 @@ watch(
     void load();
   },
 );
+usePagePolling(10000, () => {
+  void load(true);
+  if (["running", "pending"].includes(detail.value?.status || "")) void loadDetail(true);
+});
 onMounted(() => {
   void load();
   void loadDetail();
-  timer = window.setInterval(() => {
-    if (!document.hidden) {
-      void load(true);
-      if (["running", "pending"].includes(detail.value?.status || "")) void loadDetail(true);
-    }
-  }, 10000);
 });
 onBeforeUnmount(() => {
   sequence++;
   detailSequence++;
-  clearInterval(timer);
 });
 </script>
 <template>
@@ -212,40 +209,60 @@ onBeforeUnmount(() => {
       refreshable
       @refresh="load"
     >
-      <MoreActions label="自动化操作"
-        ><button :disabled="busy || store.risk.active" @click="run(true)">
-          全量对账</button
-        ><button @click="copyDiagnostic">
-          <Clipboard :size="15" />复制诊断</button
-        ><RouterLink to="/settings/subscriptions"
-          >调度设置</RouterLink
-        ></MoreActions
-      >
+      <MoreActions label="自动化操作">
+        <button
+          :disabled="busy || store.risk.active"
+          @click="run(true)"
+        >
+          全量对账
+        </button>
+        <button @click="copyDiagnostic">
+          <Clipboard :size="15" />
+          复制诊断
+        </button>
+        <RouterLink to="/settings/subscriptions">调度设置</RouterLink>
+      </MoreActions>
       <button
         class="btn primary"
         :disabled="busy || store.risk.active"
         @click="run()"
       >
-        <Zap :size="15" />{{ busy ? "提交中…" : "检查抖音" }}
+        <Zap :size="15" />
+        {{ busy ? "提交中…" : "检查抖音" }}
       </button>
     </PageHeader>
     <SubscriptionNavigation />
-    <div v-if="loadError && loaded" class="load-error-banner" role="alert">
+    <div
+      v-if="loadError && loaded"
+      class="load-error-banner"
+      role="alert"
+    >
       <IssueDetail
         :message="loadError"
         impact="显示上次读取的数据；当前状态未确认。"
-      /><button class="btn ghost compact" @click="load()">重试</button>
+      />
+      <button
+        class="btn ghost compact"
+        @click="load()"
+      >
+        重试
+      </button>
     </div>
-    <section class="cycle-strip" aria-label="当前检查周期">
+    <section
+      class="cycle-strip"
+      aria-label="当前检查周期"
+    >
       <div>
-        <span class="eyebrow">抖音检查周期</span
-        ><strong>{{
-          !loaded || cycle.active == null
-            ? "状态未确认"
-            : cycle.active
-              ? "检查进行中"
-              : "等待下一轮调度"
-        }}</strong>
+        <span class="eyebrow">抖音检查周期</span>
+        <strong>
+          {{
+            !loaded || cycle.active == null
+              ? "状态未确认"
+              : cycle.active
+                ? "检查进行中"
+                : "等待下一轮调度"
+          }}
+        </strong>
       </div>
       <dl>
         <div>
@@ -274,10 +291,7 @@ onBeforeUnmount(() => {
     </section>
     <div class="section-heading">
       <h2>运行历史</h2>
-      <span
-        >{{ loaded ? total.toLocaleString() + " 次运行" : "—" }} ·
-        全部平台</span
-      >
+      <span>{{ loaded ? total.toLocaleString() + " 次运行" : "—" }} · 全部平台</span>
     </div>
     <StateView
       v-if="!reports.length"
@@ -287,7 +301,10 @@ onBeforeUnmount(() => {
       description="订阅作者后，自动检查将在这里留下记录。"
       @retry="load"
     />
-    <div v-else class="table-shell">
+    <div
+      v-else
+      class="table-shell"
+    >
       <table class="data-table run-table">
         <thead>
           <tr>
@@ -308,22 +325,38 @@ onBeforeUnmount(() => {
             :class="{ selected: runId === String(report.key || report.id) }"
           >
             <td data-label="时间">
-              <button class="record-link" @click="openRun(report.key || report.id)">
-                {{ dateTime(report.started_at) }}</button
-              ><span>{{ sourceLabel(report) }}<template v-if="report.trigger_type !== 'session'"> · {{ trigger(report.trigger_type) }}</template></span>
+              <button
+                class="record-link"
+                @click="openRun(report.key || report.id)"
+              >
+                {{ dateTime(report.started_at) }}
+              </button>
+              <span>
+                {{ sourceLabel(report) }}
+                <template v-if="report.trigger_type !== 'session'">
+                  · {{ trigger(report.trigger_type) }}
+                </template>
+              </span>
             </td>
             <td data-label="检查范围">
-              <template v-if="report.platform === 'instagram'"
-                ><span class="run-subject">{{ runSubject(report) }}</span></template
-              ><template v-else
-                >{{ report.checked_authors
-                }}<small> / {{ report.total_authors }} 位作者</small></template
-              >
+              <template v-if="report.platform === 'instagram'">
+                <span class="run-subject">{{ runSubject(report) }}</span>
+              </template>
+              <template v-else>
+                {{ report.checked_authors }}
+                <small>/ {{ report.total_authors }} 位作者</small>
+              </template>
             </td>
             <td data-label="新作品">{{ report.new_works }}</td>
-            <td data-label="下载文件">{{ report.downloaded_files ?? '—' }}</td>
+            <td data-label="下载文件">{{ report.downloaded_files ?? "—" }}</td>
             <td data-label="待续检">
-              {{ report.platform === "instagram" ? (report.remaining_authors ? "续检中" : "—") : report.remaining_authors }}
+              {{
+                report.platform === "instagram"
+                  ? report.remaining_authors
+                    ? "续检中"
+                    : "—"
+                  : report.remaining_authors
+              }}
             </td>
             <td data-label="耗时">
               {{
@@ -344,8 +377,14 @@ onBeforeUnmount(() => {
                   onlyIssues = true;
                 "
               >
-                {{ report.failed_authors + report.warning_authors }} 位</button
-              ><span v-else class="muted">—</span>
+                {{ report.failed_authors + report.warning_authors }} 位
+              </button>
+              <span
+                v-else
+                class="muted"
+              >
+                —
+              </span>
             </td>
           </tr>
         </tbody>
@@ -361,9 +400,7 @@ onBeforeUnmount(() => {
     <InspectorPanel
       :open="!!runId"
       :title="detail ? `${sourceLabel(detail)} · 运行 #${detail.id}` : '运行详情'"
-      :subtitle="
-        dateTime(detail?.started_at) + ' · ' + trigger(detail?.trigger_type)
-      "
+      :subtitle="dateTime(detail?.started_at) + ' · ' + trigger(detail?.trigger_type)"
       @close="closeRun"
     >
       <StateView
@@ -372,8 +409,8 @@ onBeforeUnmount(() => {
         :error="detailError"
         @retry="loadDetail"
       />
-      <template v-else
-        ><StatusIndicator :status="detail.status" />
+      <template v-else>
+        <StatusIndicator :status="detail.status" />
         <p class="detail-summary">{{ detail.summary || "本次检查结果" }}</p>
         <dl class="detail-grid">
           <div v-if="detail.platform === 'instagram'">
@@ -389,8 +426,10 @@ onBeforeUnmount(() => {
             <dd>{{ detail.new_works }} 个</dd>
           </div>
           <div>
-            <dt>下载文件</dt><dd>{{ detail.downloaded_files ?? '—' }}</dd>
-          </div><div v-if="detail.platform !== 'instagram'">
+            <dt>下载文件</dt>
+            <dd>{{ detail.downloaded_files ?? "—" }}</dd>
+          </div>
+          <div v-if="detail.platform !== 'instagram'">
             <dt>待续检</dt>
             <dd>{{ detail.remaining_authors }} 位</dd>
           </div>
@@ -399,19 +438,30 @@ onBeforeUnmount(() => {
             <dd>{{ duration(detail.started_at, detail.finished_at) }}</dd>
           </div>
         </dl>
-        <p v-if="detail.remaining_authors" class="inline-note">
+        <p
+          v-if="detail.remaining_authors"
+          class="inline-note"
+        >
           未完成的作者会在后续调度中继续检查。账号或上游异常的恢复条件见作者详情。
         </p>
         <div class="section-heading">
           <h3>作者结果</h3>
-          <label><input v-model="onlyIssues" type="checkbox" /> 仅异常</label>
+          <label>
+            <input
+              v-model="onlyIssues"
+              type="checkbox"
+            />
+            仅异常
+          </label>
         </div>
-        <label class="search"
-          ><Search :size="15" /><input
+        <label class="search">
+          <Search :size="15" />
+          <input
             v-model="authorSearch"
             placeholder="在本次结果中查找作者"
             aria-label="搜索本次作者结果"
-        /></label>
+          />
+        </label>
         <div class="result-list">
           <article
             v-for="(item, index) in results"
@@ -420,21 +470,33 @@ onBeforeUnmount(() => {
             <div>
               <RouterLink
                 v-if="item.author_id"
-                :to="detail.platform === 'instagram' ? `/authors/instagram?author=${item.author_id}` : `/authors/douyin?focus=${item.author_id}`"
-                >{{ item.nickname || "作者 " + item.author_id }}</RouterLink
-              ><strong v-else>{{ item.nickname || "作者未确认" }}</strong
-              ><StatusIndicator :status="item.status" />
+                :to="
+                  detail.platform === 'instagram'
+                    ? `/authors/instagram?author=${item.author_id}`
+                    : `/authors/douyin?focus=${item.author_id}`
+                "
+              >
+                {{ item.nickname || "作者 " + item.author_id }}
+              </RouterLink>
+              <strong v-else>{{ item.nickname || "作者未确认" }}</strong>
+              <StatusIndicator :status="item.status" />
             </div>
-            <span v-if="item.new_works">新作品 {{ item.new_works }} 个</span
-            ><IssueDetail
+            <span v-if="item.new_works">新作品 {{ item.new_works }} 个</span>
+            <IssueDetail
               v-if="item.message || item.error || item.warning"
               :message="item.message || item.error || item.warning || ''"
               :code="item.error_code"
-            /><small v-if="item.http_status">HTTP {{ item.http_status }}</small>
+            />
+            <small v-if="item.http_status">HTTP {{ item.http_status }}</small>
           </article>
-          <p v-if="!results.length" class="inline-note">没有匹配的作者结果。</p>
-        </div></template
-      >
+          <p
+            v-if="!results.length"
+            class="inline-note"
+          >
+            没有匹配的作者结果。
+          </p>
+        </div>
+      </template>
     </InspectorPanel>
   </section>
 </template>

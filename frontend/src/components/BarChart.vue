@@ -17,6 +17,8 @@ const props = defineProps<{
   compact?: boolean;
 }>();
 
+const bars = ref<HTMLElement[]>([]);
+const keyboardIndex = ref(0);
 const active = ref<number | null>(null);
 const peak = computed(() => Math.max(0, ...props.items.map((item) => item.value)));
 const step = computed(() => props.tickEvery || Math.max(1, Math.ceil(props.items.length / 6)));
@@ -30,32 +32,52 @@ function height(value: number) {
   // 有数据的柱至少保留 2% 高度，避免极小值在视觉上等同于零。
   return peak.value > 0 && value > 0 ? `${Math.max(2, (value / peak.value) * 100)}%` : "0%";
 }
+function leavePlot() {
+  active.value = bars.value.includes(document.activeElement as HTMLElement)
+    ? keyboardIndex.value
+    : null;
+}
 function move(event: KeyboardEvent) {
   if (!props.items.length) return;
   if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
     event.preventDefault();
     const delta = event.key === "ArrowRight" ? 1 : -1;
-    const current = active.value === null ? (delta > 0 ? -1 : props.items.length) : active.value;
-    active.value = Math.min(props.items.length - 1, Math.max(0, current + delta));
+    const next = Math.min(props.items.length - 1, Math.max(0, keyboardIndex.value + delta));
+    bars.value.find((bar) => Number(bar.dataset.index) === next)?.focus();
   } else if (event.key === "Escape") active.value = null;
 }
 </script>
 
 <template>
-  <figure class="bar-chart" :class="{ compact }">
-    <div class="bar-chart-scale" aria-hidden="true">
-      <span>{{ format(peak) }}</span><span>0</span>
+  <figure
+    class="bar-chart"
+    :class="{ compact }"
+  >
+    <div
+      class="bar-chart-scale"
+      aria-hidden="true"
+    >
+      <span>{{ format(peak) }}</span>
+      <span>0</span>
     </div>
     <div
       class="bar-chart-plot"
-      role="img"
-      tabindex="0"
+      role="group"
       :aria-label="`${caption}。使用左右方向键逐项查看。`"
       @keydown="move"
-      @pointerleave="active = null"
-      @blur="active = null"
+      @pointerleave="leavePlot"
     >
-      <div
+      <button
+        type="button"
+        ref="bars"
+        :data-index="index"
+        :aria-label="`${item.label}，${format(item.value)}`"
+        :tabindex="index === Math.min(keyboardIndex, items.length - 1) ? 0 : -1"
+        @focus="
+          keyboardIndex = index;
+          active = index;
+        "
+        @blur="active = null"
         v-for="(item, index) in items"
         :key="item.key"
         class="bar-chart-column"
@@ -64,13 +86,27 @@ function move(event: KeyboardEvent) {
         @click="active = index"
       >
         <i :style="{ height: height(item.value) }" />
-      </div>
-      <div v-if="focused" class="bar-chart-tooltip" :style="{ left: tooltipLeft }" role="status">
-        <small>{{ focused.label }}</small><strong>{{ format(focused.value) }}</strong>
+      </button>
+      <div
+        v-if="focused"
+        class="bar-chart-tooltip"
+        :style="{ left: tooltipLeft }"
+        aria-hidden="true"
+      >
+        <small>{{ focused.label }}</small>
+        <strong>{{ format(focused.value) }}</strong>
       </div>
     </div>
-    <div class="bar-chart-axis" aria-hidden="true">
-      <span v-for="(item, index) in items" :key="item.key">{{ index % step === 0 ? item.tick ?? item.label : "" }}</span>
+    <div
+      class="bar-chart-axis"
+      aria-hidden="true"
+    >
+      <span
+        v-for="(item, index) in items"
+        :key="item.key"
+      >
+        {{ index % step === 0 ? (item.tick ?? item.label) : "" }}
+      </span>
     </div>
     <figcaption class="sr-only">{{ caption }}</figcaption>
   </figure>

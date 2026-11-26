@@ -1,28 +1,7 @@
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from "vue";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  Pause,
-  Play,
-  X,
-  ZoomIn,
-  ZoomOut,
-} from "@lucide/vue";
-import {
-  focusFirst,
-  restoreFocus,
-  trapFocus,
-  captureFocusOrigin,
-} from "../focus";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { ChevronLeft, ChevronRight, Download, Pause, Play, X, ZoomIn, ZoomOut } from "@lucide/vue";
+import { focusFirst, restoreFocus, trapFocus, captureFocusOrigin } from "../focus";
 import { modalDepth } from "../workspace";
 import type { MediaItem } from "../types";
 
@@ -50,7 +29,14 @@ const speed = ref(1);
 const slideshow = ref(false);
 let returnFocus: HTMLElement | null = null;
 let slideTimer: number | undefined;
-let gesture: { id: number; x: number; y: number; originX: number; originY: number; pan: boolean } | null = null;
+let gesture: {
+  id: number;
+  x: number;
+  y: number;
+  originX: number;
+  originY: number;
+  pan: boolean;
+} | null = null;
 let pointerStart: PointerEvent | null = null;
 
 const current = computed(() => props.items[index.value]);
@@ -93,8 +79,12 @@ function pointerDown(event: PointerEvent) {
   if (!isImage.value || (event.target as HTMLElement).closest("button, a")) return;
   if (event.pointerType === "mouse" && event.button !== 0) return;
   gesture = {
-    id: event.pointerId, x: event.clientX, y: event.clientY,
-    originX: offset.value.x, originY: offset.value.y, pan: zoomed.value,
+    id: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    originX: offset.value.x,
+    originY: offset.value.y,
+    pan: zoomed.value,
   };
 }
 function pointerMove(event: PointerEvent) {
@@ -112,10 +102,16 @@ function pointerMove(event: PointerEvent) {
 }
 function pointerUp(event: PointerEvent) {
   if (!gesture || gesture.id !== event.pointerId) return;
-  const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
+  const dx = event.clientX - gesture.x,
+    dy = event.clientY - gesture.y;
   const swipe = !gesture.pan && event.pointerType !== "mouse";
   gesture = null;
-  if (swipe && props.items.length > 1 && Math.abs(dx) > SWIPE_DISTANCE && Math.abs(dx) > Math.abs(dy) * 1.5)
+  if (
+    swipe &&
+    props.items.length > 1 &&
+    Math.abs(dx) > SWIPE_DISTANCE &&
+    Math.abs(dx) > Math.abs(dy) * 1.5
+  )
     move(dx < 0 ? 1 : -1);
 }
 function cycleSpeed() {
@@ -179,7 +175,8 @@ function rememberPointerStart(event: PointerEvent) {
 function closeOnBackdrop(event: MouseEvent) {
   if (
     pointerStart?.target === event.target &&
-    Math.hypot(event.clientX - pointerStart.clientX, event.clientY - pointerStart.clientY) <= BACKDROP_CLICK_DISTANCE
+    Math.hypot(event.clientX - pointerStart.clientX, event.clientY - pointerStart.clientY) <=
+      BACKDROP_CLICK_DISTANCE
   ) {
     close();
   }
@@ -212,10 +209,7 @@ watch(
     modalDepth.value += open ? 1 : -1;
     if (open) {
       returnFocus = captureFocusOrigin();
-      index.value = Math.min(
-        Math.max(props.start || 0, 0),
-        Math.max(0, props.items.length - 1),
-      );
+      index.value = Math.min(Math.max(props.start || 0, 0), Math.max(0, props.items.length - 1));
       failed.value = false;
       slideshow.value = false;
       resetView();
@@ -259,20 +253,52 @@ onBeforeUnmount(() => {
         @pointerdown.capture="rememberPointerStart"
         @click.self="closeOnBackdrop"
       >
-        <header class="lightbox-bar" @click.self="closeOnBackdrop">
+        <header
+          class="lightbox-bar"
+          @click.self="closeOnBackdrop"
+        >
           <div>
-            <strong>{{ current?.title || "媒体预览" }}</strong
-            ><span v-if="items.length > 1"
-              >{{ index + 1 }} / {{ items.length }}</span
-            >
+            <strong>{{ current?.title || "媒体预览" }}</strong>
+            <span v-if="items.length > 1">{{ index + 1 }} / {{ items.length }}</span>
           </div>
           <div class="lightbox-tools">
             <template v-if="isImage">
-              <button class="icon-btn" title="缩小 (-)" aria-label="缩小" :disabled="!zoomed" @click="zoom(0.8)"><ZoomOut :size="18" /></button>
-              <button class="lightbox-chip" :title="zoomed ? '恢复原始大小 (0)' : '放大 (+)'" :aria-label="`当前缩放 ${Math.round(scale * 100)}%，点击${zoomed ? '恢复' : '放大'}`" @click="toggleZoom">{{ Math.round(scale * 100) }}%</button>
-              <button class="icon-btn" title="放大 (+)" aria-label="放大" :disabled="scale >= MAX_SCALE" @click="zoom(1.25)"><ZoomIn :size="18" /></button>
+              <button
+                class="icon-btn"
+                title="缩小 (-)"
+                aria-label="缩小"
+                :disabled="!zoomed"
+                @click="zoom(0.8)"
+              >
+                <ZoomOut :size="18" />
+              </button>
+              <button
+                class="lightbox-chip"
+                :title="zoomed ? '恢复原始大小 (0)' : '放大 (+)'"
+                :aria-label="`当前缩放 ${Math.round(scale * 100)}%，点击${zoomed ? '恢复' : '放大'}`"
+                @click="toggleZoom"
+              >
+                {{ Math.round(scale * 100) }}%
+              </button>
+              <button
+                class="icon-btn"
+                title="放大 (+)"
+                aria-label="放大"
+                :disabled="scale >= MAX_SCALE"
+                @click="zoom(1.25)"
+              >
+                <ZoomIn :size="18" />
+              </button>
             </template>
-            <button v-else-if="current?.type === 'video' && !failed" class="lightbox-chip" title="切换播放速度" :aria-label="`播放速度 ${speed} 倍，点击切换`" @click="cycleSpeed">{{ speed }}×</button>
+            <button
+              v-else-if="current?.type === 'video' && !failed"
+              class="lightbox-chip"
+              title="切换播放速度"
+              :aria-label="`播放速度 ${speed} 倍，点击切换`"
+              @click="cycleSpeed"
+            >
+              {{ speed }}×
+            </button>
             <button
               v-if="items.length > 1"
               class="icon-btn"
@@ -282,7 +308,14 @@ onBeforeUnmount(() => {
               :aria-pressed="slideshow"
               @click="toggleSlideshow"
             >
-              <Pause v-if="slideshow" :size="18" /><Play v-else :size="18" />
+              <Pause
+                v-if="slideshow"
+                :size="18"
+              />
+              <Play
+                v-else
+                :size="18"
+              />
             </button>
             <a
               v-if="current"
@@ -291,8 +324,9 @@ onBeforeUnmount(() => {
               download
               title="下载"
               aria-label="下载当前媒体"
-              ><Download :size="18"
-            /></a>
+            >
+              <Download :size="18" />
+            </a>
             <button
               class="icon-btn lightbox-close"
               title="关闭"
@@ -313,7 +347,10 @@ onBeforeUnmount(() => {
           @pointerup="pointerUp"
           @pointercancel="gesture = null"
         >
-          <div v-if="failed || !current" class="media-fallback">
+          <div
+            v-if="failed || !current"
+            class="media-fallback"
+          >
             媒体加载失败，请关闭后重试
           </div>
           <video

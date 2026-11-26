@@ -1,0 +1,586 @@
+/* ---------- Settings & maintenance ---------- */
+.config-workspace > .page-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  margin: -34px calc(var(--page-pad) * -1) 0;
+  padding: 26px var(--page-pad) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+.settings-sections,
+.maintenance-page,
+.account-page,
+.archive-page {
+  display: grid;
+  gap: 18px;
+}
+.setting-section {
+  min-width: 0;
+  padding-bottom: 2px;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--highlight);
+}
+.setting-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 18px 22px var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+.setting-section > header p {
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.setting-section
+  > :not(
+    header,
+    .setting-list,
+    .status-list,
+    .platform-table,
+    .log-console,
+    .fact-list,
+    .storage-metrics,
+    .journal-row,
+    .log-filters
+  ) {
+  margin: 14px 22px;
+}
+.setting-list > .setting-row,
+.setting-list > :where(.notification-result) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 400px);
+  align-items: center;
+  gap: 10px var(--space-7);
+  padding: 15px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.setting-list > :last-child {
+  border-bottom: 0;
+}
+.setting-copy {
+  min-width: 0;
+}
+.setting-copy strong {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 13.5px;
+  font-weight: 560;
+}
+.setting-copy strong i,
+.field-dirty {
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 19px;
+}
+.setting-copy strong i {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.field-dirty {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.setting-copy small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.setting-control {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.setting-control > input,
+.setting-control > select,
+.setting-control > textarea {
+  width: 100%;
+}
+.setting-control.inline-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.setting-control.inline-control select {
+  flex: 1;
+}
+.setting-control.paired-control {
+  grid-template-columns: 1fr 1fr;
+}
+.choice-button {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 560;
+  transition: all 0.15s;
+}
+.choice-button.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.setting-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: start;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.switch-track {
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-3);
+  transition:
+    background-color 0.2s,
+    border-color 0.2s;
+}
+.setting-switch.on .switch-track {
+  border-color: transparent;
+  background: var(--accent);
+}
+.setting-switch.on .switch-track i {
+  transform: translateX(16px);
+}
+.setting-switch.on {
+  color: var(--text);
+}
+.setting-list > .notification-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.notification-result span {
+  display: inline-flex;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12.5px;
+}
+.account-summary {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 22px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--highlight);
+}
+.account-summary > div {
+  flex: 1;
+  min-width: 0;
+}
+.account-summary p {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.fact-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  padding: var(--space-4) 22px var(--space-5);
+}
+.fact-list > div {
+  padding: var(--space-3) 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.fact-list dt {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.fact-list dd {
+  margin-top: 2px;
+  font-size: var(--text-base);
+  font-weight: 560;
+  overflow-wrap: anywhere;
+}
+.capability-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+}
+.capability-note > svg {
+  color: var(--accent);
+  margin-top: 2px;
+}
+.capability-note p {
+  margin-top: 3px;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.status-list {
+  display: grid;
+}
+.status-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.status-row:last-child {
+  border-bottom: 0;
+}
+.status-row strong {
+  display: block;
+  font-size: 13.5px;
+}
+.status-row small {
+  display: block;
+  color: var(--text-3);
+}
+.status-row > b {
+  color: var(--danger);
+  font-size: 12.5px;
+}
+.status-row > b.good {
+  color: var(--success);
+}
+.row-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.platform-table {
+  display: grid;
+  overflow-x: auto;
+}
+.platform-table-head,
+.platform-table-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(160px, 1.3fr) minmax(200px, 1.6fr) minmax(
+      140px,
+      1.1fr
+    );
+  gap: var(--space-4);
+  padding: var(--space-3) 22px;
+  border-bottom: 1px solid var(--line);
+}
+.platform-table-head {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-weight: 560;
+}
+.platform-table-row:last-child {
+  border-bottom: 0;
+}
+.platform-table-row strong,
+.platform-table-row small {
+  display: block;
+}
+.platform-table-row small {
+  color: var(--text-3);
+}
+.storage-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 18px 22px var(--space-1);
+}
+.storage-metrics > div {
+  padding: 14px var(--space-4);
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.storage-metrics b {
+  display: block;
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.storage-metrics span {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.storage-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.diagnostic-box {
+  max-height: 360px;
+}
+details.diagnostic-box > summary {
+  display: flex;
+  gap: var(--space-2);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 560;
+}
+.journal-row {
+  border-top: 1px solid var(--line);
+}
+.journal-row > summary {
+  display: flex;
+  gap: var(--space-2);
+  padding: 13px 22px;
+  font-size: var(--text-sm);
+  font-weight: 560;
+}
+.journal-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 22px var(--space-4);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.log-filters {
+  display: flex;
+  gap: 6px;
+  padding: 14px 22px 10px;
+}
+.log-filters button {
+  height: 28px;
+  padding: 0 var(--space-3);
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.log-filters button.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.log-console {
+  max-height: 600px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: var(--frame);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.log-console article {
+  display: grid;
+  grid-template-columns: 168px 150px minmax(0, 1fr);
+  gap: var(--space-1) 14px;
+  padding: 7px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.log-console time {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.log-console b {
+  color: var(--text-2);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.log-console span {
+  overflow-wrap: anywhere;
+}
+.log-console small {
+  grid-column: 3;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+.log-console article[data-level="warning"] span {
+  color: var(--warning);
+}
+.log-console article[data-level="error"] span {
+  color: var(--danger);
+}
+.log-console .empty-state {
+  margin: var(--space-4);
+  font-family: var(--font-sans);
+}
+[id^="setting-"],
+.field-error-summary {
+  scroll-margin-block: 140px 32px;
+}
+
+/* ---------- First-run setup ---------- */
+.bootstrap-page {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: var(--space-8) var(--space-4);
+  background: var(--frame);
+}
+.bootstrap-card {
+  width: min(780px, 100%);
+  padding: var(--space-8);
+}
+.bootstrap-card > header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+.bootstrap-card > header .brand-mark {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+}
+.bootstrap-card h1 {
+  margin: var(--space-1) 0 6px;
+  font-size: 24px;
+}
+.bootstrap-card header p:not(.eyebrow) {
+  color: var(--text-2);
+}
+.setup-errors {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+.setup-errors article {
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--danger-line);
+  background: var(--danger-soft);
+  font-size: var(--text-sm);
+}
+.setup-errors span {
+  color: var(--text-2);
+}
+.bootstrap-form {
+  display: grid;
+  gap: 18px;
+}
+.bootstrap-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin: 0;
+  padding: 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.bootstrap-form legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px;
+  font-weight: 600;
+}
+.bootstrap-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 560;
+}
+.bootstrap-form footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.bootstrap-form footer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  color: var(--success);
+  font-size: var(--text-sm);
+}
+
+/* ---------- Settings: digest & subscription backup ---------- */
+.setting-section .digest-preview,
+.setting-section .backup-preview {
+  display: grid;
+  gap: 10px;
+  padding: 14px var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.digest-preview pre {
+  margin: 0;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}
+.backup-preview dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.backup-preview dl > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  font-size: var(--text-sm);
+}
+.backup-preview dt {
+  color: var(--text-3);
+}
+.backup-preview dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.backup-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: var(--text-sm);
+}
+.backup-option span {
+  display: grid;
+}
+.backup-option small {
+  color: var(--text-3);
+}
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+@media (hover: hover) and (pointer: fine) {
+  .choice-button:where(:hover) {
+    border-color: var(--line-hover);
+    color: var(--text);
+  }
+  .log-console article:where(:hover) {
+    background: var(--row-hover);
+  }
+}

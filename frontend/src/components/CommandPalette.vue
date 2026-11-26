@@ -3,20 +3,21 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { ArrowRight, Search } from "@lucide/vue";
 import { useRouter, type RouteLocationRaw } from "vue-router";
 import { api } from "../api";
-import { contextActions, modalDepth, platformNames, type WorkspaceAction } from "../workspace";
-import {
-  focusFirst,
-  restoreFocus,
-  trapFocus,
-  captureFocusOrigin,
-} from "../focus";
+import { contextActions, modalDepth, usePlatformNames, type WorkspaceAction } from "../workspace";
+import { focusFirst, restoreFocus, trapFocus, captureFocusOrigin } from "../focus";
 import type { LibraryMedia, PageData, UnifiedTask } from "../types";
+const platformNames = usePlatformNames();
 
 interface PaletteItem extends WorkspaceAction {
   group: string;
   hint?: string;
 }
-interface NamedAuthor { id: number; nickname?: string; username?: string; display_name?: string }
+interface NamedAuthor {
+  id: number;
+  nickname?: string;
+  username?: string;
+  display_name?: string;
+}
 
 const SEARCH_DELAY = 280;
 const MIN_QUERY = 2;
@@ -68,9 +69,7 @@ const commands = computed<PaletteItem[]>(() =>
       run: go(path!),
     })),
   ].filter(
-    (item) =>
-      !query.value ||
-      item.label.toLowerCase().includes(query.value.trim().toLowerCase()),
+    (item) => !query.value || item.label.toLowerCase().includes(query.value.trim().toLowerCase()),
   ),
 );
 const actions = computed<PaletteItem[]>(() => [...commands.value, ...remote.value]);
@@ -88,7 +87,8 @@ async function settled<T>(request: Promise<T>): Promise<T | null> {
   try {
     return await request;
   } catch (reason: unknown) {
-    if (!(reason instanceof DOMException && reason.name === "AbortError")) searchFailed.value = true;
+    if (!(reason instanceof DOMException && reason.name === "AbortError"))
+      searchFailed.value = true;
     return null;
   }
 }
@@ -102,7 +102,11 @@ async function search(term: string) {
   searchFailed.value = false;
   const [tasks, media, douyin, x] = await Promise.all([
     settled(api<PageData<UnifiedTask>>(`/operations/tasks?q=${q}&page=1&page_size=4`, { signal })),
-    settled(api<PageData<LibraryMedia>>(`/operations/media?q=${q}&page=1&page_size=4&with_counts=false`, { signal })),
+    settled(
+      api<PageData<LibraryMedia>>(`/operations/media?q=${q}&page=1&page_size=4&with_counts=false`, {
+        signal,
+      }),
+    ),
     settled(api<PageData<NamedAuthor>>(`/authors/?q=${q}&page=1&page_size=4`, { signal })),
     settled(api<PageData<NamedAuthor>>(`/x/authors/?q=${q}&page=1&page_size=3`, { signal })),
   ]);
@@ -113,14 +117,18 @@ async function search(term: string) {
       id: `task:${task.key}`,
       group: "任务",
       label: task.source_label || `任务 ${task.id}`,
-      hint: [platformNames[task.platform] || task.platform, task.author_name].filter(Boolean).join(" · "),
+      hint: [platformNames.value[task.platform] || task.platform, task.author_name]
+        .filter(Boolean)
+        .join(" · "),
       run: go({ path: "/operations/tasks", query: { task_key: task.key } }),
     })),
     ...(media?.items || []).map((item) => ({
       id: `media:${item.key}`,
       group: "媒体",
       label: item.title || item.filename,
-      hint: [platformNames[item.platform] || item.platform, item.author_name].filter(Boolean).join(" · "),
+      hint: [platformNames.value[item.platform] || item.platform, item.author_name]
+        .filter(Boolean)
+        .join(" · "),
       run: go({ path: "/library", query: { q: term, media: item.key } }),
     })),
     ...(douyin?.items || []).map((author) => ({
@@ -167,12 +175,12 @@ function keydown(event: KeyboardEvent) {
   } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     active.value =
-      (active.value +
-        (event.key === "ArrowDown" ? 1 : -1) +
-        actions.value.length) %
+      (active.value + (event.key === "ArrowDown" ? 1 : -1) + actions.value.length) %
       Math.max(1, actions.value.length);
     void nextTick(() =>
-      panel.value?.querySelector(".command-results button.active")?.scrollIntoView({ block: "nearest" }),
+      panel.value
+        ?.querySelector(".command-results button.active")
+        ?.scrollIntoView({ block: "nearest" }),
     );
   } else if (event.key === "Enter") {
     event.preventDefault();
@@ -195,8 +203,11 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <Teleport to="body"
-    ><div class="command-backdrop" @click.self="emit('close')">
+  <Teleport to="body">
+    <div
+      class="command-backdrop"
+      @click.self="emit('close')"
+    >
       <section
         ref="panel"
         class="command-palette"
@@ -204,16 +215,24 @@ onBeforeUnmount(() => {
         aria-modal="true"
         aria-label="搜索与命令"
       >
-        <label class="command-search"
-          ><Search :size="18" /><input
+        <label class="command-search">
+          <Search :size="18" />
+          <input
             ref="input"
             v-model="query"
             aria-label="搜索任务、媒体、作者、命令和页面"
             placeholder="搜索任务、媒体、作者，或输入命令…"
-          /><kbd>Esc</kbd></label
+          />
+          <kbd>Esc</kbd>
+        </label>
+        <div
+          class="command-results"
+          :aria-busy="searching"
         >
-        <div class="command-results" :aria-busy="searching">
-          <template v-for="group in groups" :key="group.name">
+          <template
+            v-for="group in groups"
+            :key="group.name"
+          >
             <p class="command-group">{{ group.name }}</p>
             <button
               v-for="entry in group.items"
@@ -223,18 +242,43 @@ onBeforeUnmount(() => {
               @pointermove="active = entry.index"
               @click="choose(entry.item)"
             >
-              <span class="command-label">{{ entry.item.label }}<small v-if="entry.item.hint">{{ entry.item.hint }}</small></span
-              ><ArrowRight :size="14" />
+              <span class="command-label">
+                {{ entry.item.label }}
+                <small v-if="entry.item.hint">{{ entry.item.hint }}</small>
+              </span>
+              <ArrowRight :size="14" />
             </button>
           </template>
-          <p v-if="searching" class="command-empty" role="status">正在搜索…</p>
-          <p v-else-if="searchFailed" class="command-empty" role="status">部分内容暂时无法搜索，显示的是已读取到的结果。</p>
-          <p v-else-if="!actions.length" class="command-empty">
-            {{ query.trim().length < MIN_QUERY ? '没有匹配的命令。输入至少两个字可搜索任务、媒体和作者。' : '没有找到匹配的任务、媒体、作者或命令。' }}
+          <p
+            v-if="searching"
+            class="command-empty"
+            role="status"
+          >
+            正在搜索…
+          </p>
+          <p
+            v-else-if="searchFailed"
+            class="command-empty"
+            role="status"
+          >
+            部分内容暂时无法搜索，显示的是已读取到的结果。
+          </p>
+          <p
+            v-else-if="!actions.length"
+            class="command-empty"
+          >
+            {{
+              query.trim().length < MIN_QUERY
+                ? "没有匹配的命令。输入至少两个字可搜索任务、媒体和作者。"
+                : "没有找到匹配的任务、媒体、作者或命令。"
+            }}
           </p>
         </div>
-        <footer>↑ ↓ 选择 · Enter 打开<span>命令、页面与内容</span></footer>
+        <footer>
+          ↑ ↓ 选择 · Enter 打开
+          <span>命令、页面与内容</span>
+        </footer>
       </section>
-    </div></Teleport
-  >
+    </div>
+  </Teleport>
 </template>

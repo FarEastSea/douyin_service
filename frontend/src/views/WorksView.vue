@@ -6,14 +6,7 @@ import InspectorPanel from "../components/InspectorPanel.vue";
 import TrendHistory from "../components/TrendHistory.vue";
 import { confirmAction, dateTime, useContextActions } from "../workspace";
 import IssueDetail from "../components/IssueDetail.vue";
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   ArrowLeft,
   CheckSquare,
@@ -39,10 +32,8 @@ import type { Author, MediaItem, PageData, Work } from "../types";
 const route = useRoute(),
   router = useRouter(),
   store = useAppStore();
-type WorkSort =
-  "published_desc" | "published_asc" | "discovered_desc" | "discovered_asc";
-type DownloadFilter =
-  "all" | "completed" | "incomplete" | "active" | "failed" | "not_started";
+type WorkSort = "published_desc" | "published_asc" | "discovered_desc" | "discovered_asc";
+type DownloadFilter = "all" | "completed" | "incomplete" | "active" | "failed" | "not_started";
 type WorkTypeFilter = "all" | "video" | "images";
 const author = ref<Author>(),
   works = ref<Work[]>([]),
@@ -72,7 +63,8 @@ const detailId = computed(() => Number(route.query.work) || 0),
 let sequence = 0,
   detailSequence = 0;
 const loaded = ref(false);
-const busyIds = ref<number[]>([]), batchDeleting = ref(false);
+const busyIds = ref<number[]>([]),
+  batchDeleting = ref(false);
 page.value = Number(route.query.page) || 1;
 search.value = String(route.query.q || "");
 filter.value = (route.query.status || "all") as DownloadFilter;
@@ -157,10 +149,8 @@ function formatWorkTime(value?: string) {
 }
 function formatCount(value?: number) {
   if (value == null) return "—";
-  if (value >= 100000000)
-    return `${(value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)}亿`;
-  if (value >= 10000)
-    return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
+  if (value >= 100000000) return `${(value / 100000000).toFixed(value >= 1000000000 ? 0 : 1)}亿`;
+  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
   return String(value);
 }
 function formatDuration(value?: number) {
@@ -188,12 +178,8 @@ function hasStats(work: Work) {
 }
 function media(work: Work): MediaItem[] {
   if (work.work_type === "video") {
-    const file = work.files.find(
-      (item) => item.local_available && item.preview_url,
-    );
-    return file?.preview_url
-      ? [{ url: file.preview_url, type: "video", title: work.title }]
-      : [];
+    const file = work.files.find((item) => item.local_available && item.preview_url);
+    return file?.preview_url ? [{ url: file.preview_url, type: "video", title: work.title }] : [];
   }
   const local = work.files
     .filter((file) => file.preview_url)
@@ -357,7 +343,8 @@ useContextActions(() =>
           id: "download-current-work",
           label: "重新下载当前作品",
           run: () => workAction(detail.value!, "redownload"),
-          disabled: store.risk.active || busyIds.value.includes(detail.value!.id) || batchDeleting.value,
+          disabled:
+            store.risk.active || busyIds.value.includes(detail.value!.id) || batchDeleting.value,
         },
       ]
     : [],
@@ -374,7 +361,16 @@ watch(id, () => {
   void loadDetail();
 });
 watch(
-  () => JSON.stringify([route.query.page, route.query.q, route.query.status, route.query.type, route.query.sort, route.query.from, route.query.to]),
+  () =>
+    JSON.stringify([
+      route.query.page,
+      route.query.q,
+      route.query.status,
+      route.query.type,
+      route.query.sort,
+      route.query.from,
+      route.query.to,
+    ]),
   () => {
     const next = {
       page: Number(route.query.page) || 1,
@@ -418,39 +414,55 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="workspace-page works-workspace">
-    <RouterLink class="back-link" to="/authors/douyin"
-      ><ArrowLeft :size="14" />订阅</RouterLink
-    ><PageHeader
+    <RouterLink
+      class="back-link"
+      to="/authors/douyin"
+    >
+      <ArrowLeft :size="14" />
+      订阅
+    </RouterLink>
+    <PageHeader
       :title="author?.nickname || '作者作品'"
-      :description="
-        (loaded ? total.toLocaleString() : '—') + ' 个作品 · 完整浏览与文件管理'
-      "
+      :description="(loaded ? total.toLocaleString() : '—') + ' 个作品 · 完整浏览与文件管理'"
       :busy="loading"
       refreshable
       @refresh="load"
-      ><div class="segmented-control" aria-label="作品布局">
-        <button :aria-pressed="layout === 'grid'" @click="layout = 'grid'">
-          网格</button
-        ><button :aria-pressed="layout === 'list'" @click="layout = 'list'">
+    >
+      <div
+        class="segmented-control"
+        aria-label="作品布局"
+      >
+        <button
+          :aria-pressed="layout === 'grid'"
+          @click="layout = 'grid'"
+        >
+          网格
+        </button>
+        <button
+          :aria-pressed="layout === 'list'"
+          @click="layout = 'list'"
+        >
           列表
         </button>
-      </div></PageHeader
+      </div>
+    </PageHeader>
+    <div
+      v-if="loadError && works.length"
+      class="load-error-banner"
     >
-    <div v-if="loadError && works.length" class="load-error-banner">
-      <IssueDetail :message="loadError" impact="显示上次读取的数据。" />
+      <IssueDetail
+        :message="loadError"
+        impact="显示上次读取的数据。"
+      />
     </div>
     <FilterToolbar
-      :active="
-        [
-          filter !== 'all' && '状态已筛选',
-          workType !== 'all' && '类型已筛选',
-          publishedFrom && '起始日期',
-          publishedTo && '结束日期',
-          sort !== 'published_desc' && '排序已修改',
-        ]
-          .filter(Boolean)
-          .join(' · ')
-      "
+      :active="[
+        filter !== 'all' && '状态已筛选',
+        workType !== 'all' && '类型已筛选',
+        publishedFrom && '起始日期',
+        publishedTo && '结束日期',
+        sort !== 'published_desc' && '排序已修改',
+      ]"
       @clear="
         filter = 'all';
         workType = 'all';
@@ -459,26 +471,36 @@ onBeforeUnmount(() => {
         sort = 'published_desc';
         changeFilters();
       "
-      ><template #search
-        ><label class="search"
-          ><Search :size="16" /><input
+    >
+      <template #search>
+        <label class="search">
+          <Search :size="16" />
+          <input
             v-model="search"
             aria-label="搜索全部作品"
             placeholder="搜索全部作品"
-            @input="queueSearch" /></label></template
-      ><label class="work-sort"
-        ><span>状态</span
-        ><select v-model="filter" aria-label="下载状态" @change="changeFilters">
+            @input="queueSearch"
+          />
+        </label>
+      </template>
+      <label class="work-sort">
+        <span>状态</span>
+        <select
+          v-model="filter"
+          aria-label="下载状态"
+          @change="changeFilters"
+        >
           <option value="all">全部状态</option>
           <option value="completed">已下载</option>
           <option value="incomplete">未完成</option>
           <option value="active">处理中</option>
           <option value="failed">失败/取消</option>
           <option value="not_started">未创建任务</option>
-        </select></label
-      ><label class="work-sort"
-        ><span>类型</span
-        ><select
+        </select>
+      </label>
+      <label class="work-sort">
+        <span>类型</span>
+        <select
           v-model="workType"
           aria-label="作品类型"
           @change="changeFilters"
@@ -486,36 +508,58 @@ onBeforeUnmount(() => {
           <option value="all">全部类型</option>
           <option value="video">视频</option>
           <option value="images">图集</option>
-        </select></label
-      ><label class="work-sort work-date"
-        ><span>从</span
-        ><input
+        </select>
+      </label>
+      <label class="work-sort work-date">
+        <span>从</span>
+        <input
           v-model="publishedFrom"
           type="date"
           aria-label="发布日期起始"
-          @change="changeFilters" /></label
-      ><label class="work-sort work-date"
-        ><span>至</span
-        ><input
+          @change="changeFilters"
+        />
+      </label>
+      <label class="work-sort work-date">
+        <span>至</span>
+        <input
           v-model="publishedTo"
           type="date"
           aria-label="发布日期结束"
-          @change="changeFilters" /></label
-      ><label class="work-sort"
-        ><span>排序</span
-        ><select v-model="sort" aria-label="作品排序方式" @change="changeSort">
+          @change="changeFilters"
+        />
+      </label>
+      <label class="work-sort">
+        <span>排序</span>
+        <select
+          v-model="sort"
+          aria-label="作品排序方式"
+          @change="changeSort"
+        >
           <option value="published_desc">作品时间：最新</option>
           <option value="published_asc">作品时间：最早</option>
           <option value="discovered_desc">收录时间：最新</option>
           <option value="discovered_asc">收录时间：最早</option>
-        </select></label
-      ></FilterToolbar
+        </select>
+      </label>
+    </FilterToolbar>
+    <div
+      v-if="selected.length"
+      class="selection-bar"
     >
-    <div v-if="selected.length" class="selection-bar">
-      <span>已选择 {{ selected.length }} 个当前页作品</span
-      ><button class="btn compact danger" :disabled="batchDeleting || busyIds.length > 0" @click="batchDelete">
-        删除作品及文件</button
-      ><button class="btn ghost compact" @click="selected = []">取消选择</button>
+      <span>已选择 {{ selected.length }} 个当前页作品</span>
+      <button
+        class="btn compact danger"
+        :disabled="batchDeleting || busyIds.length > 0"
+        @click="batchDelete"
+      >
+        删除作品及文件
+      </button>
+      <button
+        class="btn ghost compact"
+        @click="selected = []"
+      >
+        取消选择
+      </button>
     </div>
     <StateView
       v-if="!works.length"
@@ -524,7 +568,11 @@ onBeforeUnmount(() => {
       title="没有符合条件的作品"
       @retry="load"
     />
-    <div v-else class="work-grid" :class="{ 'list-layout': layout === 'list' }">
+    <div
+      v-else
+      class="work-grid"
+      :class="{ 'list-layout': layout === 'list' }"
+    >
       <article
         v-for="work in works"
         :key="work.id"
@@ -544,14 +592,17 @@ onBeforeUnmount(() => {
               loading="lazy"
               @error="markCoverFailed(work.id)"
             />
-            <div v-else class="cover-placeholder">
-              <Image :size="24" /><small>封面暂不可用</small>
-            </div></button
-          ><span>{{
-            work.work_type === "images" ? work.image_count + " 张" : "视频"
-          }}</span
-          ><label class="select-box"
-            ><input
+            <div
+              v-else
+              class="cover-placeholder"
+            >
+              <Image :size="24" />
+              <small>封面暂不可用</small>
+            </div>
+          </button>
+          <span>{{ work.work_type === "images" ? work.image_count + " 张" : "视频" }}</span>
+          <label class="select-box">
+            <input
               type="checkbox"
               :aria-label="'选择作品 ' + work.aweme_id"
               :checked="selected.includes(work.id)"
@@ -560,7 +611,8 @@ onBeforeUnmount(() => {
                   ? selected.filter((value) => value !== work.id)
                   : [...selected, work.id]
               "
-          /></label>
+            />
+          </label>
         </div>
         <div class="work-copy">
           <button
@@ -568,44 +620,52 @@ onBeforeUnmount(() => {
             :title="work.title"
             @click="openDetail(work)"
           >
-            {{ work.title || "作品 " + work.aweme_id }}</button
-          ><time>{{ dateTime(work.published_at) }}</time
-          ><StatusIndicator
+            {{ work.title || "作品 " + work.aweme_id }}
+          </button>
+          <time>{{ dateTime(work.published_at) }}</time>
+          <StatusIndicator
             :status="work.download_status"
             :label="work.is_downloaded ? '已下载' : undefined"
-          /><span
-            >{{ work.completed_task_count }}/{{
-              work.total_task_count
-            }}
-            个文件</span
-          >
+          />
+          <span>{{ work.completed_task_count }}/{{ work.total_task_count }} 个文件</span>
         </div>
         <footer>
-          <button class="btn ghost compact" @click="openDetail(work)">详情</button
-          ><MoreActions :label="'作品 ' + work.aweme_id"
-            ><button @click="preview(work)">预览</button
-            ><button
+          <button
+            class="btn ghost compact"
+            @click="openDetail(work)"
+          >
+            详情
+          </button>
+          <MoreActions :label="'作品 ' + work.aweme_id">
+            <button @click="preview(work)">预览</button>
+            <button
               @click="
                 openDetail(work);
                 tab = 'stats';
               "
             >
-              互动趋势</button
-            ><button
+              互动趋势
+            </button>
+            <button
               :disabled="store.risk.active || busyIds.includes(work.id) || batchDeleting"
               @click="workAction(work, 'redownload')"
             >
-              重新下载</button
-            ><button
+              重新下载
+            </button>
+            <button
               v-if="work.download_status === 'failed'"
               :disabled="store.risk.active || busyIds.includes(work.id) || batchDeleting"
               @click="workAction(work, 'retry-failed')"
             >
-              重试失败文件</button
-            ><button class="danger" @click="remove(work)">
+              重试失败文件
+            </button>
+            <button
+              class="danger"
+              @click="remove(work)"
+            >
               删除作品及文件
-            </button></MoreActions
-          >
+            </button>
+          </MoreActions>
         </footer>
       </article>
     </div>
@@ -621,13 +681,18 @@ onBeforeUnmount(() => {
       :title="detail?.title || '作品详情'"
       :subtitle="detail?.aweme_id"
       @close="closeDetail"
-      ><StateView
+    >
+      <StateView
         v-if="!detail"
         :loading="detailBusy"
         :error="detailError"
         @retry="loadDetail"
-      /><template v-else
-        ><nav class="view-tabs" aria-label="作品详情">
+      />
+      <template v-else>
+        <nav
+          class="view-tabs"
+          aria-label="作品详情"
+        >
           <button
             v-for="item in [
               ['files', '文件'],
@@ -642,15 +707,21 @@ onBeforeUnmount(() => {
             {{ item[1] }}
           </button>
         </nav>
-        <template v-if="tab === 'files'"
-          ><button class="btn" @click="preview(detail)">预览作品</button>
+        <template v-if="tab === 'files'">
+          <button
+            class="btn"
+            @click="preview(detail)"
+          >
+            预览作品
+          </button>
           <div class="file-list">
-            <article v-for="file in detail.files" :key="file.task_id">
+            <article
+              v-for="file in detail.files"
+              :key="file.task_id"
+            >
               <div>
-                <strong>{{
-                  file.file_name || "文件 " + (file.file_index + 1)
-                }}</strong
-                ><StatusIndicator :status="file.status" />
+                <strong>{{ file.file_name || "文件 " + (file.file_index + 1) }}</strong>
+                <StatusIndicator :status="file.status" />
               </div>
               <button
                 v-if="file.preview_url"
@@ -665,8 +736,9 @@ onBeforeUnmount(() => {
                   ])
                 "
               >
-                预览</button
-              ><button
+                预览
+              </button>
+              <button
                 v-if="detail.work_type === 'images'"
                 class="btn compact danger"
                 @click="removeFile(file.file_index)"
@@ -675,11 +747,17 @@ onBeforeUnmount(() => {
               </button>
             </article>
           </div>
-          <p v-if="!detail.files.length" class="inline-note">
+          <p
+            v-if="!detail.files.length"
+            class="inline-note"
+          >
             尚无下载文件。
-          </p></template
+          </p>
+        </template>
+        <dl
+          v-else-if="tab === 'metadata'"
+          class="detail-fields"
         >
-        <dl v-else-if="tab === 'metadata'" class="detail-fields">
           <div>
             <dt>发布时间</dt>
             <dd>{{ formatWorkTime(detail.published_at) }}</dd>
@@ -698,9 +776,7 @@ onBeforeUnmount(() => {
           </div>
           <div>
             <dt>音乐</dt>
-            <dd>
-              {{ detail.music_title || "未提供" }} {{ detail.music_author }}
-            </dd>
+            <dd>{{ detail.music_title || "未提供" }} {{ detail.music_author }}</dd>
           </div>
           <div>
             <dt>数据版本</dt>
@@ -713,20 +789,26 @@ onBeforeUnmount(() => {
         <TrendHistory
           v-else
           :endpoint="'/works/' + detail.id + '/stats'"
-          work /></template
-      ><template #footer
-        ><template v-if="detail"
-          ><button
+          work
+        />
+      </template>
+      <template #footer>
+        <template v-if="detail">
+          <button
             class="btn"
             :disabled="store.risk.active || busyIds.includes(detail.id) || batchDeleting"
             @click="workAction(detail, 'redownload')"
           >
-            重新下载</button
-          ><button class="btn danger" @click="remove(detail)">
+            重新下载
+          </button>
+          <button
+            class="btn danger"
+            @click="remove(detail)"
+          >
             删除作品及文件
-          </button></template
-        ></template
-      ></InspectorPanel
-    >
+          </button>
+        </template>
+      </template>
+    </InspectorPanel>
   </section>
 </template>

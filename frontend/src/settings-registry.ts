@@ -1,3 +1,7 @@
+import { applicationPages } from "./settings/application";
+import { downloadsPages } from "./settings/downloads";
+import { accountsPages } from "./settings/accounts";
+import { notificationsPages } from "./settings/notifications";
 export type SettingsMode = "settings" | "maintenance";
 
 export interface SettingsNavItem {
@@ -25,334 +29,11 @@ export interface SettingsPageDefinition {
   fieldSections?: SettingsFieldSection[];
 }
 
-export const settingsPages: Record<string, SettingsPageDefinition> = {
-  application: {
-    id: "application",
-    title: "应用与安全",
-    description: "管理服务名称、调试开关和管理端访问边界。",
-    fieldSections: [
-      {
-        title: "应用身份",
-        description: "用于识别当前服务实例，不影响已有媒体数据。",
-        envKeys: ["APP_NAME", "DEBUG"],
-      },
-      {
-        title: "访问安全",
-        description: "管理 Token 和跨域来源属于敏感边界，修改后立即使用新值。",
-        envKeys: ["ADMIN_TOKEN", "CORS_ALLOWED_ORIGINS"],
-      },
-    ],
-  },
-  storage: {
-    id: "storage",
-    title: "下载目录",
-    description: "统一管理下载根目录和各平台的相对子目录。",
-    fieldSections: [
-      {
-        title: "根目录",
-        description: "所有平台媒体都位于同一个根目录下。",
-        envKeys: ["DOWNLOAD_ROOT"],
-      },
-      {
-        title: "磁盘空间预警",
-        description:
-          "下载根目录所在磁盘的剩余空间低于预警线时，总览与洞察页会提示，并按通知设置提醒。只提醒，不会暂停下载。",
-        envKeys: ["DISK_WARN_FREE_GB"],
-      },
-      {
-        title: "平台子目录",
-        description: "仅填写相对目录；保存时系统会同步迁移数据库中的已有路径。",
-        envKeys: [
-          "DOUYIN_DOWNLOAD_SUBDIR",
-          "X_DOWNLOAD_SUBDIR",
-          "TIKTOK_DOWNLOAD_SUBDIR",
-          "WEIBO_DOWNLOAD_SUBDIR",
-          "BILIBILI_DOWNLOAD_SUBDIR",
-          "XHS_DOWNLOAD_SUBDIR",
-          "INSTAGRAM_DOWNLOAD_SUBDIR",
-        ],
-      },
-    ],
-  },
-  connections: {
-    id: "connections",
-    title: "数据库与 Redis",
-    description: "配置持久化数据库、缓存和消息连接。",
-    fieldSections: [
-      {
-        title: "数据库",
-        description: "当前生产环境使用 PostgreSQL；密码始终保持不回显。",
-        envKeys: [
-          "DB_TYPE",
-          "DB_HOST",
-          "DB_PORT",
-          "DB_USER",
-          "DB_PASSWORD",
-          "DB_NAME",
-        ],
-      },
-      {
-        title: "Redis",
-        description: "用于任务状态、缓存、限流和配置同步。",
-        envKeys: ["REDIS_URL", "REDIS_PASSWORD"],
-      },
-    ],
-  },
-  jobs: {
-    id: "jobs",
-    title: "后台任务",
-    description: "配置 Celery 使用的消息队列与结果存储。",
-    fieldSections: [
-      {
-        title: "任务基础设施",
-        description:
-          "默认继承 Redis。忙碌时保存为待生效变更，暂停新投递，旧队列排空后自动切换；可在上方撤回待生效变更。",
-        envKeys: [
-          "CELERY_CONNECTION_MODE",
-          "CELERY_BROKER_URL",
-          "CELERY_RESULT_BACKEND",
-        ],
-      },
-    ],
-  },
-  downloads: {
-    id: "downloads",
-    title: "下载执行",
-    description: "控制下载并发、超时、重试和卡住任务判定。",
-    fieldSections: [
-      {
-        title: "并发与传输",
-        description: "限制同时下载数量和每次写入的数据块大小。",
-        envKeys: ["MAX_CONCURRENT_DOWNLOADS", "DOWNLOAD_CHUNK_SIZE"],
-      },
-      {
-        title: "失败恢复",
-        description: "运行期参数在下一次任务调用时生效。",
-        runtimeKeys: [
-          "download_timeout",
-          "download_retry_count",
-          "download_retry_delay",
-          "stuck_task_timeout",
-        ],
-      },
-    ],
-  },
-  subscriptions: {
-    id: "subscriptions",
-    title: "订阅检查",
-    description: "控制自动检查周期、有界增量扫描和定期全量对账。",
-    fieldSections: [
-      {
-        title: "调度周期",
-        description: "启用自动检查，并限制允许配置的最短检查周期。",
-        envKeys: ["MIN_CHECK_INTERVAL", "SUBSCRIPTION_RECORD_RETENTION_DAYS"],
-        runtimeKeys: ["auto_check_enabled", "subscription_check_interval"],
-      },
-      {
-        title: "增量扫描",
-        description: "在安全回看窗口内识别已知作品，减少无意义的历史翻页。",
-        runtimeKeys: [
-          "subscription_known_streak",
-          "subscription_max_pages",
-          "subscription_safe_lookback_pages",
-          "subscription_full_reconcile_interval",
-        ],
-      },
-    ],
-  },
-  risk: {
-    id: "risk",
-    title: "抖音请求与风控",
-    description: "控制抖音接口节奏、作者间隔和风控后的恢复策略。",
-    fieldSections: [
-      {
-        title: "请求节奏",
-        description: "所有 Worker 共享请求节奏，避免多个任务瞬间集中访问。",
-        runtimeKeys: ["douyin_request_delay", "author_check_delay"],
-      },
-      {
-        title: "风控恢复",
-        description: "进入冷却后暂停接口请求，满足条件后再恢复。",
-        runtimeKeys: ["douyin_risk_cooldown_seconds", "douyin_risk_auto_retry"],
-      },
-    ],
-  },
-  notifications: {
-    id: "notifications",
-    title: "通知中心",
-    description: "选择需要通知的事件，并配置 Webhook、Bark、邮件、Gotify、Telegram 与企业微信、钉钉、飞书机器人。",
-    fieldSections: [
-      {
-        title: "通知规则",
-        description: "统一开关、事件范围和相同通知的去重时间。",
-        envKeys: [
-          "NOTIFY_ENABLED",
-          "NOTIFY_ON_NEW_WORKS",
-          "NOTIFY_ON_DOWNLOAD_FAILURE",
-          "NOTIFY_ON_RISK",
-          "NOTIFY_ON_SUBSCRIPTION_FAILURE",
-          "NOTIFY_ON_LOW_DISK",
-          "NOTIFY_DEDUPE_SECONDS",
-        ],
-      },
-      {
-        title: "每日摘要",
-        description:
-          "每天在设定的整点之后汇总前一天的入库、订阅检查、当前队列与磁盘空间，发送到已启用的渠道。",
-        envKeys: ["NOTIFY_DAILY_DIGEST", "NOTIFY_DAILY_DIGEST_HOUR"],
-      },
-      {
-        title: "Webhook",
-        description: "向自定义服务发送带可选 HMAC 签名的事件。",
-        envKeys: ["WEBHOOK_ENABLED", "WEBHOOK_URL", "WEBHOOK_SECRET"],
-      },
-      {
-        title: "Bark",
-        description: "向 Bark 设备推送通知。",
-        envKeys: ["BARK_ENABLED", "BARK_SERVER_URL", "BARK_DEVICE_KEY"],
-      },
-      {
-        title: "邮件",
-        description: "通过 SMTP 向一个或多个收件地址发送通知。",
-        envKeys: [
-          "EMAIL_ENABLED",
-          "SMTP_HOST",
-          "SMTP_PORT",
-          "SMTP_USERNAME",
-          "SMTP_PASSWORD",
-          "SMTP_FROM",
-          "SMTP_TO",
-          "SMTP_SECURITY",
-        ],
-      },
-      {
-        title: "Gotify",
-        description: "向自托管 Gotify 服务推送通知。",
-        envKeys: ["GOTIFY_ENABLED", "GOTIFY_SERVER_URL", "GOTIFY_TOKEN"],
-      },
-      {
-        title: "Telegram",
-        description: "通过 Telegram Bot 向用户、群组或频道发送通知。",
-        envKeys: [
-          "TELEGRAM_ENABLED",
-          "TELEGRAM_BOT_TOKEN",
-          "TELEGRAM_CHAT_ID",
-          "TELEGRAM_API_BASE",
-        ],
-      },
-      {
-        title: "企业微信",
-        description: "向企业微信群机器人发送文本通知。",
-        envKeys: ["WECOM_ENABLED", "WECOM_WEBHOOK_URL"],
-      },
-      {
-        title: "钉钉",
-        description:
-          "向钉钉自定义机器人发送文本通知；机器人使用关键词校验时，请确保关键词出现在通知标题中。",
-        envKeys: ["DINGTALK_ENABLED", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET"],
-      },
-      {
-        title: "飞书",
-        description: "向飞书自定义机器人发送文本通知。",
-        envKeys: ["FEISHU_ENABLED", "FEISHU_WEBHOOK_URL", "FEISHU_SECRET"],
-      },
-    ],
-  },
-  "account-douyin": {
-    id: "account-douyin",
-    title: "抖音账号",
-    description: "管理 Cookie、浏览器身份、User-Agent 和代理绑定。",
-  },
-  "account-x": {
-    id: "account-x",
-    title: "X 账号",
-    description: "管理 gallery-dl 引擎、Cookie 和任务日志保留。",
-    fieldSections: [
-      {
-        title: "下载选项",
-        description: "Cookie 内容在下方凭据区域单独保存。",
-        envKeys: [
-          "X_DOWNLOAD_ENGINE",
-          "X_COOKIE_FILE",
-          "X_TASK_LOG_MAX_LINES",
-          "X_TASK_LOG_TTL_SECONDS",
-          "X_TASK_STATE_TTL_SECONDS",
-        ],
-      },
-    ],
-  },
-  "account-tiktok": {
-    id: "account-tiktok",
-    title: "TikTok 账号",
-    description: "管理 TikTok 主页与单条作品下载凭据。",
-    fieldSections: [
-      {
-        title: "下载选项",
-        description: "网页加密 Cookie 优先于可选的服务器 Cookie 文件。",
-        envKeys: ["TIKTOK_DOWNLOAD_ENGINE", "TIKTOK_COOKIE_FILE"],
-      },
-    ],
-  },
-  "account-weibo": {
-    id: "account-weibo",
-    title: "微博账号",
-    description: "管理微博主页与单条动态下载凭据。",
-    fieldSections: [
-      {
-        title: "下载选项",
-        description: "网页加密 Cookie 优先于可选的服务器 Cookie 文件。",
-        envKeys: ["WEIBO_DOWNLOAD_ENGINE", "WEIBO_COOKIE_FILE"],
-      },
-    ],
-  },
-  "account-bilibili": {
-    id: "account-bilibili",
-    title: "B站账号",
-    description: "管理 B站用户主页与单条视频下载凭据。",
-    fieldSections: [
-      {
-        title: "下载选项",
-        description: "网页加密 Cookie 优先于可选的服务器 Cookie 文件。",
-        envKeys: ["BILIBILI_DOWNLOAD_ENGINE", "BILIBILI_COOKIE_FILE"],
-      },
-    ],
-  },
-  "account-instagram": {
-    id: "account-instagram", title: "Instagram 账号",
-    description: "导入正常浏览器会话，管理固定出口、请求预算和低频订阅。",
-    fieldSections: [
-      { title: "采集开关", description: "先导入并检测会话，再启用采集。保存后在下一次请求或调度时生效。", envKeys: ["INSTAGRAM_ENABLED"] },
-      { title: "请求节奏与预算", description: "所有任务共用一个通道。预算是保守的工程默认值，不能保证不触发平台验证。", envKeys: ["INSTAGRAM_REQUEST_DELAY_MIN", "INSTAGRAM_REQUEST_DELAY_MAX", "INSTAGRAM_HOURLY_BUDGET", "INSTAGRAM_DAILY_BUDGET"] },
-      { title: "订阅与历史分片", description: "新增和即将过期的 Stories 优先；预算不足时延后检查。作者增长后请关注实际延迟。", envKeys: ["INSTAGRAM_CHECK_INTERVAL", "INSTAGRAM_STORIES_INTERVAL", "INSTAGRAM_HIGHLIGHTS_INTERVAL", "INSTAGRAM_BATCH_ITEMS", "INSTAGRAM_BATCH_SECONDS"] },
-    ],
-  },
-  "account-xhs": {
-    id: "account-xhs",
-    title: "小红书账号",
-    description: "仅用于单条图文、视频和实况笔记，不开放作者主页批量采集。",
-    fieldSections: [
-      {
-        title: "下载选项",
-        description:
-          "隔离服务按需启用，不影响主服务启动；Cookie 用于单条笔记。",
-        envKeys: [
-          "XHS_SERVICE_ENABLED",
-          "XHS_DOWNLOAD_ENGINE",
-          "XHS_COOKIE_FILE",
-        ],
-      },
-    ],
-  },
-  archive: {
-    id: "archive",
-    title: "归档与导出",
-    description: "定义新任务使用的目录、文件名、作品范围和元数据规则。",
-  },
-  other: {
-    id: "other",
-    title: "其他配置",
-    description: "后端新增但尚未归入固定分类的配置。",
-  },
+export const settingsPages = {
+  ...applicationPages,
+  ...downloadsPages,
+  ...accountsPages,
+  ...notificationsPages,
 };
 
 export const maintenancePages: Record<string, SettingsPageDefinition> = {
@@ -466,7 +147,12 @@ export const maintenanceNavigation: SettingsNavGroup[] = [
 ];
 
 export const platformCredentials = [
-  { id: "instagram", pageId: "account-instagram", name: "Instagram", cookieKey: "INSTAGRAM_COOKIE" },
+  {
+    id: "instagram",
+    pageId: "account-instagram",
+    name: "Instagram",
+    cookieKey: "INSTAGRAM_COOKIE",
+  },
   {
     id: "tiktok",
     pageId: "account-tiktok",
@@ -496,8 +182,7 @@ export const knownCredentialKeys = new Set([
 
 export const assignedEnvKeys = new Set([
   ...Object.values(settingsPages).flatMap(
-    (page) =>
-      page.fieldSections?.flatMap((section) => section.envKeys || []) || [],
+    (page) => page.fieldSections?.flatMap((section) => section.envKeys || []) || [],
   ),
   ...knownCredentialKeys,
 ]);
@@ -506,7 +191,5 @@ export const settingsSectionIds = new Set(Object.keys(settingsPages));
 export const maintenanceSectionIds = new Set(Object.keys(maintenancePages));
 
 export function sectionPath(mode: SettingsMode, section: string) {
-  return mode === "maintenance"
-    ? `/operations/maintenance/${section}`
-    : `/settings/${section}`;
+  return mode === "maintenance" ? `/operations/maintenance/${section}` : `/settings/${section}`;
 }

@@ -1,17 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import {
-  confirmation,
-  confirmationChecked,
-  modalDepth,
-  settleConfirmation,
-} from "../workspace";
-import {
-  focusFirst,
-  restoreFocus,
-  trapFocus,
-  captureFocusOrigin,
-} from "../focus";
+import { confirmation, confirmationChecked, modalDepth, settleConfirmation } from "../workspace";
+import { focusFirst, restoreFocus, trapFocus, captureFocusOrigin } from "../focus";
 const dialog = ref<HTMLElement | null>(null);
 let origin: HTMLElement | null = null,
   counted = false;
@@ -45,8 +35,8 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <Teleport to="body"
-    ><div
+  <Teleport to="body">
+    <div
       v-if="confirmation"
       class="dialog-backdrop"
       @click.self="settleConfirmation(false)"
@@ -62,18 +52,27 @@ onBeforeUnmount(() => {
       >
         <h2 id="confirm-title">{{ confirmation.title }}</h2>
         <p id="confirm-message">{{ confirmation.message }}</p>
-        <label v-if="confirmation.option" class="confirm-option"
-          ><input v-model="confirmationChecked" type="checkbox" /><span
-            ><strong>{{ confirmation.option.label }}</strong
-            ><small v-if="confirmation.option.help">{{
-              confirmation.option.help
-            }}</small></span
-          ></label
+        <label
+          v-if="confirmation.option"
+          class="confirm-option"
         >
+          <input
+            v-model="confirmationChecked"
+            type="checkbox"
+          />
+          <span>
+            <strong>{{ confirmation.option.label }}</strong>
+            <small v-if="confirmation.option.help">{{ confirmation.option.help }}</small>
+          </span>
+        </label>
         <footer>
-          <button class="btn ghost" @click="settleConfirmation(false)">
-            取消</button
-          ><button
+          <button
+            class="btn ghost"
+            @click="settleConfirmation(false)"
+          >
+            取消
+          </button>
+          <button
             class="btn"
             :class="confirmation.danger ? 'danger' : 'primary'"
             @click="settleConfirmation(true)"
@@ -82,6 +81,6 @@ onBeforeUnmount(() => {
           </button>
         </footer>
       </section>
-    </div></Teleport
-  >
+    </div>
+  </Teleport>
 </template>

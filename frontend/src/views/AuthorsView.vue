@@ -37,9 +37,7 @@ const authors = ref<AuthorRecord[]>([]),
 const search = ref(String(route.query.q || "")),
   subscribed = ref(String(route.query.subscribed || "")),
   account = ref(String(route.query.account || "all"));
-const selected = computed(
-  () => Number(route.query.author || route.query.focus) || 0,
-);
+const selected = computed(() => Number(route.query.author || route.query.focus) || 0);
 const detail = ref<AuthorRecord>(),
   detailBusy = ref(false),
   detailError = ref(""),
@@ -56,9 +54,7 @@ let sequence = 0,
   resourceSequence = 0,
   timer: number | undefined;
 function name(item: AuthorRecord) {
-  return isX.value
-    ? item.display_name || "@" + item.username
-    : item.nickname || "作者 " + item.id;
+  return isX.value ? item.display_name || "@" + item.username : item.nickname || "作者 " + item.id;
 }
 function syncQuery() {
   void router.replace({
@@ -82,9 +78,7 @@ async function load() {
   if (subscribed.value) params.set("is_subscribed", subscribed.value);
   if (!isX.value) params.set("account_status", account.value);
   try {
-    const data = await api<PageData<AuthorRecord>>(
-      `${prefix.value}/?${params}`,
-    );
+    const data = await api<PageData<AuthorRecord>>(`${prefix.value}/?${params}`);
     if (current !== sequence) return;
     authors.value = data.items;
     pages.value = data.pages;
@@ -176,9 +170,7 @@ async function loadResource() {
       const data = await api(`${prefix.value}/${authorId}/auto-update`);
       if (current === resourceSequence) automation.value = data;
     } else if (tab.value === "history") {
-      const data = await api<any>(
-        `${prefix.value}/${authorId}/profile-history`,
-      );
+      const data = await api<any>(`${prefix.value}/${authorId}/profile-history`);
       if (current === resourceSequence) history.value = data.items || [];
     }
   } catch (e: any) {
@@ -196,9 +188,7 @@ async function action(item: AuthorRecord, verb: string, method = "POST") {
   )
     return store.notify("抖音请求正在冷却", "info");
   const requestedPlatform = props.platform;
-  const path = verb
-    ? `${prefix.value}/${item.id}/${verb}`
-    : `${prefix.value}/${item.id}`;
+  const path = verb ? `${prefix.value}/${item.id}/${verb}` : `${prefix.value}/${item.id}`;
   busyIds.value.push(item.id);
   try {
     const result = await api<any>(path, { method });
@@ -247,8 +237,7 @@ async function checkAll() {
   }
 }
 async function saveInterval() {
-  if (!detail.value || !Number.isFinite(interval.value) || interval.value <= 0)
-    return;
+  if (!detail.value || !Number.isFinite(interval.value) || interval.value <= 0) return;
   const item = detail.value;
   if (busyIds.value.includes(item.id)) return;
   busyIds.value.push(item.id);
@@ -272,20 +261,13 @@ useContextActions(() => [
           id: "download-current-author",
           label: "下载当前作者内容",
           run: () => action(detail.value!, "download"),
-          disabled:
-            busyIds.value.includes(detail.value.id) ||
-            (!isX.value && store.risk.active),
+          disabled: busyIds.value.includes(detail.value.id) || (!isX.value && store.risk.active),
         },
         {
           id: "toggle-current-author",
-          label: detail.value.is_subscribed
-            ? "取消订阅当前作者"
-            : "订阅当前作者",
+          label: detail.value.is_subscribed ? "取消订阅当前作者" : "订阅当前作者",
           run: () =>
-            action(
-              detail.value!,
-              detail.value!.is_subscribed ? "unsubscribe" : "subscribe",
-            ),
+            action(detail.value!, detail.value!.is_subscribed ? "unsubscribe" : "subscribe"),
         },
       ]
     : []),
@@ -319,7 +301,8 @@ watch(
   },
 );
 watch(
-  () => JSON.stringify([route.query.page, route.query.q, route.query.subscribed, route.query.account]),
+  () =>
+    JSON.stringify([route.query.page, route.query.q, route.query.subscribed, route.query.account]),
   () => {
     const nextPage = Number(route.query.page) || 1,
       nextSearch = String(route.query.q || ""),
@@ -361,21 +344,36 @@ onBeforeUnmount(() => {
       :updated-at="updatedAt"
       refreshable
       @refresh="load"
-      ><MoreActions label="作者操作"
-        ><button :disabled="checkBusy || (!isX && store.risk.active)" @click="checkAll">
-          检查当前平台订阅</button
-        ><RouterLink to="/automation">查看自动化运行</RouterLink></MoreActions
-      ><button
+    >
+      <MoreActions label="作者操作">
+        <button
+          :disabled="checkBusy || (!isX && store.risk.active)"
+          @click="checkAll"
+        >
+          检查当前平台订阅
+        </button>
+        <RouterLink to="/automation">查看自动化运行</RouterLink>
+      </MoreActions>
+      <button
         class="btn primary"
         :disabled="checkBusy || (!isX && store.risk.active)"
         @click="openAdd"
       >
-        <Plus :size="15" />订阅作者
-      </button></PageHeader
-    >
+        <Plus :size="15" />
+        订阅作者
+      </button>
+    </PageHeader>
     <SubscriptionNavigation />
-    <div v-if="error && authors.length" class="load-error-banner" role="alert">
-      <IssueDetail :message="error" impact="显示上次读取的数据。" /><button
+    <div
+      v-if="error && authors.length"
+      class="load-error-banner"
+      role="alert"
+    >
+      <IssueDetail
+        :message="error"
+        impact="显示上次读取的数据。"
+      />
+      <button
         class="btn ghost compact"
         @click="load"
       >
@@ -383,31 +381,37 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <FilterToolbar
-      :active="
-        [
-          subscribed && (subscribed === 'true' ? '已订阅' : '未订阅'),
-          account !== 'all' && '账号状态',
-        ]
-          .filter(Boolean)
-          .join(' · ')
-      "
+      :active="[
+        subscribed && (subscribed === 'true' ? '已订阅' : '未订阅'),
+        account !== 'all' && '账号状态',
+      ]"
       @clear="
         subscribed = '';
         account = 'all';
         filters();
       "
-      ><template #search
-        ><label class="search"
-          ><Search :size="16" /><input
+    >
+      <template #search>
+        <label class="search">
+          <Search :size="16" />
+          <input
             v-model="search"
             aria-label="搜索作者"
             :placeholder="isX ? '搜索用户名或显示名称' : '搜索作者名称或 ID'"
-            @input="queueSearch" /></label></template
-      ><select v-model="subscribed" aria-label="订阅状态" @change="filters">
+            @input="queueSearch"
+          />
+        </label>
+      </template>
+      <select
+        v-model="subscribed"
+        aria-label="订阅状态"
+        @change="filters"
+      >
         <option value="">全部订阅</option>
         <option value="true">已订阅</option>
-        <option value="false">未订阅</option></select
-      ><select
+        <option value="false">未订阅</option>
+      </select>
+      <select
         v-if="!isX"
         v-model="account"
         aria-label="账号状态"
@@ -419,20 +423,21 @@ onBeforeUnmount(() => {
         <option value="banned">封禁 / 禁言</option>
         <option value="deleted">已销号</option>
         <option value="restricted">不可访问</option>
-      </select></FilterToolbar
-    ><StateView
+      </select>
+    </FilterToolbar>
+    <StateView
       v-if="!authors.length"
+      layout="table"
       :loading="loading"
       :error="error"
-      :title="
-        search || subscribed || account !== 'all'
-          ? '没有匹配的作者'
-          : '还没有添加作者'
-      "
+      :title="search || subscribed || account !== 'all' ? '没有匹配的作者' : '还没有添加作者'"
       description="添加作者，订阅后即可自动检查更新。"
       @retry="load"
     />
-    <div v-else class="table-shell">
+    <div
+      v-else
+      class="table-shell"
+    >
       <table class="data-table author-table">
         <thead>
           <tr>
@@ -457,45 +462,49 @@ onBeforeUnmount(() => {
                   :url="item.avatar_url"
                 />
                 <div>
-                  <button class="record-link" @click="openAuthor(item)">
-                    {{ name(item) }}</button
-                  ><span>{{
-                    isX
-                      ? "@" + item.username
-                      : "最近检查 " +
-                        dateTime(
-                          item.last_auto_update_at || item.last_check_time,
-                        )
-                  }}</span>
+                  <button
+                    class="record-link"
+                    @click="openAuthor(item)"
+                  >
+                    {{ name(item) }}
+                  </button>
+                  <span>
+                    {{
+                      isX
+                        ? "@" + item.username
+                        : "最近检查 " + dateTime(item.last_auto_update_at || item.last_check_time)
+                    }}
+                  </span>
                 </div>
               </div>
             </td>
             <td data-label="内容">
-              <strong>{{
-                isX ? (item.total_downloads ?? "—") : (item.total_works ?? "—")
-              }}</strong
-              ><span v-if="!isX"
-                >{{ item.downloaded_works ?? "—" }} 已下载</span
-              >
+              <strong>{{ isX ? (item.total_downloads ?? "—") : (item.total_works ?? "—") }}</strong>
+              <span v-if="!isX">{{ item.downloaded_works ?? "—" }} 已下载</span>
             </td>
             <td data-label="状态">
-              <span v-if="isX" :class="{ danger: !!item.last_error }">{{
-                item.account_status_label || "状态未确认"
-              }}</span
-              ><StatusIndicator
+              <span
+                v-if="isX"
+                :class="{ danger: !!item.last_error }"
+              >
+                {{ item.account_status_label || "状态未确认" }}
+              </span>
+              <StatusIndicator
                 v-else
                 :status="
-                  item.account_status || item.auto_update_status ||
+                  item.account_status ||
+                  item.auto_update_status ||
                   (item.is_subscribed ? 'waiting' : 'unsubscribed')
                 "
                 :label="item.account_status_label"
-              /><button
+              />
+              <button
                 v-if="item.last_error"
                 class="error-excerpt"
                 :title="item.account_status_detail || item.last_error"
                 @click="openAuthor(item)"
               >
-                {{ item.account_status_label || '最近检查异常' }}
+                {{ item.account_status_label || "最近检查异常" }}
               </button>
             </td>
             <td data-label="订阅">
@@ -504,39 +513,36 @@ onBeforeUnmount(() => {
                 :class="{ on: item.is_subscribed }"
                 role="switch"
                 :aria-checked="item.is_subscribed"
-                :aria-label="
-                  (item.is_subscribed ? '取消订阅 ' : '订阅 ') + name(item)
-                "
+                :aria-label="(item.is_subscribed ? '取消订阅 ' : '订阅 ') + name(item)"
                 :disabled="busyIds.includes(item.id)"
-                @click="
-                  action(item, item.is_subscribed ? 'unsubscribe' : 'subscribe')
-                "
+                @click="action(item, item.is_subscribed ? 'unsubscribe' : 'subscribe')"
               >
                 <i />
               </button>
             </td>
             <td class="actions-col">
-              <MoreActions :label="name(item)"
-                ><button @click="openAuthor(item)">查看作者详情</button
-                ><RouterLink
+              <MoreActions :label="name(item)">
+                <button @click="openAuthor(item)">查看作者详情</button>
+                <RouterLink
                   v-if="!isX"
                   :to="`/authors/douyin/${item.id}/works`"
-                  >浏览作品</RouterLink
-                ><button
-                  :disabled="
-                    busyIds.includes(item.id) || (!isX && store.risk.active)
-                  "
+                >
+                  浏览作品
+                </RouterLink>
+                <button
+                  :disabled="busyIds.includes(item.id) || (!isX && store.risk.active)"
                   @click="action(item, 'download')"
                 >
-                  下载作者内容</button
-                ><button
+                  下载作者内容
+                </button>
+                <button
                   class="danger"
                   :disabled="busyIds.includes(item.id)"
                   @click="remove(item)"
                 >
                   删除作者
-                </button></MoreActions
-              >
+                </button>
+              </MoreActions>
             </td>
           </tr>
         </tbody>
@@ -554,33 +560,40 @@ onBeforeUnmount(() => {
       :title="detail ? name(detail) : '作者详情'"
       :subtitle="isX ? 'X / Twitter' : '抖音作者'"
       @close="closeAuthor"
-      ><StateView
+    >
+      <StateView
         v-if="!detail"
         :loading="detailBusy"
         :error="detailError"
         @retry="loadDetail"
-      /><template v-else
-        ><nav class="view-tabs" aria-label="作者详情">
+      />
+      <template v-else>
+        <nav
+          class="view-tabs"
+          aria-label="作者详情"
+        >
           <button
             :class="{ active: tab === 'overview' }"
             @click="tab = 'overview'"
           >
-            概览</button
-          ><button
+            概览
+          </button>
+          <button
             v-if="!isX"
             :class="{ active: tab === 'history' }"
             @click="tab = 'history'"
           >
-            资料历史</button
-          ><button
+            资料历史
+          </button>
+          <button
             :class="{ active: tab === 'configuration' }"
             @click="tab = 'configuration'"
           >
             订阅配置
           </button>
         </nav>
-        <template v-if="tab === 'overview'"
-          ><dl class="detail-fields">
+        <template v-if="tab === 'overview'">
+          <dl class="detail-fields">
             <div>
               <dt>订阅</dt>
               <dd>{{ detail.is_subscribed ? "已订阅" : "未订阅" }}</dd>
@@ -588,11 +601,7 @@ onBeforeUnmount(() => {
             <div>
               <dt>最近检查</dt>
               <dd>
-                {{
-                  dateTime(
-                    automation?.last_auto_update_at || detail.last_check_time,
-                  )
-                }}
+                {{ dateTime(automation?.last_auto_update_at || detail.last_check_time) }}
               </dd>
             </div>
             <div v-if="!isX">
@@ -600,8 +609,7 @@ onBeforeUnmount(() => {
               <dd>
                 {{
                   automation?.check_interval_seconds != null
-                    ? Math.round(automation.check_interval_seconds / 60) +
-                      " 分钟"
+                    ? Math.round(automation.check_interval_seconds / 60) + " 分钟"
                     : "未确认"
                 }}
               </dd>
@@ -613,40 +621,69 @@ onBeforeUnmount(() => {
           </dl>
           <IssueDetail
             v-if="detail.last_error"
-            :message="detail.account_status_label ? [detail.account_status_label, detail.account_status_detail].filter(Boolean).join('：') : detail.last_error"
+            :message="
+              detail.account_status_label
+                ? [detail.account_status_label, detail.account_status_detail]
+                    .filter(Boolean)
+                    .join('：')
+                : detail.last_error
+            "
           />
-          <nav class="author-detail-actions" aria-label="作者相关页面">
+          <nav
+            class="author-detail-actions"
+            aria-label="作者相关页面"
+          >
             <a
               v-if="detail.share_url || detail.profile_url"
               class="btn ghost"
               :href="detail.share_url || detail.profile_url"
               target="_blank"
               rel="noopener noreferrer"
-            >打开主页</a>
+            >
+              打开主页
+            </a>
             <RouterLink
               v-if="!isX"
               class="btn ghost"
               :to="`/authors/douyin/${detail.id}/works`"
-            >浏览全部作品</RouterLink>
+            >
+              浏览全部作品
+            </RouterLink>
             <RouterLink
               class="btn ghost"
-              :to="{path:'/library',query:{platform:props.platform,author_id:String(detail.id),author:name(detail)}}"
-            >查看已保存媒体</RouterLink>
+              :to="{
+                path: '/library',
+                query: {
+                  platform: props.platform,
+                  author_id: String(detail.id),
+                  author: name(detail),
+                },
+              }"
+            >
+              查看已保存媒体
+            </RouterLink>
           </nav>
-          <div v-if="automation?.history?.length" class="result-list">
+          <div
+            v-if="automation?.history?.length"
+            class="result-list"
+          >
             <h3>最近检查轨迹</h3>
-            <article v-for="item in automation.history" :key="item.report_id">
+            <article
+              v-for="item in automation.history"
+              :key="item.report_id"
+            >
               <div>
-                <RouterLink :to="'/automation?run=' + item.report_id">{{
-                  dateTime(item.started_at)
-                }}</RouterLink
-                ><StatusIndicator :status="item.status" />
+                <RouterLink :to="'/automation?run=' + item.report_id">
+                  {{ dateTime(item.started_at) }}
+                </RouterLink>
+                <StatusIndicator :status="item.status" />
               </div>
               <p>{{ item.message }}</p>
             </article>
-          </div></template
-        ><template v-else-if="tab === 'history'"
-          ><StateView
+          </div>
+        </template>
+        <template v-else-if="tab === 'history'">
+          <StateView
             v-if="resourceBusy || resourceError || !history.length"
             :loading="resourceBusy"
             :error="resourceError"
@@ -654,30 +691,47 @@ onBeforeUnmount(() => {
             @retry="loadResource"
           />
           <div class="result-list">
-            <article v-for="item in history" :key="item.id">
-              <time>{{ dateTime(item.observed_at) }}</time
-              ><strong>{{
-                item.field_name === "nickname"
-                  ? "名称"
-                  : item.field_name === "avatar_url"
-                    ? "头像"
-                    : item.field_name
-              }}</strong>
+            <article
+              v-for="item in history"
+              :key="item.id"
+            >
+              <time>{{ dateTime(item.observed_at) }}</time>
+              <strong>
+                {{
+                  item.field_name === "nickname"
+                    ? "名称"
+                    : item.field_name === "avatar_url"
+                      ? "头像"
+                      : item.field_name
+                }}
+              </strong>
               <p>{{ item.old_value || "空" }} → {{ item.new_value || "空" }}</p>
             </article>
-          </div></template
-        ><template v-else
-          ><label v-if="!isX" class="stacked-field"
-            >检查间隔（秒）<input
+          </div>
+        </template>
+        <template v-else>
+          <label
+            v-if="!isX"
+            class="stacked-field"
+          >
+            检查间隔（秒）
+            <input
               v-model.number="interval"
               type="number"
               min="1"
-          /></label>
-          <p v-if="isX" class="inline-note">
+            />
+          </label>
+          <p
+            v-if="isX"
+            class="inline-note"
+          >
             已配置检查间隔：{{ detail.check_interval ?? "未确认" }}
             秒。订阅检查沿用当前平台调度规则。
           </p>
-          <p v-else class="inline-note">
+          <p
+            v-else
+            class="inline-note"
+          >
             实际调度还会遵守全局最短间隔与平台请求节奏。
           </p>
           <button
@@ -691,57 +745,58 @@ onBeforeUnmount(() => {
           <div class="danger-zone">
             <h3>删除作者</h3>
             <p>
-              {{
-                isX ? "删除用户记录及订阅。" : "同时删除作品、下载任务和文件。"
-              }}
+              {{ isX ? "删除用户记录及订阅。" : "同时删除作品、下载任务和文件。" }}
             </p>
-            <button class="btn danger" @click="remove(detail)">删除作者</button>
-          </div></template
-        ><IssueDetail
+            <button
+              class="btn danger"
+              @click="remove(detail)"
+            >
+              删除作者
+            </button>
+          </div>
+        </template>
+        <IssueDetail
           v-if="resourceError && tab === 'overview'"
-          :message="resourceError" /></template
-      ><template #footer
-        ><template v-if="detail"
-          ><button
+          :message="resourceError"
+        />
+      </template>
+      <template #footer>
+        <template v-if="detail">
+          <button
             class="btn"
-            :disabled="
-              busyIds.includes(detail.id) || (!isX && store.risk.active)
-            "
+            :disabled="busyIds.includes(detail.id) || (!isX && store.risk.active)"
             @click="action(detail, 'download')"
           >
-            下载内容</button
-          ><MoreActions label="更多作者操作"
-            ><button
+            下载内容
+          </button>
+          <MoreActions label="更多作者操作">
+            <button
               v-if="!isX"
               :disabled="store.risk.active"
               @click="action(detail, 'check')"
             >
-              检查新作品</button
-            ><button
+              检查新作品
+            </button>
+            <button
               v-if="!isX"
               :disabled="store.risk.active"
               @click="action(detail, 'sync-avatar')"
             >
-              同步资料与头像</button
-            ><button
+              同步资料与头像
+            </button>
+            <button
               v-if="!isX"
               :disabled="store.risk.active"
               @click="action(detail, 'reconcile')"
             >
-              作者全量对账</button
-            ><button
-              @click="
-                action(
-                  detail,
-                  detail.is_subscribed ? 'unsubscribe' : 'subscribe',
-                )
-              "
-            >
+              作者全量对账
+            </button>
+            <button @click="action(detail, detail.is_subscribed ? 'unsubscribe' : 'subscribe')">
               {{ detail.is_subscribed ? "取消订阅" : "订阅作者" }}
-            </button></MoreActions
-          ></template
-        ></template
-      ></InspectorPanel
-    >
+            </button>
+          </MoreActions>
+        </template>
+      </template>
+    </InspectorPanel>
   </section>
 </template>

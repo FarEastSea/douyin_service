@@ -6,21 +6,82 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#07080b" />
+    <meta
+      name="color-scheme"
+      content="dark light"
+    />
+    <meta
+      name="theme-color"
+      data-theme="dark"
+      media="(prefers-color-scheme: dark)"
+      content="#07080b"
+    />
+    <meta
+      name="theme-color"
+      data-theme="light"
+      media="(prefers-color-scheme: light)"
+      content="#eef0f4"
+    />
+    <script>
+      // Run before the stylesheet, including when storage is unavailable.
+      window.applyMediaTheme = function (preference) {
+        const effective =
+          preference === "dark" || preference === "light"
+            ? preference
+            : matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+        document.documentElement.dataset.theme = effective;
+        for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+          meta.media = meta.dataset.theme === effective ? "all" : "not all";
+        }
+        return effective;
+      };
+      let preference;
+      try {
+        preference = localStorage.getItem("media-theme");
+      } catch {}
+      window.applyMediaTheme(preference);
+    </script>
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      crossorigin
+      href="/node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"
+    />
     <meta
       name="description"
       content="统一管理媒体下载任务、作者订阅、异常诊断和服务维护。"
     />
-    <link rel="icon" type="image/svg+xml" href="/static/app/favicon.svg" />
-    <link rel="apple-touch-icon" href="/static/app/apple-touch-icon.png" />
-    <link rel="manifest" href="/static/app/manifest.webmanifest" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="媒体工作台" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/static/app/favicon.svg"
+    />
+    <link
+      rel="apple-touch-icon"
+      href="/static/app/apple-touch-icon.png"
+    />
+    <link
+      rel="manifest"
+      href="/static/app/manifest.webmanifest"
+    />
+    <meta
+      name="mobile-web-app-capable"
+      content="yes"
+    />
+    <meta
+      name="apple-mobile-web-app-title"
+      content="媒体工作台"
+    />
     <title>媒体工作台 · 媒体自动化</title>
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <script
+      type="module"
+      src="/src/main.ts"
+    ></script>
   </body>
 </html>

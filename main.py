@@ -24,7 +24,7 @@ from app.api import bootstrap
 from app.core.diagnostics import get_runtime_errors, mark_startup_recovered
 from app.core.env_config import validate_env
 from app.core.error_handling import register_exception_handlers
-from app.core.security import AdminAuthMiddleware, DynamicCORSMiddleware, register_media_cookie_routes
+from app.core.security import AUTH_COOKIE_NAME, AdminAuthMiddleware, DynamicCORSMiddleware, register_media_cookie_routes
 
 
 from app.core.config_transaction import recover_config_change, journal_path
@@ -231,6 +231,14 @@ async def public_readiness():
     return JSONResponse(status_code=200 if payload["ready"] else 503, content=payload)
 
 app.include_router(bootstrap.router, prefix="/api")
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    response = JSONResponse({"success": True})
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/api", httponly=True,
+                           secure=request.url.scheme == "https", samesite="strict")
+    return response
 
 # 静态文件服务（前端页面）
 static_dir = os.path.join(os.path.dirname(__file__), "static")

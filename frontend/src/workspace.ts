@@ -1,6 +1,7 @@
-import { onBeforeUnmount, ref, shallowRef, watchEffect } from "vue";
+import { useAppStore } from "./stores/app";
+import { computed, onBeforeUnmount, ref, shallowRef, watchEffect } from "vue";
 
-export const platformNames: Record<string, string> = {
+const fallbackPlatforms: Record<string, string> = {
   douyin: "抖音",
   x: "X",
   tiktok: "TikTok",
@@ -9,6 +10,16 @@ export const platformNames: Record<string, string> = {
   xhs: "小红书",
   instagram: "Instagram",
 };
+export function usePlatformNames() {
+  const store = useAppStore();
+  return computed<Record<string, string>>(() =>
+    store.platforms
+      ? Object.fromEntries(
+          store.platforms.map(({ id, short_name, name }) => [id, short_name || name || id]),
+        )
+      : fallbackPlatforms,
+  );
+}
 export const modalDepth = ref(0);
 export const inspectorDepth = ref(0);
 export interface WorkspaceAction {
@@ -60,14 +71,9 @@ export function bytes(value?: number | null) {
 }
 export function duration(start?: string, end?: string) {
   if (!start || !end) return "—";
-  const seconds = Math.max(
-    0,
-    Math.round((Date.parse(end) - Date.parse(start)) / 1000),
-  );
+  const seconds = Math.max(0, Math.round((Date.parse(end) - Date.parse(start)) / 1000));
   if (!Number.isFinite(seconds)) return "—";
-  return seconds < 60
-    ? `${seconds} 秒`
-    : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 const states: Record<string, [string, string]> = {
   pending: ["等待中", "neutral"],
@@ -80,34 +86,34 @@ const states: Record<string, [string, string]> = {
   time_budget: ["等待下一分片", "neutral"],
   queued: ["排队中", "neutral"],
   waiting: ["等待检查", "neutral"],
-  downloading: ["下载中", "active"],
-  running: ["执行中", "active"],
-  preparing: ["准备中", "active"],
+  downloading: ["下载中", "info"],
+  running: ["执行中", "info"],
+  preparing: ["准备中", "info"],
   completed: ["已完成", "success"],
   success: ["成功", "success"],
   new_works: ["发现新作品", "success"],
-  failed: ["失败", "error"],
-  error: ["异常", "error"],
-  interrupted: ["已中断", "error"],
+  failed: ["失败", "danger"],
+  error: ["异常", "danger"],
+  interrupted: ["已中断", "danger"],
   warning: ["需关注", "warning"],
   partial: ["部分完成", "warning"],
   partial_timeout: ["超时 · 等待续检", "warning"],
   partial_rate_limited: ["冷却 · 等待续检", "warning"],
   partial_upstream: ["上游异常 · 等待续检", "warning"],
-  partial_authentication: ["需更新账号", "error"],
+  partial_authentication: ["需更新账号", "danger"],
   paused: ["已暂停", "neutral"],
   cancelled: ["已取消", "neutral"],
   skipped: ["已跳过", "neutral"],
   disabled: ["已禁用", "neutral"],
   not_started: ["尚未下载", "neutral"],
   incomplete: ["未完成", "neutral"],
-  active: ["处理中", "active"],
+  active: ["处理中", "info"],
   unsubscribed: ["未订阅", "neutral"],
   idle: ["尚未运行", "neutral"],
   deferred: ["待续检", "neutral"],
   not_due: ["未到检查时间", "neutral"],
   account_warning: ["账号需关注", "warning"],
-  banned: ["已封禁", "error"],
+  banned: ["已封禁", "danger"],
   restricted: ["账号受限", "warning"],
   deleted: ["已销号", "warning"],
 };

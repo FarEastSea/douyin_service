@@ -1,12 +1,5 @@
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   ArrowRight,
@@ -18,16 +11,11 @@ import {
   Users,
   X,
 } from "@lucide/vue";
-import { modalDepth } from "../workspace";
+import { modalDepth, usePlatformNames } from "../workspace";
 import { api, jsonBody } from "../api";
-import {
-  captureFocusOrigin,
-  focusFirst,
-  restoreFocus,
-  trapFocus,
-} from "../focus";
+import { captureFocusOrigin, focusFirst, restoreFocus, trapFocus } from "../focus";
 import { useAppStore } from "../stores/app";
-import type { MediaPlatform } from "../types";
+
 const props = withDefaults(
   defineProps<{
     intent?: "download" | "subscribe";
@@ -65,8 +53,7 @@ let disposed = false;
 let sequence = 0,
   timer: number | undefined,
   controller: AbortController | undefined;
-let pending: { source: string; promise: Promise<Detection | null> } | null =
-  null;
+let pending: { source: string; promise: Promise<Detection | null> } | null = null;
 let origin: HTMLElement | null = null;
 const viewportHeight = ref(0),
   viewportTop = ref(0);
@@ -74,39 +61,28 @@ function updateViewport() {
   viewportHeight.value = window.visualViewport?.height || window.innerHeight;
   viewportTop.value = window.visualViewport?.offsetTop || 0;
 }
+const platformNames = usePlatformNames();
 const options = computed(() =>
-  store.platforms.length
-    ? store.platforms
-    : ([
-        { id: "douyin", name: "抖音" },
-        { id: "x", name: "X" },
-        { id: "tiktok", name: "TikTok" },
-        { id: "weibo", name: "微博" },
-        { id: "bilibili", name: "B站" },
-        { id: "xhs", name: "小红书" },
-        { id: "instagram", name: "Instagram" },
-      ] as MediaPlatform[]),
+  Object.entries(platformNames.value).map(([id, name]) => ({ id, name })),
 );
-const platform = computed(
+const resolvedPlatform = computed(
   () =>
     found.value?.platform_id ||
     manualPlatform.value ||
     (mode.value === "subscribe" ? "douyin" : ""),
 );
-const selected = computed(() =>
-  options.value.find((item) => item.id === platform.value),
-);
+const selected = computed(() => options.value.find((item) => item.id === resolvedPlatform.value));
 const kind = computed(() => found.value?.input_kind || "unknown");
 const blocked = computed(() => {
   if (
     mode.value === "subscribe" &&
-    platform.value &&
-    !["douyin", "x", "instagram"].includes(platform.value)
+    resolvedPlatform.value &&
+    !["douyin", "x", "instagram"].includes(resolvedPlatform.value)
   )
     return "目前支持订阅抖音、X 和 Instagram 作者，请粘贴对应的作者主页。";
   if (mode.value === "subscribe" && kind.value === "work")
     return "这是作品链接。订阅请使用作者主页，或切换到下载作品。";
-  if (platform.value === "xhs" && kind.value === "author")
+  if (resolvedPlatform.value === "xhs" && kind.value === "author")
     return "小红书目前仅支持单条笔记，请粘贴笔记链接。";
   return "";
 });
@@ -154,8 +130,7 @@ watch(
   input,
   () => {
     invalidate();
-    if (input.value.trim())
-      timer = window.setTimeout(() => void identify(input.value.trim()), 250);
+    if (input.value.trim()) timer = window.setTimeout(() => void identify(input.value.trim()), 250);
   },
   { flush: "sync" },
 );
@@ -164,8 +139,7 @@ watch(mode, () => {
   success.value = null;
 });
 function identify(source: string): Promise<Detection | null> {
-  if (found.value && source === input.value.trim())
-    return Promise.resolve(found.value);
+  if (found.value && source === input.value.trim()) return Promise.resolve(found.value);
   if (pending?.source === source) return pending.promise;
   const current = ++sequence;
   controller?.abort();
@@ -177,8 +151,7 @@ function identify(source: string): Promise<Detection | null> {
     ...jsonBody({ value: source }),
   })
     .then((value) => {
-      if (current === sequence && input.value.trim() === source)
-        found.value = value;
+      if (current === sequence && input.value.trim() === source) found.value = value;
       return current === sequence ? value : null;
     })
     .catch(() => null)
@@ -225,7 +198,7 @@ async function submit() {
       error.value = blocked.value;
       return;
     }
-    const target = platform.value;
+    const target = resolvedPlatform.value;
     if (!target) {
       manualOpen.value = true;
       error.value = "未能识别平台，请在下方选择平台后提交。";
@@ -233,21 +206,25 @@ async function submit() {
     }
     if (mode.value === "subscribe" && target === "instagram") {
       const result = await api<any>("/platform-downloads/instagram/authors", {
-        method: "POST", ...jsonBody({ source, kinds: instagramKinds.value }),
+        method: "POST",
+        ...jsonBody({ source, kinds: instagramKinds.value }),
       });
-      success.value = { message: result.message, path: "/operations/tasks", query: { platform: "instagram", task_key: `instagram:${result.task_id}` } };
-      window.dispatchEvent(new CustomEvent("app:authors-changed", { detail: { platform: target } }));
-    } else if (mode.value === "subscribe") {
-      const author = await api<any>(
-        target === "x" ? "/x/authors/" : "/authors/",
-        {
-          method: "POST",
-          ...jsonBody({
-            [target === "x" ? "profile_url" : "share_url"]: source,
-            is_subscribed: true,
-          }),
-        },
+      success.value = {
+        message: result.message,
+        path: "/operations/tasks",
+        query: { platform: "instagram", task_key: `instagram:${result.task_id}` },
+      };
+      window.dispatchEvent(
+        new CustomEvent("app:authors-changed", { detail: { platform: target } }),
       );
+    } else if (mode.value === "subscribe") {
+      const author = await api<any>(target === "x" ? "/x/authors/" : "/authors/", {
+        method: "POST",
+        ...jsonBody({
+          [target === "x" ? "profile_url" : "share_url"]: source,
+          is_subscribed: true,
+        }),
+      });
       if (!author.id || author.is_subscribed !== true)
         throw new Error("订阅状态尚未确认，请在作者页检查后重试。");
       success.value = {
@@ -282,20 +259,22 @@ async function submit() {
               path: "/operations/tasks",
               query: {
                 platform: target,
-                ...(result.task_ids?.length
-                  ? { task_key: `douyin:${result.task_ids[0]}` }
-                  : {}),
+                ...(result.task_ids?.length ? { task_key: `douyin:${result.task_ids[0]}` } : {}),
               },
             };
       window.dispatchEvent(new CustomEvent("app:tasks-changed"));
     } else {
       const result = await api<any>(
-        target === "x"
-          ? "/x/download"
-          : `/platform-downloads/${target}/download`,
+        target === "x" ? "/x/download" : `/platform-downloads/${target}/download`,
         {
           method: "POST",
-          ...jsonBody(target === "x" ? { profile_url: source } : target === "instagram" ? { source, allow_profile: kind.value === "author" } : { source }),
+          ...jsonBody(
+            target === "x"
+              ? { profile_url: source }
+              : target === "instagram"
+                ? { source, allow_profile: kind.value === "author" }
+                : { source },
+          ),
         },
       );
       success.value = {
@@ -313,7 +292,7 @@ async function submit() {
   } catch (reason: any) {
     error.value = reason.message || "提交失败，请稍后重试。";
     if (reason.code === "author_link_requires_confirmation") {
-      found.value = { platform_id: platform.value || "douyin", input_kind: "author" };
+      found.value = { platform_id: resolvedPlatform.value || "douyin", input_kind: "author" };
     }
   } finally {
     submitting.value = false;
@@ -390,14 +369,18 @@ onBeforeUnmount(() => {
           <X :size="19" />
         </button>
       </header>
-      <div class="capture-tabs" aria-label="添加内容类型">
+      <div
+        class="capture-tabs"
+        aria-label="添加内容类型"
+      >
         <button
           type="button"
           :aria-pressed="mode === 'download'"
           :disabled="submitting"
           @click="mode = 'download'"
         >
-          <Download :size="17" />下载作品
+          <Download :size="17" />
+          下载作品
         </button>
         <button
           type="button"
@@ -405,25 +388,28 @@ onBeforeUnmount(() => {
           :disabled="submitting"
           @click="mode = 'subscribe'"
         >
-          <Users :size="17" />订阅作者
+          <Users :size="17" />
+          订阅作者
         </button>
       </div>
       <div class="download-panel-body">
         <div class="capture-input-label">
-          <label for="download-source">{{
-            mode === "subscribe" ? "作者主页链接" : "作品链接或分享内容"
-          }}</label
-          ><button
+          <label for="download-source">
+            {{ mode === "subscribe" ? "作者主页链接" : "作品链接或分享内容" }}
+          </label>
+          <button
             type="button"
             class="btn ghost compact"
             :disabled="submitting || pasting"
             @click="paste"
           >
-            <ClipboardPaste :size="15" />{{ pasting ? "正在读取…" : "粘贴" }}
+            <ClipboardPaste :size="15" />
+            {{ pasting ? "正在读取…" : "粘贴" }}
           </button>
         </div>
         <div class="source-input">
-          <Link2 :size="18" /><textarea
+          <Link2 :size="18" />
+          <textarea
             id="download-source"
             ref="field"
             v-model="input"
@@ -436,9 +422,7 @@ onBeforeUnmount(() => {
             autocapitalize="off"
             :spellcheck="false"
             :aria-invalid="Boolean(error || blocked)"
-            :aria-describedby="
-              error || blocked ? 'capture-error' : 'capture-help'
-            "
+            :aria-describedby="error || blocked ? 'capture-error' : 'capture-help'"
             :placeholder="
               mode === 'subscribe'
                 ? '粘贴作者分享链接，也支持 X、Instagram 用户名'
@@ -447,26 +431,47 @@ onBeforeUnmount(() => {
             @keydown.enter.exact="submitFromKeyboard"
           />
         </div>
-        <p id="capture-help" class="field-help">
+        <p
+          id="capture-help"
+          class="field-help"
+        >
           {{
             mode === "subscribe"
               ? "添加后直接开启自动更新，无需再去列表打开订阅。"
               : "视频、单图、实况、图集自动识别；图集会创建对应文件任务。"
           }}
         </p>
-        <p v-if="pasteHint" class="field-help" role="status">{{ pasteHint }}</p>
-        <div v-if="input.trim()" class="capture-detection" aria-live="polite">
-          <LoaderCircle v-if="detecting" :size="15" class="spinning" /><Check
+        <p
+          v-if="pasteHint"
+          class="field-help"
+          role="status"
+        >
+          {{ pasteHint }}
+        </p>
+        <div
+          v-if="input.trim()"
+          class="capture-detection"
+          aria-live="polite"
+        >
+          <LoaderCircle
+            v-if="detecting"
+            :size="15"
+            class="spinning"
+          />
+          <Check
             v-else-if="found"
             :size="15"
-          /><span>{{
-            detecting
-              ? "正在识别链接…"
-              : selected
-                ? `${selected.name}${kind === "author" ? " · 作者主页" : kind === "work" ? " · 单条作品" : ""}`
-                : "选择平台后即可提交"
-          }}</span
-          ><button
+          />
+          <span>
+            {{
+              detecting
+                ? "正在识别链接…"
+                : selected
+                  ? `${selected.name}${kind === "author" ? " · 作者主页" : kind === "work" ? " · 单条作品" : ""}`
+                  : "选择平台后即可提交"
+            }}
+          </span>
+          <button
             v-if="!found"
             type="button"
             class="btn ghost compact"
@@ -476,9 +481,12 @@ onBeforeUnmount(() => {
             选择平台
           </button>
         </div>
-        <div v-if="manualOpen && !found" class="download-platform-choice">
-          <label for="download-platform">平台</label
-          ><select
+        <div
+          v-if="manualOpen && !found"
+          class="download-platform-choice"
+        >
+          <label for="download-platform">平台</label>
+          <select
             id="download-platform"
             v-model="manualPlatform"
             :disabled="submitting"
@@ -486,8 +494,7 @@ onBeforeUnmount(() => {
             <option value="">自动识别</option>
             <option
               v-for="item in options.filter(
-                (item) =>
-                  mode !== 'subscribe' || ['douyin', 'x', 'instagram'].includes(item.id),
+                (item) => mode !== 'subscribe' || ['douyin', 'x', 'instagram'].includes(item.id),
               )"
               :key="item.id"
               :value="item.id"
@@ -497,7 +504,7 @@ onBeforeUnmount(() => {
           </select>
         </div>
         <fieldset
-          v-if="mode === 'subscribe' && platform === 'instagram' && !blocked"
+          v-if="mode === 'subscribe' && resolvedPlatform === 'instagram' && !blocked"
           class="capture-kinds"
           :disabled="submitting"
         >
@@ -514,13 +521,20 @@ onBeforeUnmount(() => {
               <strong>{{ item.label }}</strong>
             </button>
           </div>
-          <small class="field-help">Stories 只能收取当前仍可访问的内容；之后可在作者详情中调整。</small>
+          <small class="field-help">
+            Stories 只能收取当前仍可访问的内容；之后可在作者详情中调整。
+          </small>
         </fieldset>
         <p
           v-if="mode === 'download' && kind === 'author' && !blocked"
           class="capture-profile-note"
         >
-          {{ platform === 'instagram' ? '这是作者主页，提交会分批下载 Posts/Reels 的全部可访问历史。' : '这是作者主页，提交会扫描该作者作品并创建下载任务。' }}<button
+          {{
+            resolvedPlatform === "instagram"
+              ? "这是作者主页，提交会分批下载 Posts/Reels 的全部可访问历史。"
+              : "这是作者主页，提交会扫描该作者作品并创建下载任务。"
+          }}
+          <button
             type="button"
             class="btn ghost compact"
             :disabled="submitting"
@@ -537,14 +551,23 @@ onBeforeUnmount(() => {
         >
           {{ error || blocked }}
         </p>
-        <div v-if="success" class="capture-success" role="status">
+        <div
+          v-if="success"
+          class="capture-success"
+          role="status"
+        >
           <Check :size="18" />
           <div>
-            <strong>{{ success.message }}</strong
-            ><span>可继续粘贴下一条链接</span>
+            <strong>{{ success.message }}</strong>
+            <span>可继续粘贴下一条链接</span>
           </div>
-          <button type="button" class="btn ghost compact" @click="viewResult">
-            查看<ArrowRight :size="14" />
+          <button
+            type="button"
+            class="btn ghost compact"
+            @click="viewResult"
+          >
+            查看
+            <ArrowRight :size="14" />
           </button>
         </div>
       </div>
@@ -555,15 +578,22 @@ onBeforeUnmount(() => {
           :disabled="submitting"
           @click="close"
         >
-          关闭</button
-        ><button
+          关闭
+        </button>
+        <button
           class="btn primary"
           :disabled="!input.trim() || submitting || pasting || Boolean(blocked)"
         >
-          <LoaderCircle v-if="submitting" :size="17" class="spinning" /><span>{{
-            submitLabel
-          }}</span
-          ><ArrowRight v-if="!submitting" :size="17" />
+          <LoaderCircle
+            v-if="submitting"
+            :size="17"
+            class="spinning"
+          />
+          <span>{{ submitLabel }}</span>
+          <ArrowRight
+            v-if="!submitting"
+            :size="17"
+          />
         </button>
       </footer>
     </form>

@@ -1,11 +1,5 @@
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from "vue";
+import { useStorageMaintenance } from "./useStorageMaintenance";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from "vue-router";
 import { api, ApiError, jsonBody, saveToken } from "../api";
@@ -24,10 +18,7 @@ import {
   type SettingsMode,
 } from "../settings-registry";
 import { confirmAction } from "../workspace";
-export function useSettingsController(props: {
-  mode: SettingsMode;
-  section: string;
-}) {
+export function useSettingsController(props: { mode: SettingsMode; section: string }) {
   const router = useRouter();
   const store = useAppStore();
   type ResourceKey =
@@ -53,8 +44,7 @@ export function useSettingsController(props: {
     max?: number;
   };
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value ?? null));
-  const same = (left: unknown, right: unknown) =>
-    JSON.stringify(left) === JSON.stringify(right);
+  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 
   const runtime = ref<Record<string, any>>({});
   const limits = ref<Record<string, any>>({});
@@ -82,9 +72,7 @@ export function useSettingsController(props: {
   const xCookieValue = ref("");
   const platformCookieValues = ref<Record<string, string>>({});
   const platformCredentialStatus = ref<Record<string, any>>({});
-  const resourceState = ref<
-    Record<ResourceKey, { loaded: boolean; error: string }>
-  >({
+  const resourceState = ref<Record<ResourceKey, { loaded: boolean; error: string }>>({
     all: { loaded: false, error: "" },
     runtime: { loaded: false, error: "" },
     archive: { loaded: false, error: "" },
@@ -111,8 +99,7 @@ export function useSettingsController(props: {
     }
   }
   async function cancelQueueChange() {
-    if (!(await confirmAction("撤回待生效的后台连接变更，继续使用当前配置？")))
-      return;
+    if (!(await confirmAction("撤回待生效的后台连接变更，继续使用当前配置？"))) return;
     try {
       await api("/config/queue-change/cancel", { method: "POST" });
       await refreshQueueChange();
@@ -127,35 +114,21 @@ export function useSettingsController(props: {
   const process = ref<any>(null);
   const readiness = ref<any>({ components: {} });
   const platformReadiness = ref<any>({ items: [] });
-  const storageAudit = ref<any>(null);
-  const storageAuditState = ref<any>({ status: "idle", progress: {} });
-  const lastStorageRepair = ref<any>(null);
-  const storageJournals = ref<any[]>([]);
-  const storageRestorePreview = ref<any>(null);
-  const storageRestoreBusy = ref(false);
-  const storageRepairAllState = ref<any>({ status: "idle", progress: {} });
+  const storage = useStorageMaintenance();
   const platformAuditBusy = ref(false);
-  const storageAuditBusy = ref(false);
-  const storageRepairBusy = ref(false);
-  const storageRepairAllBusy = ref(false);
-  const storageRepairPlan = ref<any>(null);
   const updateInfo = ref<any>({});
   const diagnostic = ref<any>(null);
   const updateBusy = ref(false);
   const notificationTestBusy = ref(false);
   const notificationTestChannel = ref<
-    | "all" | "webhook" | "bark" | "email" | "gotify"
-    | "telegram" | "wecom" | "dingtalk" | "feishu"
+    "all" | "webhook" | "bark" | "email" | "gotify" | "telegram" | "wecom" | "dingtalk" | "feishu"
   >("all");
   const digestBusy = ref(false);
   const digestPreview = ref<{ title: string; body: string } | null>(null);
   const notificationTestResult = ref<Record<string, any>>({});
   let logTimer: number | undefined;
-  let storageAuditTimer: number | undefined;
 
-  const pageMap = computed(() =>
-    props.mode === "maintenance" ? maintenancePages : settingsPages,
-  );
+  const pageMap = computed(() => (props.mode === "maintenance" ? maintenancePages : settingsPages));
   const activePage = computed(
     () =>
       pageMap.value[props.section] ||
@@ -173,8 +146,7 @@ export function useSettingsController(props: {
       return [
         {
           title: "未分类配置",
-          description:
-            "这些字段来自较新的服务端版本，保存方式与其他基础配置一致。",
+          description: "这些字段来自较新的服务端版本，保存方式与其他基础配置一致。",
           envKeys: unknownFields.value.map((field) => field.key),
         },
       ];
@@ -189,25 +161,17 @@ export function useSettingsController(props: {
       .map((section) => ({
         ...section,
         fields: [
-          ...(section.envKeys || [])
-            .map((key) => resolveEnvField(key))
-            .filter(Boolean),
-          ...(section.runtimeKeys || [])
-            .map((key) => resolveRuntimeField(key))
-            .filter(Boolean),
+          ...(section.envKeys || []).map((key) => resolveEnvField(key)).filter(Boolean),
+          ...(section.runtimeKeys || []).map((key) => resolveRuntimeField(key)).filter(Boolean),
         ] as ResolvedField[],
       }))
       .filter((section) => section.fields.length),
   );
   const activeEnvKeys = computed(() => [
-    ...new Set(
-      activeFieldSections.value.flatMap((section) => section.envKeys || []),
-    ),
+    ...new Set(activeFieldSections.value.flatMap((section) => section.envKeys || [])),
   ]);
   const activeRuntimeKeys = computed(() => [
-    ...new Set(
-      activeFieldSections.value.flatMap((section) => section.runtimeKeys || []),
-    ),
+    ...new Set(activeFieldSections.value.flatMap((section) => section.runtimeKeys || [])),
   ]);
   const activePlatform = computed(() =>
     platformCredentials.find((item) => item.pageId === activePage.value.id),
@@ -248,8 +212,7 @@ export function useSettingsController(props: {
             ? "独立加密保存，不回显"
             : !resourceState.value.platformCredentials.loaded
               ? "未确认"
-              : platformCredentialStatus.value[activePlatform.value?.id || ""]
-                    ?.configured
+              : platformCredentialStatus.value[activePlatform.value?.id || ""]?.configured
                 ? "已配置"
                 : "未配置",
       },
@@ -264,17 +227,12 @@ export function useSettingsController(props: {
     if (!field) return null;
     const defaultValue = String(field.default ?? "");
     const isBoolean = ["true", "false"].includes(defaultValue.toLowerCase());
-    const isNumber =
-      !isBoolean &&
-      defaultValue !== "" &&
-      Number.isFinite(Number(defaultValue));
+    const isNumber = !isBoolean && defaultValue !== "" && Number.isFinite(Number(defaultValue));
     return {
       source: "env",
       key,
       label: field.label || key,
-      help:
-        field.help ||
-        (field.secret ? "敏感值不会回显；留空表示保持现有值。" : ""),
+      help: field.help || (field.secret ? "敏感值不会回显；留空表示保持现有值。" : ""),
       secret: Boolean(field.secret),
       required: Boolean(field.required),
       kind: isBoolean ? "boolean" : isNumber ? "number" : "text",
@@ -291,9 +249,7 @@ export function useSettingsController(props: {
         spec.type === "bool"
           ? "修改后在下一次任务调用或调度周期生效。"
           : [
-              spec.min != null && spec.max != null
-                ? String(spec.min) + "–" + String(spec.max)
-                : "",
+              spec.min != null && spec.max != null ? String(spec.min) + "–" + String(spec.max) : "",
               spec.unit || "",
             ]
               .filter(Boolean)
@@ -316,11 +272,9 @@ export function useSettingsController(props: {
     if (field.secret) {
       secretValues.value[field.key] = String(value);
     } else if (field.source === "runtime") {
-      runtime.value[field.key] =
-        field.kind === "number" ? Number(value) : value;
+      runtime.value[field.key] = field.kind === "number" ? Number(value) : value;
     } else {
-      if (!allValues.value[field.key])
-        allValues.value[field.key] = { value: "" };
+      if (!allValues.value[field.key]) allValues.value[field.key] = { value: "" };
       allValues.value[field.key].value =
         field.kind === "boolean" ? String(Boolean(value)) : String(value);
     }
@@ -346,25 +300,16 @@ export function useSettingsController(props: {
     return field.source === "runtime" ? runtimeKeyDirty(field.key) : envKeyDirty(field.key);
   }
   const dirtyEnvKeys = computed(() => activeEnvKeys.value.filter(envKeyDirty));
-  const dirtyRuntimeKeys = computed(() =>
-    activeRuntimeKeys.value.filter(runtimeKeyDirty),
-  );
+  const dirtyRuntimeKeys = computed(() => activeRuntimeKeys.value.filter(runtimeKeyDirty));
   const archiveDirty = computed(
-    () =>
-      activePage.value.id === "archive" &&
-      !same(archiveRules.value, baselineArchive.value),
+    () => activePage.value.id === "archive" && !same(archiveRules.value, baselineArchive.value),
   );
   const douyinDirtyCount = computed(() => {
     if (activePage.value.id !== "account-douyin") return 0;
     let count = 0;
     if (douyinCookieValue.value.trim()) count += 1;
     if (douyinProxyValue.value.trim()) count += 1;
-    if (
-      !same(
-        douyinAccount.value.user_agent || "",
-        baselineDouyinAccount.value.user_agent || "",
-      )
-    )
+    if (!same(douyinAccount.value.user_agent || "", baselineDouyinAccount.value.user_agent || ""))
       count += 1;
     if (
       !same(
@@ -376,12 +321,9 @@ export function useSettingsController(props: {
     return count;
   });
   const credentialDirty = computed(() => {
-    if (activePage.value.id === "account-x")
-      return Boolean(xCookieValue.value.trim());
+    if (activePage.value.id === "account-x") return Boolean(xCookieValue.value.trim());
     if (activePlatform.value)
-      return Boolean(
-        platformCookieValues.value[activePlatform.value.id]?.trim(),
-      );
+      return Boolean(platformCookieValues.value[activePlatform.value.id]?.trim());
     return false;
   });
   const activeDirtyCount = computed(
@@ -394,56 +336,6 @@ export function useSettingsController(props: {
   );
   const hasActiveChanges = computed(() => activeDirtyCount.value > 0);
 
-  const storageRepairTargets = computed(() => {
-    const report = storageAudit.value;
-    if (!report) return [];
-    return [
-      ...(report.relinkable_records || []).map((item: any) => ({
-        issue_type: "stale_record_path",
-        record_kind: item.kind,
-        record_id: item.id,
-        path: item.path,
-      })),
-      ...(report.missing_records || []).map((item: any) => ({
-        issue_type: "missing_record",
-        record_kind: item.kind,
-        record_id: item.id,
-        path: item.path,
-      })),
-      ...(report.zero_byte_files || []).map((item: any) => ({
-        issue_type: "zero_byte_file",
-        record_kind: item.kind,
-        record_id: item.id,
-        path: item.path,
-      })),
-      ...(report.partial_files || []).map((item: any) => ({
-        issue_type: "partial_file",
-        path: item.path,
-      })),
-      ...(report.orphan_files || []).map((path: string) => ({
-        issue_type: "orphan_file",
-        path,
-      })),
-    ].slice(0, 200);
-  });
-  const eligibleRepairTargets = computed(() =>
-    (storageRepairPlan.value?.items || [])
-      .filter((item: any) => item.eligible)
-      .map((item: any) => ({
-        issue_type: item.issue_type,
-        record_kind: item.record_kind,
-        record_id: item.record_id,
-        path: item.path,
-      })),
-  );
-  const storageIssueCount = computed(() => {
-    const counts = storageAudit.value?.issue_counts;
-    if (!counts) return storageRepairTargets.value.length;
-    return Object.values(counts).reduce(
-      (total: number, value: any) => total + Number(value || 0),
-      0,
-    );
-  });
   const readinessLabel = (name: string) =>
     (
       ({
@@ -456,15 +348,11 @@ export function useSettingsController(props: {
       }) as Record<string, string>
     )[name] || name;
   const sourceLabel = (name: string) =>
-    (({ profile: "作者主页", work: "单条作品" }) as Record<string, string>)[
-      name
-    ] || name;
+    (({ profile: "作者主页", work: "单条作品" }) as Record<string, string>)[name] || name;
   function displayDateTime(value?: string) {
     if (!value) return "暂无成功记录";
     const date = new Date(value);
-    return Number.isNaN(date.getTime())
-      ? "时间未知"
-      : date.toLocaleString("zh-CN");
+    return Number.isNaN(date.getTime()) ? "时间未知" : date.toLocaleString("zh-CN");
   }
 
   let pageLoadSequence = 0;
@@ -538,12 +426,7 @@ export function useSettingsController(props: {
       const rows = await Promise.all(
         platformCredentials.map(
           async (item) =>
-            [
-              item.id,
-              await api<any>(
-                "/platform-downloads/" + item.id + "/config/cookie",
-              ),
-            ] as const,
+            [item.id, await api<any>("/platform-downloads/" + item.id + "/config/cookie")] as const,
         ),
       );
       if (!isCurrent()) return;
@@ -556,10 +439,7 @@ export function useSettingsController(props: {
       if (isCurrent()) logs.value = data.logs || [];
     });
     if (!ok && silent !== true)
-      store.notify(
-        resourceState.value.logs.error || "活动日志读取失败",
-        "error",
-      );
+      store.notify(resourceState.value.logs.error || "活动日志读取失败", "error");
     return ok;
   }
   async function loadProcess() {
@@ -593,203 +473,6 @@ export function useSettingsController(props: {
       if (isCurrent()) updateInfo.value = data;
     });
   }
-  function stopStorageAuditPolling() {
-    if (storageAuditTimer != null) window.clearInterval(storageAuditTimer);
-    storageAuditTimer = undefined;
-  }
-  function startStorageAuditPolling() {
-    if (storageAuditTimer == null)
-      storageAuditTimer = window.setInterval(
-        () => refreshStorageAudit(true),
-        2000,
-      );
-  }
-  async function refreshStorageAudit(silent = false) {
-    const previousStatus = storageAuditState.value?.status;
-    const previousRepairAllStatus = storageRepairAllState.value?.status;
-    try {
-      const state = await api<any>("/operations/storage-audit");
-      storageAuditState.value = state;
-      lastStorageRepair.value = state.last_repair || null;
-      storageRepairAllState.value = state.repair_all || {
-        status: "idle",
-        progress: {},
-      };
-      storageAuditBusy.value = ["queued", "running"].includes(state.status);
-      storageRepairAllBusy.value = ["queued", "running"].includes(
-        storageRepairAllState.value.status,
-      );
-      if (state.result) storageAudit.value = state.result;
-      if (storageAuditBusy.value || storageRepairAllBusy.value)
-        startStorageAuditPolling();
-      else stopStorageAuditPolling();
-      if (
-        state.status === "completed" &&
-        previousStatus &&
-        !["completed", "idle"].includes(previousStatus)
-      )
-        store.notify("存储巡检完成");
-      if (state.status === "failed" && previousStatus !== "failed" && !silent)
-        store.notify(state.error || "存储巡检失败", "error");
-      if (
-        storageRepairAllState.value.status === "completed" &&
-        ["queued", "running"].includes(previousRepairAllStatus)
-      ) {
-        store.notify(
-          "存储全部维护完成：已处理 " +
-            (storageRepairAllState.value.result?.applied || 0) +
-            " 项",
-        );
-      }
-      if (
-        ["completed", "partial"].includes(storageRepairAllState.value.status) &&
-        ["queued", "running"].includes(previousRepairAllStatus)
-      )
-        void loadStorageJournals();
-      if (
-        storageRepairAllState.value.status === "partial" &&
-        previousRepairAllStatus !== "partial"
-      )
-        store.notify("存储维护部分完成，请查看失败项和复检结果", "error");
-      if (
-        storageRepairAllState.value.status === "failed" &&
-        previousRepairAllStatus !== "failed" &&
-        !silent
-      ) {
-        store.notify(
-          storageRepairAllState.value.error || "存储全部维护失败",
-          "error",
-        );
-      }
-    } catch (error: any) {
-      storageAuditBusy.value = false;
-      stopStorageAuditPolling();
-      if (!silent)
-        store.notify(error.message || "读取存储巡检状态失败", "error");
-    }
-  }
-  async function startStorageAudit() {
-    storageAuditBusy.value = true;
-    storageRepairPlan.value = null;
-    try {
-      storageAuditState.value = await api<any>("/operations/storage-audit", {
-        method: "POST",
-      });
-      startStorageAuditPolling();
-    } catch (error: any) {
-      storageAuditBusy.value = false;
-      store.notify(error.message || "提交存储巡检失败", "error");
-    }
-  }
-  async function previewStorageRepair() {
-    if (!storageRepairTargets.value.length)
-      return store.notify("当前没有需要处理的存储问题", "info");
-    storageRepairBusy.value = true;
-    try {
-      storageRepairPlan.value = await api("/operations/storage-repair", {
-        method: "POST",
-        ...jsonBody({ dry_run: true, targets: storageRepairTargets.value }),
-      });
-    } catch (error: any) {
-      store.notify(error.message || "生成修复方案失败", "error");
-    } finally {
-      storageRepairBusy.value = false;
-    }
-  }
-  async function applyStorageRepair() {
-    const targets = eligibleRepairTargets.value;
-    if (
-      !targets.length ||
-      !(await confirmAction(
-        "确认处理 " +
-          targets.length +
-          " 项？异常文件只移动到可恢复隔离区，不会直接删除。",
-      ))
-    )
-      return;
-    storageRepairBusy.value = true;
-    try {
-      const result = await api<any>("/operations/storage-repair", {
-        method: "POST",
-        ...jsonBody({ dry_run: false, targets }),
-      });
-      lastStorageRepair.value = result.repair_state || null;
-      store.notify(
-        "本批已处理 " + result.applied + " 项，正在重新扫描剩余问题",
-      );
-      await startStorageAudit();
-    } catch (error: any) {
-      store.notify(error.message || "执行存储维护失败", "error");
-    } finally {
-      storageRepairBusy.value = false;
-    }
-  }
-  async function applyAllStorageRepairs() {
-    const count = storageIssueCount.value;
-    if (
-      !count ||
-      !(await confirmAction(
-        "确认在后台处理本次扫描发现的全部 " + count + " 项问题？",
-      ))
-    )
-      return;
-    storageRepairAllBusy.value = true;
-    storageRepairPlan.value = null;
-    try {
-      storageRepairAllState.value = await api<any>(
-        "/operations/storage-repair-all",
-        { method: "POST" },
-      );
-      store.notify("存储全部维护已进入后台队列，可以离开页面");
-      startStorageAuditPolling();
-    } catch (error: any) {
-      storageRepairAllBusy.value = false;
-      store.notify(error.message || "提交存储全部维护失败", "error");
-    }
-  }
-
-  async function loadStorageJournals() {
-    try {
-      storageJournals.value =
-        (await api<any>("/operations/storage-journals")).items || [];
-    } catch (error: any) {
-      store.notify(error.message || "存储恢复记录读取失败", "error");
-    }
-  }
-  async function restoreStorage(journalId: string, apply = false) {
-    if (
-      apply &&
-      (!storageRestorePreview.value ||
-        storageRestorePreview.value.journalId !== journalId ||
-        !(await confirmAction(
-          "确认恢复预演中允许的隔离文件？不会覆盖已有文件，也不会自动恢复任务完成状态。",
-        )))
-    )
-      return;
-    storageRestoreBusy.value = true;
-    try {
-      const result = await api<any>("/operations/storage-restore", {
-        method: "POST",
-        ...jsonBody({ journal_id: journalId, dry_run: !apply }),
-      });
-      storageRestorePreview.value = { ...result, journalId };
-      if (apply) {
-        store.notify(
-          result.status === "partial"
-            ? "恢复部分完成，请查看逐项失败原因"
-            : "隔离文件恢复完成，请重新巡检并按需重试任务",
-          result.status === "partial" ? "error" : "success",
-        );
-        await loadStorageJournals();
-        await startStorageAudit();
-      }
-    } catch (error: any) {
-      store.notify(error.message || "隔离恢复失败，原文件不会被覆盖", "error");
-    } finally {
-      storageRestoreBusy.value = false;
-    }
-  }
-
   async function loadActivePage() {
     const current = ++pageLoadSequence;
     for (const key of Object.keys(resourceState.value) as ResourceKey[])
@@ -800,8 +483,7 @@ export function useSettingsController(props: {
     const jobs: Promise<any>[] = [];
     if (props.mode === "settings") {
       if (activePage.value.id === "archive") jobs.push(loadArchiveRules());
-      else if (activePage.value.id === "account-douyin")
-        jobs.push(loadDouyinAccount());
+      else if (activePage.value.id === "account-douyin") jobs.push(loadDouyinAccount());
       else {
         jobs.push(loadAll());
         if (activeRuntimeKeys.value.length) jobs.push(loadRuntime());
@@ -812,7 +494,7 @@ export function useSettingsController(props: {
     } else if (activePage.value.id === "platforms") {
       jobs.push(loadPlatformReadiness());
     } else if (activePage.value.id === "storage") {
-      jobs.push(refreshStorageAudit(true), loadStorageJournals());
+      jobs.push(storage.refreshStorageAudit(true), storage.loadStorageJournals());
     } else if (activePage.value.id === "logs") {
       jobs.push(loadLogs());
     } else if (activePage.value.id === "update") {
@@ -825,14 +507,11 @@ export function useSettingsController(props: {
     if (current !== pageLoadSequence) return;
     const failures = results.filter(
       (result) =>
-        result.status === "rejected" ||
-        (result.status === "fulfilled" && result.value === false),
+        result.status === "rejected" || (result.status === "fulfilled" && result.value === false),
     );
     if (failures.length)
       saveError.value =
-        "有 " +
-        failures.length +
-        " 项状态读取失败；为避免覆盖服务端值，相关保存已禁用。";
+        "有 " + failures.length + " 项状态读取失败；为避免覆盖服务端值，相关保存已禁用。";
     pageLoading.value = false;
     configureLogPolling();
   }
@@ -848,22 +527,19 @@ export function useSettingsController(props: {
   function discardActiveChanges() {
     fieldErrors.value = {};
     for (const key of activeEnvKeys.value) {
-      if (allValues.value[key])
-        allValues.value[key].value = clone(baselineAll.value[key]);
+      if (allValues.value[key]) allValues.value[key].value = clone(baselineAll.value[key]);
       delete secretValues.value[key];
     }
     for (const key of activeRuntimeKeys.value)
       runtime.value[key] = clone(baselineRuntime.value[key]);
-    if (activePage.value.id === "archive")
-      archiveRules.value = clone(baselineArchive.value);
+    if (activePage.value.id === "archive") archiveRules.value = clone(baselineArchive.value);
     if (activePage.value.id === "account-douyin") {
       douyinAccount.value = clone(baselineDouyinAccount.value);
       douyinCookieValue.value = "";
       douyinProxyValue.value = "";
     }
     if (activePage.value.id === "account-x") xCookieValue.value = "";
-    if (activePlatform.value)
-      platformCookieValues.value[activePlatform.value.id] = "";
+    if (activePlatform.value) platformCookieValues.value[activePlatform.value.id] = "";
     saveError.value = "";
   }
   async function confirmDiscard() {
@@ -872,8 +548,7 @@ export function useSettingsController(props: {
       return false;
     }
     return (
-      !hasActiveChanges.value ||
-      (await confirmAction("当前子页有未保存修改，确定放弃并离开吗？"))
+      !hasActiveChanges.value || (await confirmAction("当前子页有未保存修改，确定放弃并离开吗？"))
     );
   }
   async function refreshActivePage() {
@@ -886,7 +561,9 @@ export function useSettingsController(props: {
     return {
       pageId: activePage.value.id,
       envKeys: activeEnvKeys.value.filter(envKeyDirty),
-      envValues: clone(Object.fromEntries(activeEnvKeys.value.map((key) => [key, allValues.value[key]?.value]))),
+      envValues: clone(
+        Object.fromEntries(activeEnvKeys.value.map((key) => [key, allValues.value[key]?.value])),
+      ),
       secrets: { ...secretValues.value },
       runtimeKeys: activeRuntimeKeys.value.filter(runtimeKeyDirty),
       runtime: clone(runtime.value),
@@ -900,14 +577,15 @@ export function useSettingsController(props: {
       credentialDirty: credentialDirty.value,
       xCookie: xCookieValue.value,
       platformId: activePlatform.value?.id,
-      platformCookie: activePlatform.value ? platformCookieValues.value[activePlatform.value.id] || "" : "",
+      platformCookie: activePlatform.value
+        ? platformCookieValues.value[activePlatform.value.id] || ""
+        : "",
     };
   }
   type SaveSnapshot = ReturnType<typeof captureSettings>;
   class SaveCancelled extends Error {}
   function assertSaved(result: any) {
-    if (result?.success === false)
-      throw new ApiError(result.message || "保存失败", 400, result);
+    if (result?.success === false) throw new ApiError(result.message || "保存失败", 400, result);
   }
   function validateFields() {
     const errors: Record<string, string> = {};
@@ -919,8 +597,10 @@ export function useSettingsController(props: {
         else if (field.kind === "number" && value !== "" && value != null) {
           const number = Number(value);
           if (!Number.isFinite(number)) errors[field.key] = "请输入有效数字";
-          else if (field.min != null && number < field.min) errors[field.key] = "不能小于 " + field.min;
-          else if (field.max != null && number > field.max) errors[field.key] = "不能大于 " + field.max;
+          else if (field.min != null && number < field.min)
+            errors[field.key] = "不能小于 " + field.min;
+          else if (field.max != null && number > field.max)
+            errors[field.key] = "不能大于 " + field.max;
         }
       }
     }
@@ -930,20 +610,13 @@ export function useSettingsController(props: {
   async function saveEnvBlock(snapshot: SaveSnapshot) {
     const dirtyKeys = snapshot.envKeys;
     if (!dirtyKeys.length) return false;
-    if (!resourceState.value.all.loaded)
-      throw new Error("基础配置尚未成功读取");
+    if (!resourceState.value.all.loaded) throw new Error("基础配置尚未成功读取");
     const values: Record<string, any> = {};
     for (const key of dirtyKeys) {
       const field = allFieldMap.value[key];
-      values[key] = field?.secret
-        ? snapshot.secrets[key].trim()
-        : snapshot.envValues[key];
+      values[key] = field?.secret ? snapshot.secrets[key].trim() : snapshot.envValues[key];
     }
-    if (
-      dirtyKeys.some(
-        (key) => key === "DOWNLOAD_ROOT" || key.endsWith("_DOWNLOAD_SUBDIR"),
-      )
-    ) {
+    if (dirtyKeys.some((key) => key === "DOWNLOAD_ROOT" || key.endsWith("_DOWNLOAD_SUBDIR"))) {
       const preview = await api<any>("/config/all?preview=true", {
         method: "POST",
         ...jsonBody({ values }),
@@ -974,7 +647,8 @@ export function useSettingsController(props: {
       } else {
         const saved = result.data?.values?.[key] ?? snapshot.envValues[key];
         baselineAll.value[key] = clone(saved);
-        if (same(allValues.value[key]?.value, snapshot.envValues[key])) allValues.value[key].value = clone(saved);
+        if (same(allValues.value[key]?.value, snapshot.envValues[key]))
+          allValues.value[key].value = clone(saved);
       }
     }
     return true;
@@ -982,11 +656,8 @@ export function useSettingsController(props: {
   async function saveRuntimeBlock(snapshot: SaveSnapshot) {
     const dirtyKeys = snapshot.runtimeKeys;
     if (!dirtyKeys.length) return false;
-    if (!resourceState.value.runtime.loaded)
-      throw new Error("运行配置尚未成功读取");
-    const payload = Object.fromEntries(
-      dirtyKeys.map((key) => [key, snapshot.runtime[key]]),
-    );
+    if (!resourceState.value.runtime.loaded) throw new Error("运行配置尚未成功读取");
+    const payload = Object.fromEntries(dirtyKeys.map((key) => [key, snapshot.runtime[key]]));
     const result = await api<any>("/config/runtime", {
       method: "POST",
       ...jsonBody(payload),
@@ -1003,8 +674,7 @@ export function useSettingsController(props: {
   }
   async function saveArchiveBlock(snapshot: SaveSnapshot) {
     if (!snapshot.archiveDirty) return false;
-    if (!resourceState.value.archive.loaded)
-      throw new Error("归档规则尚未成功读取");
+    if (!resourceState.value.archive.loaded) throw new Error("归档规则尚未成功读取");
     const result = await api<any>("/config/archive-rules", {
       method: "POST",
       ...jsonBody(snapshot.archive),
@@ -1012,31 +682,25 @@ export function useSettingsController(props: {
     assertSaved(result);
     const current = archiveRules.value;
     const saved = result.rules || snapshot.archive;
-    archiveRules.value = Object.fromEntries(Object.entries(saved).map(([key, value]) => [
-      key, same(current[key], snapshot.archive[key]) ? clone(value) : current[key],
-    ]));
+    archiveRules.value = Object.fromEntries(
+      Object.entries(saved).map(([key, value]) => [
+        key,
+        same(current[key], snapshot.archive[key]) ? clone(value) : current[key],
+      ]),
+    );
     baselineArchive.value = clone(saved);
     return true;
   }
   async function saveDouyinBlock(snapshot: SaveSnapshot) {
     if (!snapshot.douyinDirty) return false;
-    if (!resourceState.value.douyinAccount.loaded)
-      throw new Error("抖音账号状态尚未成功读取");
+    if (!resourceState.value.douyinAccount.loaded) throw new Error("抖音账号状态尚未成功读取");
     const payload: Record<string, any> = {};
     if (snapshot.douyinCookie.trim()) payload.cookie = snapshot.douyinCookie.trim();
     if (snapshot.douyinProxy.trim()) payload.proxy_url = snapshot.douyinProxy.trim();
-    if (
-      !same(
-        snapshot.douyin.user_agent || "",
-        snapshot.douyinBaseline.user_agent || "",
-      )
-    )
+    if (!same(snapshot.douyin.user_agent || "", snapshot.douyinBaseline.user_agent || ""))
       payload.user_agent = snapshot.douyin.user_agent;
     if (
-      !same(
-        Boolean(snapshot.douyin.proxy_enabled),
-        Boolean(snapshot.douyinBaseline.proxy_enabled),
-      )
+      !same(Boolean(snapshot.douyin.proxy_enabled), Boolean(snapshot.douyinBaseline.proxy_enabled))
     )
       payload.proxy_enabled = Boolean(snapshot.douyin.proxy_enabled);
     const result = await api<any>("/config/douyin-account", {
@@ -1074,15 +738,15 @@ export function useSettingsController(props: {
       ...jsonBody({ cookie: snapshot.platformCookie.trim() }),
     });
     assertSaved(result);
-    if (platformCookieValues.value[platformId] === snapshot.platformCookie) platformCookieValues.value[platformId] = "";
+    if (platformCookieValues.value[platformId] === snapshot.platformCookie)
+      platformCookieValues.value[platformId] = "";
     await loadPlatformCredentialStatus();
     return true;
   }
   async function saveCurrentPage(options: { silentSuccess?: boolean } = {}) {
     if (saving.value || pageLoading.value) return false;
     if (!hasActiveChanges.value) {
-      if (!options.silentSuccess)
-        store.notify("当前子页没有需要保存的修改", "info");
+      if (!options.silentSuccess) store.notify("当前子页没有需要保存的修改", "info");
       return true;
     }
     if (!validateFields()) {
@@ -1100,13 +764,15 @@ export function useSettingsController(props: {
       try {
         if (await operation()) savedBlocks += 1;
       } catch (error: any) {
-        if (error instanceof SaveCancelled) { cancelled = true; return; }
+        if (error instanceof SaveCancelled) {
+          cancelled = true;
+          return;
+        }
         if (error instanceof ApiError) Object.assign(fieldErrors.value, error.fieldErrors);
         errors.push(label + "：" + (error.message || "保存失败"));
       }
     };
-    if (snapshot.pageId === "archive")
-      await run("归档规则", () => saveArchiveBlock(snapshot));
+    if (snapshot.pageId === "archive") await run("归档规则", () => saveArchiveBlock(snapshot));
     else if (snapshot.pageId === "account-douyin")
       await run("抖音账号", () => saveDouyinBlock(snapshot));
     else {
@@ -1122,14 +788,15 @@ export function useSettingsController(props: {
     }
     if (errors.length) {
       saveError.value = errors.join("；");
-      store.notify(
-        savedBlocks ? "部分配置已保存，其余修改已保留" : "当前子页保存失败",
-        "error",
-      );
+      store.notify(savedBlocks ? "部分配置已保存，其余修改已保留" : "当前子页保存失败", "error");
       return false;
     }
     if (!options.silentSuccess)
-      store.notify(hasActiveChanges.value ? "本次提交已保存，后续修改仍待保存" : "“" + activePage.value.title + "”已保存");
+      store.notify(
+        hasActiveChanges.value
+          ? "本次提交已保存，后续修改仍待保存"
+          : "“" + activePage.value.title + "”已保存",
+      );
     return true;
   }
   async function saveAndTestNotification() {
@@ -1141,10 +808,7 @@ export function useSettingsController(props: {
         ...jsonBody({ channel: notificationTestChannel.value }),
       });
       notificationTestResult.value = result.data?.channels || {};
-      store.notify(
-        result.message || "通知测试完成",
-        result.success ? "success" : "error",
-      );
+      store.notify(result.message || "通知测试完成", result.success ? "success" : "error");
     } catch (error: any) {
       store.notify(error.message || "通知测试失败", "error");
     } finally {
@@ -1161,29 +825,20 @@ export function useSettingsController(props: {
         ? { title: result.data.title, body: result.data.body || "" }
         : null;
       notificationTestResult.value = result.data?.channels || {};
-      store.notify(
-        result.message || "每日摘要已发送",
-        result.success ? "success" : "error",
-      );
+      store.notify(result.message || "每日摘要已发送", result.success ? "success" : "error");
     } catch (error: any) {
       store.notify(error.message || "每日摘要发送失败", "error");
     } finally {
       digestBusy.value = false;
     }
   }
-  function toggleArchiveValue(
-    key: "work_types" | "metadata_formats",
-    value: string,
-  ) {
+  function toggleArchiveValue(key: "work_types" | "metadata_formats", value: string) {
     const values = archiveRules.value[key] || [];
     archiveRules.value[key] = values.includes(value)
       ? values.filter((item: string) => item !== value)
       : [...values, value];
   }
-  async function processAction(
-    target: "worker" | "beat",
-    action: "start" | "stop",
-  ) {
+  async function processAction(target: "worker" | "beat", action: "start" | "stop") {
     try {
       const result = await api<any>("/process/" + target + "/" + action, {
         method: "POST",
@@ -1195,11 +850,7 @@ export function useSettingsController(props: {
     }
   }
   async function clearLogs() {
-    if (
-      !resourceState.value.logs.loaded ||
-      !(await confirmAction("确定清空活动日志？"))
-    )
-      return;
+    if (!resourceState.value.logs.loaded || !(await confirmAction("确定清空活动日志？"))) return;
     try {
       await api("/logs", { method: "DELETE" });
       logs.value = [];
@@ -1258,9 +909,7 @@ export function useSettingsController(props: {
   async function diagnoseUpdate() {
     try {
       diagnostic.value = await api<any>("/update/diagnose");
-      await navigator.clipboard.writeText(
-        JSON.stringify(diagnostic.value, null, 2),
-      );
+      await navigator.clipboard.writeText(JSON.stringify(diagnostic.value, null, 2));
       store.notify("诊断信息已复制");
     } catch (error: any) {
       store.notify(error.message || "诊断失败", "error");
@@ -1285,8 +934,7 @@ export function useSettingsController(props: {
   watch(
     () => [props.mode, props.section] as const,
     async () => {
-      const defaultSection =
-        props.mode === "maintenance" ? "services" : "application";
+      const defaultSection = props.mode === "maintenance" ? "services" : "application";
       if (!pageMap.value[props.section]) {
         await router.replace(sectionPath(props.mode, defaultSection));
         return;
@@ -1308,7 +956,6 @@ export function useSettingsController(props: {
       resourceRevision[key] = (resourceRevision[key] || 0) + 1;
     window.clearInterval(queueChangeTimer);
     if (logTimer != null) window.clearInterval(logTimer);
-    stopStorageAuditPolling();
     window.removeEventListener("beforeunload", beforeUnload);
   });
 
@@ -1318,14 +965,10 @@ export function useSettingsController(props: {
   async function loadAdvanced() {
     advancedBusy.value = true;
     advancedError.value = "";
-    const results = await Promise.allSettled([
-      api("/celery-debug"),
-      api("/worker-log?lines=80"),
-    ]);
+    const results = await Promise.allSettled([api("/celery-debug"), api("/worker-log?lines=80")]);
     advancedDiagnostics.value = {
       queue: results[0].status === "fulfilled" ? results[0].value : "未确认",
-      worker_log:
-        results[1].status === "fulfilled" ? results[1].value : "未确认",
+      worker_log: results[1].status === "fulfilled" ? results[1].value : "未确认",
     };
     if (results.some((item) => item.status === "rejected"))
       advancedError.value = "部分诊断未读取成功";
@@ -1354,8 +997,7 @@ export function useSettingsController(props: {
     advancedBusy.value = true;
     try {
       const result = await api<any>("/" + endpoint, { method: "POST" });
-      if (result.success === false)
-        throw new Error(result.error || result.message || "操作失败");
+      if (result.success === false) throw new Error(result.error || result.message || "操作失败");
       store.notify(result.message || "操作已提交");
     } catch (e: any) {
       store.notify(e.message, "error");
@@ -1381,8 +1023,7 @@ export function useSettingsController(props: {
           db_password: secretValues.value.DB_PASSWORD || "",
         }),
       });
-      if (result.success === false)
-        throw new Error(result.message || "连接失败");
+      if (result.success === false) throw new Error(result.message || "连接失败");
       store.notify(result.message || "连接成功");
     } catch (e: any) {
       store.notify(e.message, "error");
@@ -1391,6 +1032,7 @@ export function useSettingsController(props: {
     }
   }
   return {
+    ...storage,
     refreshCredentialStatus: loadPlatformCredentialStatus,
     advancedDiagnostics,
     advancedBusy,
@@ -1418,17 +1060,6 @@ export function useSettingsController(props: {
     process,
     readiness,
     platformReadiness,
-    storageAudit,
-    storageAuditState,
-    lastStorageRepair,
-    storageJournals,
-    storageRestorePreview,
-    storageRestoreBusy,
-    storageRepairAllState,
-    storageAuditBusy,
-    storageRepairBusy,
-    storageRepairAllBusy,
-    storageRepairPlan,
     updateInfo,
     diagnostic,
     updateBusy,
@@ -1447,18 +1078,9 @@ export function useSettingsController(props: {
     toggleField,
     activeDirtyCount,
     hasActiveChanges,
-    storageRepairTargets,
-    eligibleRepairTargets,
-    storageIssueCount,
     readinessLabel,
     sourceLabel,
     displayDateTime,
-    startStorageAudit,
-    previewStorageRepair,
-    applyStorageRepair,
-    applyAllStorageRepairs,
-    loadStorageJournals,
-    restoreStorage,
     discardActiveChanges,
     refreshActivePage,
     saveCurrentPage,

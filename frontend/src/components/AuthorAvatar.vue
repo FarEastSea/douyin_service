@@ -45,10 +45,7 @@ async function load() {
       signal: controller.signal,
       credentials: "same-origin",
     });
-    if (
-      !response.ok ||
-      !response.headers.get("content-type")?.startsWith("image/")
-    )
+    if (!response.ok || !response.headers.get("content-type")?.startsWith("image/"))
       throw new Error("Avatar unavailable");
     const blob = await response.blob();
     if (current !== sequence) return;
@@ -59,8 +56,7 @@ async function load() {
   }
 }
 function retry() {
-  if (!document.hidden && failed.value && Date.now() - lastAttempt > 30_000)
-    void load();
+  if (!document.hidden && failed.value && Date.now() - lastAttempt > 30_000) void load();
 }
 watch([() => props.id, () => props.platform, () => props.url, visible], load);
 onMounted(() => {
@@ -95,7 +91,10 @@ onBeforeUnmount(() => {
     aria-hidden="true"
     :data-loaded="loaded && !failed"
   >
-    <UserRound v-if="!loaded || failed" :size="18" />
+    <UserRound
+      v-if="!loaded || failed"
+      :size="18"
+    />
     <img
       v-if="source && !failed"
       :src="source"

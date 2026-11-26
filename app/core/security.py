@@ -113,7 +113,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
             return _unauthorized("管理 Token 缺失或不正确", "ADMIN_TOKEN_INVALID")
 
         response = await call_next(request)
-        if bearer_authenticated:
+        if bearer_authenticated and path != "/api/auth/logout" and request.cookies.get(AUTH_COOKIE_NAME) != admin_token:
             # img/video/a 元素不能附加 Authorization；该 HttpOnly 严格同站
             # Cookie 仅被上面的只读媒体路由接受，不可用于业务 API 或写操作。
             response.set_cookie(

@@ -17,9 +17,14 @@ defineEmits<{ refresh: [] }>();
       <p v-if="description">{{ description }}</p>
     </div>
     <div class="page-actions">
-      <span v-if="updatedAt" class="freshness"
-        >更新于 {{ dateTime(updatedAt) }}</span
-      ><slot /><button
+      <span
+        v-if="updatedAt"
+        class="freshness"
+      >
+        更新于 {{ dateTime(updatedAt) }}
+      </span>
+      <slot />
+      <button
         v-if="refreshable"
         class="icon-btn"
         type="button"
@@ -27,7 +32,10 @@ defineEmits<{ refresh: [] }>();
         :disabled="busy"
         @click="$emit('refresh')"
       >
-        <RefreshCw :size="16" :class="{ spinning: busy }" />
+        <RefreshCw
+          :size="16"
+          :class="{ spinning: busy }"
+        />
       </button>
     </div>
   </header>
