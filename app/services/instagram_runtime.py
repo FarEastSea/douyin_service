@@ -129,6 +129,10 @@ def normalize_cookie(raw):
     return "; ".join(f"{key}={value}" for key, value in sorted(cookies.items()))
 
 
+def proxy_from_account_state(row):
+    return _decrypt(row.encrypted_proxy) if row and row.encrypted_proxy else ""
+
+
 def connection(db):
     cookie = get_platform_cookie_sync(db, "instagram", "INSTAGRAM_COOKIE")
     if cookie:
@@ -137,8 +141,7 @@ def connection(db):
             cookie = normalize_cookie(cookie)
         except ValueError:
             cookie = None
-    row = account_state(db)
-    proxy = _decrypt(row.encrypted_proxy) if row.encrypted_proxy else ""
+    proxy = proxy_from_account_state(account_state(db))
     fingerprint = sha256(f"{cookie or ''}\n{proxy}".encode()).hexdigest()
     return cookie, proxy, fingerprint
 

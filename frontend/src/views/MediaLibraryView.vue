@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SelectField from "../components/SelectField.vue";
+import DateField from "../components/DateField.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -580,23 +582,15 @@ onBeforeUnmount(() => {
           />
         </label>
       </template>
-      <select
+      <SelectField
         v-model="platform"
         aria-label="筛选媒体平台"
         @change="
           authorId = '';
           filters();
         "
-      >
-        <option value="">全部平台</option>
-        <option
-          v-for="(label, key) in platformNames"
-          :key="key"
-          :value="key"
-        >
-          {{ label }}
-        </option>
-      </select>
+        :options="{ '': '全部平台', ...platformNames }"
+      />
       <input
         v-model="author"
         class="author-filter"
@@ -609,9 +603,8 @@ onBeforeUnmount(() => {
       />
       <label class="date-filter">
         <span>入库自</span>
-        <input
+        <DateField
           v-model="dateFrom"
-          type="date"
           aria-label="入库开始日期"
           :max="dateTo || undefined"
           :aria-invalid="dateRangeInvalid"
@@ -620,28 +613,20 @@ onBeforeUnmount(() => {
       </label>
       <label class="date-filter">
         <span>至</span>
-        <input
+        <DateField
           v-model="dateTo"
-          type="date"
           aria-label="入库结束日期"
           :min="dateFrom || undefined"
           :aria-invalid="dateRangeInvalid"
           @change="filters()"
         />
       </label>
-      <select
+      <SelectField
         v-model="sort"
         aria-label="媒体排序"
         @change="filters()"
-      >
-        <option
-          v-for="(label, key) in SORTS"
-          :key="key"
-          :value="key"
-        >
-          {{ label }}
-        </option>
-      </select>
+        :options="SORTS"
+      />
     </FilterToolbar>
     <div class="library-context">
       <h2>

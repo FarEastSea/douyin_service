@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { UserRound } from "@lucide/vue";
 import { getToken } from "../api";
 
 const props = defineProps<{
   id: number;
   platform: string;
+  name: string;
   url?: string | null;
 }>();
 const element = ref<HTMLElement | null>(null),
@@ -18,6 +19,40 @@ let controller: AbortController | undefined,
   sequence = 0;
 let observer: IntersectionObserver | undefined,
   lastAttempt = 0;
+const initial = computed(() =>
+  Array.from(props.name.trim().replace(/^@/, ""))[0]?.toLocaleUpperCase(),
+);
+const platforms: Record<string, { route: string; domains: string[] }> = {
+  douyin: {
+    route: "/api/authors",
+    domains: ["douyinpic.com", "douyincdn.com", "byteimg.com", "ibytedtos.com", "snssdk.com"],
+  },
+  x: { route: "/api/x/authors", domains: ["pbs.twimg.com"] },
+  instagram: {
+    route: "/api/platform-downloads/instagram/authors",
+    domains: ["cdninstagram.com", "fbcdn.net"],
+  },
+};
+function directUrl() {
+  if (!props.url) return "";
+  try {
+    const url = new URL(props.url);
+    const trusted = platforms[props.platform]?.domains.some(
+      (domain) => url.hostname === domain || url.hostname.endsWith("." + domain),
+    );
+    return trusted && url.protocol === "https:" && !url.port && !url.username && !url.password
+      ? url.href
+      : "";
+  } catch {
+    return "";
+  }
+}
+function fallback() {
+  loaded.value = false;
+  const alternative = directUrl();
+  if (alternative && source.value !== alternative) source.value = alternative;
+  else failed.value = true;
+}
 function release() {
   controller?.abort();
   if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -31,8 +66,9 @@ async function load() {
   loaded.value = false;
   failed.value = false;
   lastAttempt = Date.now();
-  if (props.platform !== "douyin") {
-    source.value = props.url || "";
+  const route = platforms[props.platform]?.route;
+  if (!route) {
+    fallback();
     return;
   }
   controller = new AbortController();
@@ -40,7 +76,7 @@ async function load() {
   try {
     // Image elements cannot attach the token; do not depend on a media cookie
     // being present or current after switching origins or updating credentials.
-    const response = await fetch(`/api/authors/${props.id}/avatar`, {
+    const response = await fetch(`${route}/${props.id}/avatar`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       signal: controller.signal,
       credentials: "same-origin",
@@ -52,7 +88,7 @@ async function load() {
     objectUrl = URL.createObjectURL(blob);
     source.value = objectUrl;
   } catch {
-    if (current === sequence) failed.value = true;
+    if (current === sequence) fallback();
   }
 }
 function retry() {
@@ -91,12 +127,19 @@ onBeforeUnmount(() => {
     aria-hidden="true"
     :data-loaded="loaded && !failed"
   >
+    <span
+      v-if="(!loaded || failed) && initial"
+      class="avatar-initial"
+    >
+      {{ initial }}
+    </span>
     <UserRound
-      v-if="!loaded || failed"
+      v-else-if="!loaded || failed"
       :size="18"
     />
     <img
       v-if="source && !failed"
+      :key="source"
       :src="source"
       alt=""
       width="32"
@@ -104,10 +147,7 @@ onBeforeUnmount(() => {
       referrerpolicy="no-referrer"
       decoding="async"
       @load="loaded = true"
-      @error="
-        failed = true;
-        loaded = false;
-      "
+      @error="fallback"
     />
   </span>
 </template>

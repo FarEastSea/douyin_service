@@ -136,20 +136,26 @@ def metadata_for_media(
     fallback_data: Mapping[str, Any] | None = None,
 ) -> NormalizedMediaMetadata:
     """Read a bounded adjacent sidecar produced by gallery-dl or yt-dlp."""
+    sidecar = read_media_sidecar(file_path)
+    return normalize_media_metadata(
+        sidecar if sidecar is not None else fallback_data,
+        fallback_title=fallback_title, fallback_author=fallback_author,
+    )
+
+
+def read_media_sidecar(file_path: str, *, root: Path | None = None) -> Mapping[str, Any] | None:
     for candidate in _sidecar_candidates(file_path):
         try:
+            if root is not None and not candidate.resolve().is_relative_to(root):
+                continue
             if not candidate.is_file() or candidate.stat().st_size > 5 * 1024 * 1024:
                 continue
             parsed = json.loads(candidate.read_text(encoding="utf-8"))
             if isinstance(parsed, Mapping):
-                return normalize_media_metadata(
-                    parsed, fallback_title=fallback_title, fallback_author=fallback_author,
-                )
-        except (OSError, UnicodeDecodeError, ValueError):
+                return parsed
+        except (OSError, UnicodeDecodeError, ValueError, RuntimeError):
             continue
-    return normalize_media_metadata(
-        fallback_data, fallback_title=fallback_title, fallback_author=fallback_author,
-    )
+    return None
 
 
 def _sidecar_candidates(file_path: str) -> tuple[Path, ...]:

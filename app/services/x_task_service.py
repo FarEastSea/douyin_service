@@ -5,8 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 import os
 import re
+from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Mapping, Optional
 
+from app.services.platform_metadata import read_media_sidecar
 from app.core.config import settings
 from app.models.models import XAuthor, XDownloadTask
 from app.models.schemas import XAuthorResponse, XDownloadTaskResponse
@@ -26,6 +29,23 @@ def build_x_source_download_dir(username: str, profile_url: str) -> str:
     if match:
         return os.path.join(settings.X_DOWNLOAD_DIR, username, "_single", match.group(1))
     return build_x_download_dir(username)
+
+
+def find_x_avatar(username: str, media_files: Iterable[str], download_dir: str) -> Optional[str]:
+    """Use only metadata for the subscribed account, including previously archived downloads."""
+    root = Path(download_dir).expanduser().resolve()
+    for media_file in media_files:
+        data = read_media_sidecar(media_file, root=root)
+        if not data:
+            continue
+        for key in ("user", "author"):
+            user = data.get(key)
+            if not isinstance(user, dict) or str(user.get("name", "")).casefold() != username.casefold():
+                continue
+            url = user.get("profile_image")
+            if isinstance(url, str) and url.startswith("https://pbs.twimg.com/"):
+                return url
+    return None
 
 
 def create_x_author(

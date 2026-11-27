@@ -20,6 +20,7 @@ from app.models.schemas import (
     XMediaAssetResponse,
 )
 from app.tasks.x_download_tasks import download_x_profile, check_x_subscriptions
+from app.services.avatar_cache import cached_platform_avatar
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.services.x_profile import parse_x_username, normalize_x_profile_url, resolve_x_input
 from app.services.x_task_service import (
@@ -29,6 +30,7 @@ from app.services.x_task_service import (
     create_x_work_download_task,
     serialize_x_author,
     serialize_x_task,
+    find_x_avatar,
     sync_x_author,
 )
 from app.core import redis_client
@@ -41,6 +43,28 @@ from app.services.unified_task_operations import (
 )
 
 router = APIRouter(prefix="/x", tags=["X/Twitter 下载"])
+
+
+@router.get("/authors/{author_id}/avatar")
+@media_cookie
+async def author_avatar(author_id: int, db: AsyncSession = Depends(get_async_db)):
+    author = await db.get(XAuthor, author_id)
+    if not author:
+        raise HTTPException(404, "作者不存在")
+    download_dir = await asyncio.to_thread(lambda: settings.X_DOWNLOAD_DIR)
+    source_url = author.avatar_url
+    if not source_url:
+        files = (await db.scalars(
+            select(XMediaAsset.file_path).where(XMediaAsset.x_author_id == author_id)
+            .order_by(XMediaAsset.id.desc()).limit(12)
+        )).all()
+        source_url = await asyncio.to_thread(find_x_avatar, author.username, files, download_dir)
+    cached = await asyncio.to_thread(
+        cached_platform_avatar, author.id, source_url, download_dir, "x",
+    )
+    if not cached:
+        raise HTTPException(404, "作者暂无可用头像")
+    return FileResponse(cached, headers={"Cache-Control": "private, no-cache"})
 
 
 @router.post("/download", response_model=XDownloadTaskResponse)

@@ -29,11 +29,11 @@ from app.models.models import (
     SubscriptionCheckReport,
     AuthorProfileHistory,
 )
+from app.services.avatar_cache import douyin_avatar_asset
 from app.services.downloader import (
     latest_video_url,
     payload_image_urls,
     payload_live_photo_urls,
-    prefer_avatar_url,
     _classify_author_account_status,
 )
 from app.core import redis_client
@@ -515,7 +515,7 @@ def sync_author_profile(author: Author, source: DouyinSource) -> dict:
         author.nickname = nickname
 
     if avatar_url and account_status == "active":
-        author.avatar_url = prefer_avatar_url(author.avatar_url, avatar_url)
+        author.avatar_url = source.updated_avatar_url(author.id, author.avatar_url, avatar_url)
         try:
             source.cache_author_avatar(author.id, author.avatar_url)
         except Exception as exc:
@@ -532,9 +532,10 @@ def sync_author_profile(author: Author, source: DouyinSource) -> dict:
     elif account_status == "active":
         author.last_error = None
 
+    avatar_changed = douyin_avatar_asset(old_avatar) != douyin_avatar_asset(author.avatar_url)
     changed = (
         (old_nickname != author.nickname)
-        or (old_avatar != author.avatar_url)
+        or avatar_changed
         or (old_share_url != author.share_url)
         or (old_last_error != author.last_error)
     )
@@ -544,13 +545,14 @@ def sync_author_profile(author: Author, source: DouyinSource) -> dict:
         "avatar_url": author.avatar_url,
         "old_nickname": old_nickname,
         "old_avatar_url": old_avatar,
+        "avatar_changed": avatar_changed,
         "account_status": account_status,
         "account_status_label": account_status_label,
         "account_status_detail": account_status_detail,
     }
 
 
-def record_author_profile_history(db: Session, author: Author, profile_result: dict) -> int:
+def record_author_profile_history(db: Session, author: Author, profile_result: dict, *, source: str = "profile_sync") -> int:
     """把本次真实发生的昵称/头像变化追加到历史，不覆盖旧记录。"""
     changes = 0
     pairs = (
@@ -558,10 +560,13 @@ def record_author_profile_history(db: Session, author: Author, profile_result: d
         ("avatar", profile_result.get("old_avatar_url"), author.avatar_url),
     )
     for field_name, old_value, new_value in pairs:
+        if field_name == "avatar" and not profile_result.get("avatar_changed", True):
+            continue
         if old_value and new_value and old_value != new_value:
             db.add(AuthorProfileHistory(
                 author_id=author.id,
                 field_name=field_name,
+                source=source,
                 old_value=old_value,
                 new_value=new_value,
             ))

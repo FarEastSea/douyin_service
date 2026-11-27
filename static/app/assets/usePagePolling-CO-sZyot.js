@@ -1,0 +1,1 @@
+import{On as e,P as t}from"./workspace-fxE8pc3l.js";function n(n,r){let i=t(),a=Date.now()+n;e(()=>i.pollTick,e=>{!i.authenticated||e<a&&e!==i.resumedAt||(a=e+n,r())})}export{n as t};

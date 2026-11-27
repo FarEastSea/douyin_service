@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SelectField from "./SelectField.vue";
+import DateField from "./DateField.vue";
 import { durationHint } from "../settings/duration";
 import { BellRing } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
@@ -55,18 +57,12 @@ const {
             <strong>界面主题</strong>
             <small>立即应用于当前浏览器</small>
           </span>
-          <select
-            :value="appearance.theme"
-            @change="
-              appearance.setTheme(
-                ($event.target as HTMLSelectElement).value as typeof appearance.theme,
-              )
-            "
-          >
-            <option value="auto">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
+          <SelectField
+            :model-value="appearance.theme"
+            aria-label="界面主题"
+            @update:model-value="appearance.setTheme($event)"
+            :options="{ auto: '跟随系统', light: '浅色', dark: '深色' }"
+          />
         </label>
       </div>
     </section>
@@ -174,20 +170,21 @@ const {
             <small>测试结果不会包含密钥或带 Token 的完整地址。</small>
           </span>
           <span class="setting-control inline-control">
-            <select
+            <SelectField
               v-model="notificationTestChannel"
               aria-label="通知测试渠道"
-            >
-              <option value="all">全部渠道</option>
-              <option value="webhook">Webhook</option>
-              <option value="bark">Bark</option>
-              <option value="email">邮件</option>
-              <option value="gotify">Gotify</option>
-              <option value="telegram">Telegram</option>
-              <option value="wecom">企业微信</option>
-              <option value="dingtalk">钉钉</option>
-              <option value="feishu">飞书</option>
-            </select>
+              :options="{
+                all: '全部渠道',
+                webhook: 'Webhook',
+                bark: 'Bark',
+                email: '邮件',
+                gotify: 'Gotify',
+                telegram: 'Telegram',
+                wecom: '企业微信',
+                dingtalk: '钉钉',
+                feishu: '飞书',
+              }"
+            />
             <button
               class="btn ghost"
               type="button"
@@ -344,15 +341,15 @@ const {
               <small>留空表示不限制。</small>
             </span>
             <span class="setting-control paired-control">
-              <input
+              <DateField
                 id="setting-published_from"
                 :aria-invalid="Boolean(fieldErrors.published_from) || undefined"
                 :aria-describedby="
                   fieldErrors.published_from ? 'setting-error-published_from' : undefined
                 "
-                @input="delete fieldErrors.published_from"
+                @change="delete fieldErrors.published_from"
                 v-model="archiveRules.published_from"
-                type="date"
+                :max="archiveRules.published_to || undefined"
                 aria-label="发布时间起"
               />
               <span
@@ -362,15 +359,15 @@ const {
               >
                 {{ fieldErrors.published_from }}
               </span>
-              <input
+              <DateField
                 id="setting-published_to"
                 :aria-invalid="Boolean(fieldErrors.published_to) || undefined"
                 :aria-describedby="
                   fieldErrors.published_to ? 'setting-error-published_to' : undefined
                 "
-                @input="delete fieldErrors.published_to"
+                @change="delete fieldErrors.published_to"
                 v-model="archiveRules.published_to"
-                type="date"
+                :min="archiveRules.published_from || undefined"
                 aria-label="发布时间止"
               />
               <span

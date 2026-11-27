@@ -68,9 +68,7 @@
     min-height: 56px;
     padding: env(safe-area-inset-top) 10px 0 var(--space-2);
     border-bottom: 1px solid var(--line);
-    background: color-mix(in srgb, var(--bg) 82%, transparent);
-    backdrop-filter: blur(16px) saturate(1.4);
-    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    background: var(--bg);
   }
   .workspace-brand {
     display: flex;
@@ -154,18 +152,16 @@
     position: fixed;
     left: 12px;
     right: 12px;
-    bottom: calc(12px + env(safe-area-inset-bottom));
+    bottom: calc(var(--viewport-bottom, 0px) + 12px + env(safe-area-inset-bottom));
     z-index: var(--z-dock);
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
     padding: var(--space-2);
     border-radius: var(--radius-lg);
     border: 1px solid var(--line-strong);
-    background: color-mix(in srgb, var(--raised) 86%, transparent);
+    background: var(--raised);
     box-shadow: var(--shadow-lg);
-    backdrop-filter: blur(16px) saturate(1.4);
-    -webkit-backdrop-filter: blur(16px) saturate(1.4);
   }
   .mobile-capture-dock .btn {
     height: 44px;
@@ -176,11 +172,11 @@
   .toast {
     left: 12px;
     right: 12px;
-    bottom: calc(12px + env(safe-area-inset-bottom));
+    bottom: calc(var(--viewport-bottom, 0px) + 12px + env(safe-area-inset-bottom));
     max-width: none;
   }
   .toast.above-capture-dock {
-    bottom: calc(88px + env(safe-area-inset-bottom));
+    bottom: calc(var(--viewport-bottom, 0px) + 88px + env(safe-area-inset-bottom));
   }
   h1 {
     font-size: 23px;
@@ -259,18 +255,48 @@
     transform: none;
   }
   .download-backdrop {
-    top: var(--capture-top, 0px);
-    bottom: auto;
-    height: var(--capture-height, 100dvh);
+    top: var(--viewport-top, 0px);
+    bottom: var(--viewport-bottom, 0px);
     align-items: flex-end;
     padding: 0;
   }
   .download-panel {
     width: 100%;
-    max-height: calc(var(--capture-height, 100dvh) - 12px);
+    max-height: calc(100% - 8px);
+    animation: none;
     border-radius: 22px 22px 0 0;
     border-bottom: 0;
     padding-bottom: env(safe-area-inset-bottom);
+  }
+  .command-backdrop,
+  .auth-overlay,
+  .dialog-backdrop {
+    top: var(--viewport-top, 0px);
+    bottom: var(--viewport-bottom, 0px);
+  }
+  .download-backdrop,
+  .command-backdrop,
+  .auth-overlay,
+  .dialog-backdrop {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .app-shell[inert] .mobile-capture-dock {
+    visibility: hidden;
+  }
+  .download-panel-body {
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+  .download-panel > header,
+  .download-panel > footer,
+  .capture-tabs {
+    flex-shrink: 0;
+  }
+  input:not([type="checkbox"], [type="radio"], [type="range"]),
+  .source-input textarea,
+  textarea {
+    font-size: max(16px, 1em);
   }
   .bootstrap-form fieldset {
     grid-template-columns: 1fr;

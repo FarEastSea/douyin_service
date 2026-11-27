@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SelectField from "../components/SelectField.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Plus, Search } from "@lucide/vue";
@@ -402,28 +403,26 @@ onBeforeUnmount(() => {
           />
         </label>
       </template>
-      <select
+      <SelectField
         v-model="subscribed"
         aria-label="订阅状态"
         @change="filters"
-      >
-        <option value="">全部订阅</option>
-        <option value="true">已订阅</option>
-        <option value="false">未订阅</option>
-      </select>
-      <select
+        :options="{ '': '全部订阅', true: '已订阅', false: '未订阅' }"
+      />
+      <SelectField
         v-if="!isX"
         v-model="account"
         aria-label="账号状态"
         @change="filters"
-      >
-        <option value="all">全部账号</option>
-        <option value="normal">正常</option>
-        <option value="abnormal">异常</option>
-        <option value="banned">封禁 / 禁言</option>
-        <option value="deleted">已销号</option>
-        <option value="restricted">不可访问</option>
-      </select>
+        :options="{
+          all: '全部账号',
+          normal: '正常',
+          abnormal: '异常',
+          banned: '封禁 / 禁言',
+          deleted: '已销号',
+          restricted: '不可访问',
+        }"
+      />
     </FilterToolbar>
     <StateView
       v-if="!authors.length"
@@ -459,6 +458,7 @@ onBeforeUnmount(() => {
                 <AuthorAvatar
                   :id="item.id"
                   :platform="props.platform"
+                  :name="name(item)"
                   :url="item.avatar_url"
                 />
                 <div>

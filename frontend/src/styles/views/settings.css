@@ -109,7 +109,7 @@
   min-width: 0;
 }
 .setting-control > input,
-.setting-control > select,
+.setting-control > .picker-trigger,
 .setting-control > textarea {
   width: 100%;
 }
@@ -119,7 +119,7 @@
   gap: var(--space-2);
   flex-wrap: wrap;
 }
-.setting-control.inline-control select {
+.setting-control.inline-control .picker-trigger {
   flex: 1;
 }
 .setting-control.paired-control {

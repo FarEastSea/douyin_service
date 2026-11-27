@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SelectField from "./SelectField.vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RotateCcw, Search } from "@lucide/vue";
 import { api, jsonBody } from "../api";
@@ -150,20 +151,12 @@ onBeforeUnmount(() => {
             @input="queueSearch"
           />
         </label>
-        <select
+        <SelectField
           v-model="platform"
           aria-label="筛选平台"
           @change="filters"
-        >
-          <option value="">全部平台</option>
-          <option
-            v-for="(label, key) in platformNames"
-            :key="key"
-            :value="key"
-          >
-            {{ label }}
-          </option>
-        </select>
+          :options="{ '': '全部平台', ...platformNames }"
+        />
         <button
           class="btn primary"
           :disabled="busy || !selected.length"

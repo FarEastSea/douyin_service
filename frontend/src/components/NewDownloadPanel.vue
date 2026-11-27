@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SelectField from "./SelectField.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
@@ -55,12 +56,6 @@ let sequence = 0,
   controller: AbortController | undefined;
 let pending: { source: string; promise: Promise<Detection | null> } | null = null;
 let origin: HTMLElement | null = null;
-const viewportHeight = ref(0),
-  viewportTop = ref(0);
-function updateViewport() {
-  viewportHeight.value = window.visualViewport?.height || window.innerHeight;
-  viewportTop.value = window.visualViewport?.offsetTop || 0;
-}
 const platformNames = usePlatformNames();
 const options = computed(() =>
   Object.entries(platformNames.value).map(([id, name]) => ({ id, name })),
@@ -111,6 +106,11 @@ function close() {
   if (!submitting.value) emit("close");
 }
 function keydown(event: KeyboardEvent) {
+  if (
+    event.defaultPrevented ||
+    (event.target instanceof Element && event.target.closest(".select-popup"))
+  )
+    return;
   if (event.key === "Escape") {
     event.preventDefault();
     close();
@@ -177,14 +177,14 @@ async function paste() {
   } finally {
     pasting.value = false;
     await nextTick();
-    field.value?.focus();
+    field.value?.focus({ preventScroll: true });
   }
 }
 async function submit() {
   if (submitting.value || pasting.value || disposed) return;
   const source = input.value.trim();
   if (!source) {
-    field.value?.focus();
+    field.value?.focus({ preventScroll: true });
     return;
   }
   submitting.value = true;
@@ -297,7 +297,7 @@ async function submit() {
   } finally {
     submitting.value = false;
     await nextTick();
-    field.value?.focus();
+    field.value?.focus({ preventScroll: true });
   }
 }
 function viewResult() {
@@ -315,15 +315,10 @@ onMounted(() => {
   origin = props.returnFocus || captureFocusOrigin();
   modalDepth.value++;
   document.addEventListener("keydown", keydown);
-  updateViewport();
-  window.visualViewport?.addEventListener("resize", updateViewport);
-  window.visualViewport?.addEventListener("scroll", updateViewport);
   void nextTick(() => focusFirst(panel.value, field.value));
 });
 onBeforeUnmount(() => {
   disposed = true;
-  window.visualViewport?.removeEventListener("resize", updateViewport);
-  window.visualViewport?.removeEventListener("scroll", updateViewport);
   invalidate();
   modalDepth.value--;
   document.removeEventListener("keydown", keydown);
@@ -334,14 +329,6 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="download-backdrop"
-    :style="
-      viewportHeight
-        ? {
-            '--capture-height': viewportHeight + 'px',
-            '--capture-top': viewportTop + 'px',
-          }
-        : undefined
-    "
     @click.self="close"
   >
     <form
@@ -486,22 +473,22 @@ onBeforeUnmount(() => {
           class="download-platform-choice"
         >
           <label for="download-platform">平台</label>
-          <select
+          <SelectField
             id="download-platform"
             v-model="manualPlatform"
             :disabled="submitting"
-          >
-            <option value="">自动识别</option>
-            <option
-              v-for="item in options.filter(
-                (item) => mode !== 'subscribe' || ['douyin', 'x', 'instagram'].includes(item.id),
-              )"
-              :key="item.id"
-              :value="item.id"
-            >
-              {{ item.name }}
-            </option>
-          </select>
+            :options="{
+              '': '自动识别',
+              ...Object.fromEntries(
+                options
+                  .filter(
+                    (item) =>
+                      mode !== 'subscribe' || ['douyin', 'x', 'instagram'].includes(item.id),
+                  )
+                  .map((item) => [item.id, item.name]),
+              ),
+            }"
+          />
         </div>
         <fieldset
           v-if="mode === 'subscribe' && resolvedPlatform === 'instagram' && !blocked"

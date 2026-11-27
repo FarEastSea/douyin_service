@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SelectField from "../components/SelectField.vue";
 import { usePagePolling } from "../composables/usePagePolling";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -546,15 +547,12 @@ onBeforeUnmount(() => {
           />
         </label>
       </template>
-      <select
+      <SelectField
         v-model="subscribed"
         aria-label="订阅状态"
         @change="filters"
-      >
-        <option value="">全部订阅</option>
-        <option value="true">已订阅</option>
-        <option value="false">已暂停</option>
-      </select>
+        :options="{ '': '全部订阅', true: '已订阅', false: '已暂停' }"
+      />
     </FilterToolbar>
     <div
       v-if="selectedIds.length"
@@ -634,6 +632,7 @@ onBeforeUnmount(() => {
                 <AuthorAvatar
                   :id="author.id"
                   platform="instagram"
+                  :name="name(author)"
                   :url="author.avatar_url"
                 />
                 <div>

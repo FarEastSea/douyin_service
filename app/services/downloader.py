@@ -189,7 +189,7 @@ def _extract_best_avatar_url(author: Dict[str, Any]) -> Optional[str]:
 
 
 def prefer_avatar_url(current_url: Optional[str], candidate_url: Optional[str]) -> Optional[str]:
-    """Keep an unchanged avatar URL unless the new candidate is detectably sharper."""
+    """Prefer fresh CDN signatures for the same asset and resolution."""
     current = _normalize_optional_text(current_url)
     candidate = _normalize_optional_text(candidate_url)
     if not candidate:
@@ -200,7 +200,7 @@ def prefer_avatar_url(current_url: Optional[str], candidate_url: Optional[str]) 
     current_parts = urlsplit(current)
     candidate_parts = urlsplit(candidate)
     same_asset = current_parts.path == candidate_parts.path
-    if same_asset and _avatar_resolution_score(candidate) <= _avatar_resolution_score(current):
+    if same_asset and _avatar_resolution_score(candidate) < _avatar_resolution_score(current):
         return current
     return candidate
 

@@ -5,13 +5,17 @@ from hashlib import sha256
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.avatar_cache import cached_platform_avatar
+from app.core.security import media_cookie
 from app.core.config import settings
 from app.models.database import get_async_db, get_sync_db
 from app.models.models import (
+    InstagramAccountState,
     InstagramCollection,
     InstagramCollectionItem,
     PlatformAuthor,
@@ -25,6 +29,7 @@ from app.services.instagram_jobs import options_for
 from app.services.instagram_runtime import (
     connection,
     normalize_cookie,
+    proxy_from_account_state,
     readiness,
     set_proxy,
     utcnow,
@@ -351,6 +356,19 @@ def author_by_id(db, author_id):
     if not author or author.platform != "instagram":
         raise HTTPException(404, "Instagram 作者不存在")
     return author
+
+
+@router.get("/authors/{author_id}/avatar")
+@media_cookie
+def author_avatar(author_id: int, db=Depends(session)):
+    author = author_by_id(db, author_id)
+    cached = cached_platform_avatar(
+        author.id, author.avatar_url, settings.INSTAGRAM_DOWNLOAD_DIR,
+        "instagram", proxy_from_account_state(db.get(InstagramAccountState, 1)),
+    )
+    if not cached:
+        raise HTTPException(404, "作者暂无可用头像")
+    return FileResponse(cached, headers={"Cache-Control": "private, no-cache"})
 
 
 @router.post("/authors/batch")

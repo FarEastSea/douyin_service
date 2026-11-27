@@ -45,7 +45,7 @@ export function focusFirst(
     preferred && container?.contains(preferred)
       ? preferred
       : focusableElements(container)[0] || container;
-  target?.focus();
+  target?.focus({ preventScroll: true });
 }
 
 export function trapFocus(event: KeyboardEvent, container: HTMLElement | null) {
@@ -71,7 +71,7 @@ export function trapFocus(event: KeyboardEvent, container: HTMLElement | null) {
 }
 
 export function restoreFocus(target: HTMLElement | null | undefined) {
-  if (target?.isConnected && !target.closest("[inert]")) target.focus();
+  if (target?.isConnected && !target.closest("[inert]")) target.focus({ preventScroll: true });
   else {
     const fallback = document.getElementById("main-content");
     if (fallback && !fallback.closest("[inert]")) fallback.focus();

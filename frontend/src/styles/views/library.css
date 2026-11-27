@@ -165,7 +165,7 @@
   font-size: 12.5px;
   white-space: nowrap;
 }
-.date-filter input[aria-invalid="true"] {
+.picker-trigger[aria-invalid="true"] {
   border-color: var(--danger-line);
 }
 @media (hover: hover) and (pointer: fine) {

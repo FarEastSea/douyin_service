@@ -1,1 +1,0 @@
-import{P as e,yt as t}from"./workspace-BnP7hXiw.js";function n(n,r){let i=e(),a=Date.now()+n;t(()=>i.pollTick,e=>{!i.authenticated||e<a&&e!==i.resumedAt||(a=e+n,r())})}export{n as t};

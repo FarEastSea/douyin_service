@@ -27,7 +27,7 @@ from app.models.schemas import (
     AuthorCreate, AuthorUpdate, AuthorResponse, WorkResponse, WorkFileItem, MessageResponse,
     PaginatedAuthorsResponse, PaginatedWorksResponse
 )
-from app.services.downloader import author_profile_has_identity, prefer_avatar_url
+from app.services.downloader import author_profile_has_identity
 from app.services.avatar_cache import find_cached_author_avatar
 from app.services.douyin_source import build_author_profile_url, build_douyin_source
 from app.tasks.download_tasks import (
@@ -38,6 +38,7 @@ from app.tasks.download_tasks import (
     check_subscriptions,
     download_author_works,
     sync_author_profile,
+    record_author_profile_history,
 )
 
 # 账号状态筛选支持的取值：abnormal=仅异常, normal=仅正常, 或具体状态码
@@ -306,7 +307,7 @@ async def add_author(
                 existing.nickname = latest_nickname
             latest_avatar_url = author_info.get("avatar_url")
             if latest_avatar_url:
-                existing.avatar_url = prefer_avatar_url(existing.avatar_url, latest_avatar_url)
+                existing.avatar_url = await asyncio.to_thread(source.updated_avatar_url, existing.id, existing.avatar_url, latest_avatar_url)
             _apply_author_profile_status(existing, author_info)
             await db.commit()
             await db.refresh(existing)
@@ -612,18 +613,7 @@ async def sync_author_avatar(author_id: int, db: AsyncSession = Depends(get_asyn
             return sync_author_profile(author, source)
 
         profile_result = await asyncio.to_thread(_sync)
-        for field_name, old_value, new_value in (
-            ("nickname", profile_result.get("old_nickname"), author.nickname),
-            ("avatar", profile_result.get("old_avatar_url"), author.avatar_url),
-        ):
-            if old_value and new_value and old_value != new_value:
-                db.add(AuthorProfileHistory(
-                    author_id=author.id,
-                    field_name=field_name,
-                    old_value=old_value,
-                    new_value=new_value,
-                    source="manual_sync",
-                ))
+        record_author_profile_history(db.sync_session, author, profile_result, source="manual_sync")
         await db.commit()
         await db.refresh(author)
         return author

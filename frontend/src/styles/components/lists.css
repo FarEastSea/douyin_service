@@ -99,13 +99,18 @@
   display: grid;
   place-items: center;
   width: 36px;
-  height: var(--control-height);
+  aspect-ratio: 1;
   border-radius: 50%;
   overflow: hidden;
   flex-shrink: 0;
   background: var(--surface-3);
   color: var(--text-3);
   box-shadow: 0 0 0 1px var(--line-strong);
+}
+.author-cell .avatar-initial {
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 650;
 }
 .avatar img {
   position: absolute;

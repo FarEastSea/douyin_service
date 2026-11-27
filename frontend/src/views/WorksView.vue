@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SelectField from "../components/SelectField.vue";
+import DateField from "../components/DateField.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusIndicator from "../components/StatusIndicator.vue";
 import StateView from "../components/StateView.vue";
@@ -485,61 +487,60 @@ onBeforeUnmount(() => {
       </template>
       <label class="work-sort">
         <span>状态</span>
-        <select
+        <SelectField
           v-model="filter"
           aria-label="下载状态"
           @change="changeFilters"
-        >
-          <option value="all">全部状态</option>
-          <option value="completed">已下载</option>
-          <option value="incomplete">未完成</option>
-          <option value="active">处理中</option>
-          <option value="failed">失败/取消</option>
-          <option value="not_started">未创建任务</option>
-        </select>
+          :options="{
+            all: '全部状态',
+            completed: '已下载',
+            incomplete: '未完成',
+            active: '处理中',
+            failed: '失败/取消',
+            not_started: '未创建任务',
+          }"
+        />
       </label>
       <label class="work-sort">
         <span>类型</span>
-        <select
+        <SelectField
           v-model="workType"
           aria-label="作品类型"
           @change="changeFilters"
-        >
-          <option value="all">全部类型</option>
-          <option value="video">视频</option>
-          <option value="images">图集</option>
-        </select>
+          :options="{ all: '全部类型', video: '视频', images: '图集' }"
+        />
       </label>
       <label class="work-sort work-date">
         <span>从</span>
-        <input
+        <DateField
           v-model="publishedFrom"
-          type="date"
+          :max="publishedTo || undefined"
           aria-label="发布日期起始"
           @change="changeFilters"
         />
       </label>
       <label class="work-sort work-date">
         <span>至</span>
-        <input
+        <DateField
           v-model="publishedTo"
-          type="date"
+          :min="publishedFrom || undefined"
           aria-label="发布日期结束"
           @change="changeFilters"
         />
       </label>
       <label class="work-sort">
         <span>排序</span>
-        <select
+        <SelectField
           v-model="sort"
           aria-label="作品排序方式"
           @change="changeSort"
-        >
-          <option value="published_desc">作品时间：最新</option>
-          <option value="published_asc">作品时间：最早</option>
-          <option value="discovered_desc">收录时间：最新</option>
-          <option value="discovered_asc">收录时间：最早</option>
-        </select>
+          :options="{
+            published_desc: '作品时间：最新',
+            published_asc: '作品时间：最早',
+            discovered_desc: '收录时间：最新',
+            discovered_asc: '收录时间：最早',
+          }"
+        />
       </label>
     </FilterToolbar>
     <div

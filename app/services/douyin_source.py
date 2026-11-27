@@ -11,10 +11,10 @@ import time
 from typing import Any, Iterable, Literal, Protocol, TypedDict
 from urllib.parse import quote, unquote
 
-from app.services.avatar_cache import ensure_author_avatar_cached
+from app.services.avatar_cache import ensure_author_avatar_cached, find_cached_author_avatar, douyin_avatar_asset
 from app.services.work_cover_cache import ensure_work_cover_cached
 from app.services.douyin_cookie import require_douyin_uifid
-from app.services.downloader import DouyinDownloader
+from app.services.downloader import DouyinDownloader, prefer_avatar_url
 from app.core.request_budget import DouyinScanDeadlineExceeded, budget_sleep
 
 
@@ -77,6 +77,8 @@ class DouyinSource(Protocol):
     def fetch_work(self, canonical_url: str) -> dict[str, Any]: ...
     def refresh_assets(self, aweme_id: str) -> dict[str, Any]: ...
     def health_check(self) -> DouyinSourceHealth: ...
+    def updated_avatar_url(self, author_id: int, current: str | None, candidate: str | None) -> str | None: ...
+
     def cache_author_avatar(self, author_id: int, source_url: str | None): ...
     def cache_work_cover(self, work_id: int, source_url: str | None): ...
     def scan_all_works(
@@ -161,6 +163,12 @@ class DouyinWebAdapter:
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
         return {"ok": True, "reason": None}
+
+    def updated_avatar_url(self, author_id: int, current: str | None, candidate: str | None) -> str | None:
+        selected = prefer_avatar_url(current, candidate)
+        if current and selected != current and douyin_avatar_asset(current) == douyin_avatar_asset(selected):
+            find_cached_author_avatar(author_id, self._downloader.filepath, current)
+        return selected
 
     def cache_author_avatar(self, author_id: int, source_url: str | None):
         return ensure_author_avatar_cached(

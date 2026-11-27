@@ -29,6 +29,7 @@ from app.services.x_task_service import (
     create_x_download_task,
     finalize_x_task,
     mark_x_task_running,
+    find_x_avatar,
     sync_x_author,
     update_x_task_runtime,
     build_x_source_download_dir,
@@ -227,7 +228,8 @@ def download_x_profile(self, task_id: int):
                     )
                 ).scalar() or 0)
                 author.last_check_time = datetime.now()
-                sync_x_author(author, profile_url=task.profile_url)
+                avatar_url = find_x_avatar(task.username, reversed(result.files[-12:]), x_download_root)
+                sync_x_author(author, profile_url=task.profile_url, avatar_url=avatar_url)
         else:
             logger.error(f"X 任务 {task_id} 失败: {task.error_message}")
             if author:

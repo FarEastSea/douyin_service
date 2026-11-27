@@ -27,9 +27,9 @@ import {
 } from "@lucide/vue";
 import { api, ApiError, saveToken, getToken } from "./api";
 import MediaLightbox from "./components/MediaLightbox.vue";
+import { useMobileViewport } from "./composables/useMobileViewport";
 import NewDownloadPanel from "./components/NewDownloadPanel.vue";
 import CommandPalette from "./components/CommandPalette.vue";
-import MoreActions from "./components/MoreActions.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import { modalDepth, inspectorDepth } from "./workspace";
 import { settingsNavigation, maintenanceNavigation, sectionPath } from "./settings-registry";
@@ -281,6 +281,7 @@ function credentialsChanged(event: StorageEvent) {
       });
   }
 }
+useMobileViewport();
 function updateMobileViewport(event: MediaQueryListEvent | MediaQueryList) {
   mobileViewport.value = event.matches;
   if (!event.matches) store.sidebarOpen = false;
@@ -638,12 +639,14 @@ onBeforeUnmount(() => {
         <Download :size="18" />
         下载作品
       </button>
-      <MoreActions label="快捷添加">
-        <button @click="openSubscription">
-          <Users :size="18" />
-          订阅作者
-        </button>
-      </MoreActions>
+      <button
+        type="button"
+        class="btn ghost"
+        @click="openSubscription"
+      >
+        <Users :size="18" />
+        订阅作者
+      </button>
     </nav>
 
     <Teleport to="body">

@@ -58,10 +58,10 @@ def upsert_author(db, user):
     author.nickname = str(user.get("full_name") or author.nickname or username)[:255]
     if "biography" in user:
         author.description = str(user.get("biography") or "")[:4000]
-    if user.get("profile_pic_url_hd") or user.get("profile_pic_url"):
-        author.avatar_url = user.get("profile_pic_url_hd") or user.get(
-            "profile_pic_url"
-        )
+    hd_picture = user.get("hd_profile_pic_url_info")
+    picture = (hd_picture.get("url") if isinstance(hd_picture, dict) else None) or user.get("profile_pic_url_hd") or user.get("profile_pic_url")
+    if isinstance(picture, str) and picture:
+        author.avatar_url = picture
     author.account_status, author.last_error = "active", None
     db.flush()
     return author

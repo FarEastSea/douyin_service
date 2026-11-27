@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SelectField from "../components/SelectField.vue";
 import { usePagePolling } from "../composables/usePagePolling";
 import MediaThumbnail from "../components/MediaThumbnail.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -794,42 +795,27 @@ watch(
           />
         </label>
       </template>
-      <select
+      <SelectField
         v-model="platform"
         aria-label="平台"
         @change="resetAndLoad"
-      >
-        <option value="">全部平台</option>
-        <option
-          v-for="(name, id) in platformNames"
-          :key="id"
-          :value="id"
-        >
-          {{ name }}
-        </option>
-      </select>
-      <select
+        :options="{ '': '全部平台', ...platformNames }"
+      />
+      <SelectField
         v-model="status"
         aria-label="任务状态"
         @change="resetAndLoad"
-      >
-        <option value="">全部状态</option>
-        <option
-          v-for="item in statusOrder"
-          :key="item"
-          :value="item"
-        >
-          {{ statusNames[item] }}
-        </option>
-      </select>
-      <select
+        :options="{
+          '': '全部状态',
+          ...Object.fromEntries(statusOrder.map((id) => [id, statusNames[id]])),
+        }"
+      />
+      <SelectField
         v-model="sort"
         aria-label="任务排序"
         @change="resetAndLoad"
-      >
-        <option value="created_desc">最新创建</option>
-        <option value="created_asc">最早创建</option>
-      </select>
+        :options="{ created_desc: '最新创建', created_asc: '最早创建' }"
+      />
     </FilterToolbar>
     <div
       v-if="selectedKeys.length"

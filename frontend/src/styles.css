@@ -2,6 +2,7 @@
 @import "./styles/base.css";
 @import "./styles/shell.css";
 @import "./styles/components/controls.css";
+@import "./styles/components/pickers.css";
 @import "./styles/components/feedback.css";
 @import "./styles/components/media.css";
 @import "./styles/components/lists.css";
