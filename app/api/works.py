@@ -18,7 +18,7 @@ import asyncio
 
 from app.models.database import get_async_db
 from app.core.security import media_cookie
-from app.models.models import Work, WorkStatsSnapshot, DownloadTask
+from app.models.models import Author, Work, WorkStatsSnapshot, DownloadTask
 from app.models.schemas import MessageResponse, WorkStatsSnapshotResponse
 from app.services import work_manager
 from app.services.download_task_factory import ensure_download_task_async
@@ -225,7 +225,6 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
         needed_indices = list(range(count)) if count > 0 else [0]
 
     dispatch_ids: List[int] = []
-    clear_progress_ids: List[int] = []
     for idx in needed_indices:
         task, action = await ensure_download_task_async(
             db, work.id, idx, archive_rule_snapshot=archive_snapshot,
@@ -236,10 +235,7 @@ async def redownload_work(work_id: int, db: AsyncSession = Depends(get_async_db)
 
     if dispatch_ids:
         work.is_downloaded = False
-    await work_manager.recalc_author_counts(db, work.author)
-
-    if clear_progress_ids:
-        await asyncio.to_thread(_clear_task_progress, clear_progress_ids)
+    await work_manager.recalc_author_counts(db, await db.get(Author, work.author_id))
     await db.commit()
 
     await asyncio.to_thread(_dispatch_download_tasks, dispatch_ids)
@@ -269,7 +265,7 @@ async def retry_work_failed(work_id: int, db: AsyncSession = Depends(get_async_d
         from app.services.download_lifecycle import prepare_download_retry
         prepare_download_retry(task)
     await work_manager.refresh_work_download_state(db, work)
-    await work_manager.recalc_author_counts(db, work.author)
+    await work_manager.recalc_author_counts(db, await db.get(Author, work.author_id))
 
     await db.commit()
 

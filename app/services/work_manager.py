@@ -233,15 +233,7 @@ async def delete_work_file(db: AsyncSession, work: Work, file_index: int) -> dic
     excluded.add(int(file_index))
     work.excluded_file_indices = sorted(excluded)
 
-    # 若该作品已无任何已完成文件，则同步取消 is_downloaded
-    remaining_completed = await db.execute(
-        select(func.count(DownloadTask.id)).where(
-            DownloadTask.work_id == work.id,
-            DownloadTask.status == "completed",
-        )
-    )
-    if int(remaining_completed.scalar() or 0) == 0:
-        work.is_downloaded = False
+    await refresh_work_download_state(db, work)
 
     author = None
     if work.author_id:

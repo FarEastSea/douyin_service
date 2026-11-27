@@ -297,11 +297,6 @@ class WebSettings:
             for key, value in env_config.read_env_file().items()
             if str(value).strip()
         }
-        # 首次升级兼容：将旧抖音完整目录拆成统一根目录和子目录。
-        if "DOWNLOAD_ROOT" not in values and values.get("DOWNLOAD_DIR"):
-            legacy = Path(values["DOWNLOAD_DIR"]).expanduser()
-            values["DOWNLOAD_ROOT"] = str(legacy.parent)
-            values["DOUYIN_DOWNLOAD_SUBDIR"] = legacy.name
         current = self._validated_settings(values)
 
         with self._lock:

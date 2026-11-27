@@ -1,5 +1,6 @@
 """下载目录变更时的媒体记录路径迁移与兼容解析。"""
 
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -23,45 +24,59 @@ def _resolved_path(value: str) -> Path:
     return Path(str(value).replace("\\", "/")).expanduser().resolve(strict=False)
 
 
+def _stat_if_present(path: Path):
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+
+
 def _rebase_path_result(
     value: Optional[str],
     old_root: str,
     new_root: str,
+    *,
+    directory: bool | None = False,
+    drop_missing: bool = False,
 ) -> tuple[Optional[str], bool]:
     """返回迁移后路径，以及该非空路径是否未能重定位。"""
     if not value or not old_root or not new_root or old_root == new_root:
         return value, False
     try:
-        source = _resolved_path(value)
         old = _resolved_path(old_root)
         target_root = _resolved_path(new_root)
+        stored = str(value).replace("\\", "/")
+        path = Path(stored).expanduser()
+        if path.is_absolute() and not path.resolve().is_relative_to(old):
+            source = candidate = path
+        else:
+            source = resolve_media_path(stored, str(old))
+            candidate = target_root / source.relative_to(old)
+        resolved = candidate.resolve()
+        if candidate.is_symlink() or not resolved.is_relative_to(target_root):
+            return value, True
+        target_stat = _stat_if_present(candidate)
+        source_stat = _stat_if_present(source)
+        if target_stat is None:
+            if drop_missing and source_stat is None:
+                return None, False
+            return value, True
+        is_dir = stat.S_ISDIR(target_stat.st_mode)
+        if not (is_dir or stat.S_ISREG(target_stat.st_mode)) or (directory is not None and directory != is_dir):
+            return value, True
+        if source_stat and (
+            stat.S_IFMT(source_stat.st_mode) != stat.S_IFMT(target_stat.st_mode)
+            or (not is_dir and source_stat.st_size != target_stat.st_size)
+        ):
+            return value, True
+        return str(resolved), False
     except (OSError, RuntimeError, ValueError):
-        return value, True
-
-    try:
-        relative = source.relative_to(old)
-        candidate = target_root / relative
-        if candidate.is_symlink() or not candidate.exists():
-            return value, True
-        if source.is_file() and (not candidate.is_file() or source.stat().st_size != candidate.stat().st_size):
-            return value, True
-        return str(candidate), False
-    except ValueError:
-        # 已位于新目录时只规范化路径，不重复拼接。
-        try:
-            source.relative_to(target_root)
-            return (str(source), False) if source.exists() else (value, True)
-        except ValueError:
-            pass
-
-        # 兼容网页目录已先行变更、旧根目录信息已经丢失的记录。
-        # 不猜测仅名称相同的文件就是原媒体；修复必须保持明确的相对路径。
         return value, True
 
 
 def rebase_path(value: Optional[str], old_root: str, new_root: str) -> Optional[str]:
     """保留相对结构，将旧下载根目录替换为新根目录。"""
-    return _rebase_path_result(value, old_root, new_root)[0]
+    return _rebase_path_result(value, old_root, new_root, directory=None)[0]
 
 
 async def migrate_download_paths(
@@ -132,7 +147,7 @@ async def migrate_download_paths(
                 break
             for task in platform_tasks:
                 download_dir, path_unresolved = _rebase_path_result(
-                    task.download_dir, old_root, new_root
+                    task.download_dir, old_root, new_root, directory=True,
                 )
                 if path_unresolved:
                     unresolved["platform_tasks"] += 1
@@ -198,7 +213,9 @@ async def migrate_download_paths(
         if not x_tasks:
             break
         for task in x_tasks:
-            download_dir, path_unresolved = _rebase_path_result(task.download_dir, old_x_download_dir, new_x_download_dir)
+            download_dir, path_unresolved = _rebase_path_result(
+                task.download_dir, old_x_download_dir, new_x_download_dir, directory=True,
+            )
             if path_unresolved:
                 unresolved["x_tasks"] += 1
             if download_dir != task.download_dir:
@@ -247,9 +264,10 @@ async def migrate_download_paths(
             old_root, new_root = roots.get(orphan.platform, (None, None))
             if not old_root or old_root == new_root:
                 continue
-            file_path, path_unresolved = _rebase_path_result(orphan.file_path, old_root, new_root)
-            if path_unresolved and not _resolved_path(orphan.file_path).exists():
-                # 无索引媒体没有任务可补回；文件在新旧目录都已不存在时移除这条失效登记，不阻止目录切换。
+            file_path, path_unresolved = _rebase_path_result(
+                orphan.file_path, old_root, new_root, drop_missing=True,
+            )
+            if file_path is None and not path_unresolved:
                 await db.delete(orphan)
                 changed["orphan_media"] += 1
                 continue

@@ -21,6 +21,7 @@ from app.models.schemas import (
 )
 from app.tasks.x_download_tasks import download_x_profile, check_x_subscriptions
 from app.services.avatar_cache import cached_platform_avatar
+from app.services.media_paths import resolve_media_path
 from app.services.x_cookie_manager import X_COOKIE_CONFIG_KEY
 from app.services.x_profile import parse_x_username, normalize_x_profile_url, resolve_x_input
 from app.services.x_task_service import (
@@ -230,12 +231,9 @@ async def list_x_task_media(
 
 
 def _safe_x_media_path(asset: XMediaAsset):
-    from pathlib import Path
-    path = Path(asset.file_path).expanduser().resolve()
-    root = Path(settings.X_DOWNLOAD_DIR).expanduser().resolve()
     try:
-        path.relative_to(root)
-    except ValueError:
+        path = resolve_media_path(asset.file_path, settings.X_DOWNLOAD_DIR)
+    except (ValueError, RuntimeError):
         raise HTTPException(status_code=403, detail="资源路径不在当前 X 下载目录内")
     if not path.is_file():
         raise HTTPException(status_code=404, detail="资源文件不存在")

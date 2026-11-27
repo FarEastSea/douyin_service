@@ -374,12 +374,23 @@ def check_download_directory(values: Dict[str, str]) -> Optional[Dict[str, str]]
     }
 
 
+def _with_legacy_download_layout(values: Dict[str, str]) -> Dict[str, str]:
+    if not values.get("DOWNLOAD_ROOT") and values.get("DOWNLOAD_DIR"):
+        legacy = Path(values["DOWNLOAD_DIR"]).expanduser()
+        return {
+            **values,
+            "DOWNLOAD_ROOT": str(legacy.parent),
+            "DOUYIN_DOWNLOAD_SUBDIR": values.get("DOUYIN_DOWNLOAD_SUBDIR") or legacy.name,
+        }
+    return values
+
+
 def read_env_file(*, raw: bool = False) -> Dict[str, str]:
     if not raw:
         from app.core.config_transaction import pending_values
         pending = pending_values()
         if pending is not None:
-            return pending
+            return _with_legacy_download_layout(pending)
     values: Dict[str, str] = {}
     if not ENV_PATH.exists():
         return values
@@ -389,7 +400,7 @@ def read_env_file(*, raw: bool = False) -> Dict[str, str]:
             continue
         key, value = stripped.split("=", 1)
         values[key.strip()] = _decode_env_value(value)
-    return values
+    return values if raw else _with_legacy_download_layout(values)
 
 
 def _decode_env_value(value: str) -> str:
@@ -464,6 +475,10 @@ def write_env_updates(updates: Dict[str, Any], *, coordinated: bool = False) -> 
             notify_config_changed()
             return result
     current = read_env_file(raw=True)
+    if "DOWNLOAD_ROOT" in updates and not current.get("DOWNLOAD_ROOT") and current.get("DOWNLOAD_DIR"):
+        # 显式根目录生效后不再读取旧完整路径，同时持久化原先从它推导的子目录。
+        legacy_subdir = _with_legacy_download_layout(current)["DOUYIN_DOWNLOAD_SUBDIR"]
+        updates = {"DOUYIN_DOWNLOAD_SUBDIR": legacy_subdir, **updates}
     version_client = None
     try:
         from app.core import redis_client as redis_runtime

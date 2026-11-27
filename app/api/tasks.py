@@ -589,9 +589,6 @@ async def preview_task_video(
             task.file_path,
             current_settings.DOWNLOAD_DIR,
         )
-        if str(file_path) != task.file_path:
-            task.file_path = str(file_path)
-            await db.commit()
     except ValueError:
         raise HTTPException(status_code=403, detail="文件不在下载目录内")
 

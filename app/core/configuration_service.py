@@ -133,7 +133,11 @@ async def _save_configuration(db: AsyncSession, values: dict, *, preview: bool =
         except ValueError as exc:
             raise field_error(key, str(exc)) from exc
     from app.core.env_config import _check_database, _check_redis
-    connection_values = {**(await asyncio.to_thread(settings.snapshot)).model_dump(), **updates}
+    for key in path_keys.intersection(updates):
+        if isinstance(updates[key], str):
+            updates[key] = updates[key].strip()
+    active_settings = await asyncio.to_thread(settings.snapshot)
+    connection_values = {**active_settings.model_dump(), **updates}
     if {"INSTAGRAM_REQUEST_DELAY_MIN", "INSTAGRAM_REQUEST_DELAY_MAX"} & set(updates):
         try:
             if float(connection_values["INSTAGRAM_REQUEST_DELAY_MAX"]) < float(connection_values["INSTAGRAM_REQUEST_DELAY_MIN"]):
@@ -142,7 +146,7 @@ async def _save_configuration(db: AsyncSession, values: dict, *, preview: bool =
             raise field_error("INSTAGRAM_REQUEST_DELAY_MAX", "请求间隔必须是有效数字") from None
     from app.core.config import Settings
     try:
-        Settings.model_validate(connection_values)
+        candidate = Settings.model_validate(connection_values)
     except ValidationError as exc:
         errors = {str(item["loc"][0]): "配置格式不正确，请检查输入值" for item in exc.errors()}
         raise HTTPException(status_code=400, detail={"message": "部分配置格式不正确", "field_errors": errors}) from exc
@@ -211,21 +215,12 @@ async def _save_configuration(db: AsyncSession, values: dict, *, preview: bool =
             if key not in runtime_by_env
             and key not in {"DOUYIN_COOKIE", *GENERIC_PLATFORM_COOKIE_KEYS}
         }
-        legacy_douyin = current.get("DOWNLOAD_DIR")
-        old_root = current.get("DOWNLOAD_ROOT") or (str(Path(legacy_douyin).parent) if legacy_douyin else "/downloads")
-        old_douyin = legacy_douyin or str(Path(old_root) / current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))
-        old_x = current.get("X_DOWNLOAD_DIR") or str(Path(old_root) / current.get("X_DOWNLOAD_SUBDIR", "X"))
-        new_root = str(updates.get("DOWNLOAD_ROOT", old_root))
-        new_douyin = str(Path(new_root) / str(updates.get("DOUYIN_DOWNLOAD_SUBDIR", current.get("DOUYIN_DOWNLOAD_SUBDIR", "douyin"))))
-        new_x = str(Path(new_root) / str(updates.get("X_DOWNLOAD_SUBDIR", current.get("X_DOWNLOAD_SUBDIR", "X"))))
+        old_douyin, new_douyin = active_settings.DOWNLOAD_DIR, candidate.DOWNLOAD_DIR
+        old_x, new_x = active_settings.X_DOWNLOAD_DIR, candidate.X_DOWNLOAD_DIR
         platform_download_dirs = {
-            platform: (
-                str(Path(old_root) / current.get(subdir_key, default_subdir)),
-                str(Path(new_root) / str(updates.get(
-                    subdir_key, current.get(subdir_key, default_subdir)
-                ))),
-            )
-            for platform, (subdir_key, default_subdir, _) in GENERIC_PLATFORM_CONFIG.items()
+            platform: (getattr(active_settings, f"{platform.upper()}_DOWNLOAD_DIR"),
+                       getattr(candidate, f"{platform.upper()}_DOWNLOAD_DIR"))
+            for platform in GENERIC_PLATFORM_CONFIG
         }
         path_changes = {
             "tasks": 0,
